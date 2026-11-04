@@ -391,13 +391,12 @@ class MusicContentLayoutMixin:
         """
         lines, timed = self._display_lyrics()
         track = self._visual_track_identity()
-        changed_track = track != self._no_lyrics_layout_track
         self._no_lyrics_layout_track = track
         state = self._lyric_content_state(now, lines, timed)
         if state == "loading":
-            if changed_track and self._no_lyrics_layout_active:
-                # A previous song's terminal miss says nothing about this
-                # lookup. Restore its lyric column without saving a choice.
+            if self._no_lyrics_layout_active:
+                # A terminal miss says nothing about an explicitly reopened
+                # lookup, even on this song. Restore without saving a choice.
                 target = "playlist" if self._no_lyrics_manual_layout == "playlist" else self._content_layout
                 self._no_lyrics_layout_active = False
                 self._no_lyrics_manual_layout = None

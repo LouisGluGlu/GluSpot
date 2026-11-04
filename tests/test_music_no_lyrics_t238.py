@@ -68,6 +68,30 @@ class NoLyricsLayoutStateTests(unittest.TestCase):
         self.assertEqual(self.window._effective_content_layout(), "lyrics")
         self.assertEqual(self.saved, {})
 
+    def test_same_track_explicit_loading_reopens_lyric_column_without_settings_write(self):
+        self.publish("暂无歌词", identity="same-song", now=100.)
+        self.assertEqual(self.window._effective_content_layout(), "cover")
+        self.assertTrue(self.window._no_lyrics_layout_active)
+        saved = dict(self.saved)
+        self.publish("查找歌词中", identity="same-song", now=101.)
+        self.window._update_lyric_loading_state(103.)
+        self.window._sync_no_lyrics_content_layout(103.)
+        self.assertEqual(self.window._lyric_loading_track_key, "same-song")
+        self.assertEqual(self.window._lyric_content_state(103.), "loading")
+        self.assertEqual(self.window._effective_content_layout(), "lyrics")
+        self.assertFalse(self.window._no_lyrics_layout_active)
+        self.assertTrue(self.window._lyric_loading_visible(103.))
+        self.assertEqual(self.saved, saved)
+        # Quiet provider recovery that retains its actual terminal sentinel
+        # remains cover-only; it does not invent a loading presentation.
+        self.publish("暂无歌词", identity="same-song", now=104.)
+        self.window._update_lyric_loading_state(106.)
+        self.window._sync_no_lyrics_content_layout(106.)
+        self.assertEqual(self.window._lyric_content_state(106.), "no_lyrics")
+        self.assertEqual(self.window._effective_content_layout(), "cover")
+        self.assertFalse(self.window._lyric_loading_visible(106.))
+        self.assertEqual(self.saved, saved)
+
     def test_manual_no_lyrics_toggle_has_only_cover_and_list_at_every_width(self):
         self.publish("纯音乐，请欣赏")
         for width in (960, 883, 690, 610):
