@@ -12021,8 +12021,20 @@ class IslandStackVisual(QWidget):
         return solid_album_ink_color(self._finder_bar_effective_backdrop(), alpha)
 
     def _finder_bar_effective_backdrop(self):
+        face = getattr(self, "finder_bar_style", "transparent")
+        if face == "capsule":
+            style = self._effective_music_ambience_style()
+            if style == "solid_album":
+                return self._solid_album_background_color()
+            if style == "pure_white":
+                return QColor(255, 255, 255)
+            if style == "pure_black":
+                return QColor(0, 0, 0)
+            # The sea's lyric lane is its dark sky; use the same role as the
+            # shared painter instead of treating the album pigment as a fill.
+            return QColor(self._native_music_background_renderer().SEA_SKY)
         background = self._finder_bar_backdrop()
-        if getattr(self, "finder_bar_style", "transparent") != "transparent":
+        if face != "transparent":
             pigment = QColor(self._solid_album_surface_palette().primary)
             background = self._mix_color(background, pigment, .87)
         return background
@@ -12057,8 +12069,26 @@ class IslandStackVisual(QWidget):
         rect = self._immersive_bar_content_rect(rect)
         self.music_button_rects = {}
         style = getattr(self, "finder_bar_style", "transparent")
-        from local.finder_bar_style import paint_finder_background
-        paint_finder_background(painter, rect, style, self._solid_album_surface_palette().primary, self._u(1.))
+        if style == "capsule":
+            # The face setting owns the capsule geometry; the selected music
+            # ambience owns its pixels, just as on the free/expanded island.
+            # Keep transparent and the legacy fading face on their existing
+            # material path.
+            background_rect = rect.adjusted(0., 1., 0., -1.)
+            radius = min(self._u(7.), background_rect.height() / 3.)
+            plan = presentation_music_background_layer_paint_plan(
+                expanded=False, ambience_style=self._effective_music_ambience_style(),
+            )
+            painter.save()
+            painter.setClipPath(self._rounded_path(background_rect, radius), Qt.ClipOperation.IntersectClip)
+            for step in plan.steps:
+                self._execute_music_surface_paint_step(
+                    step, painter, background_rect, radius, False, plan.ambience_style,
+                )
+            painter.restore()
+        else:
+            from local.finder_bar_style import paint_finder_background
+            paint_finder_background(painter, rect, style, self._solid_album_surface_palette().primary, self._u(1.))
         if self._taskbar_compact_active() and getattr(self, "_island_button_ripples", ()):
             self._paint_island_button_ripples(painter,
                 float(getattr(self, "_island_glow_paint_now", 0.0) or time.monotonic()),

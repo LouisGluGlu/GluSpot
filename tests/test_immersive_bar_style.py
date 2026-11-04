@@ -65,7 +65,9 @@ class ImmersiveBarStyleTests(unittest.TestCase):
                     self.assertEqual(visual._taskbar_compact_music_size(420., 40., selected_zone=selected), before_size)
                     self.assertEqual(visual.settings_snapshot()["v2_finder_bar_style"], style)
                     x, y = round(rect.center().x() * dpr), round((content.top() + 2.) * dpr)
-                    self.assertEqual(image.pixelColor(x, y).alpha(), 0 if style == "transparent" else 222)
+                    # Capsule pixels now come from the selected opaque island
+                    # ambience; native row geometry remains unchanged.
+                    self.assertEqual(image.pixelColor(x, y).alpha(), 0 if style == "transparent" else 255)
                     self.assertEqual(image.pixelColor(x, round(2 * dpr)).alpha(), 0)
 
     def test_same_content_dimensions_and_native_tone_produce_same_finder_tasker_material(self):
