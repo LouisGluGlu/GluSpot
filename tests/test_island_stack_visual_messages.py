@@ -5978,8 +5978,12 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertTrue(cover_rects)
         self.assertTrue(lyric_rects)
-        self.assertGreaterEqual(lyric_rects[0].left(), cover_rects[0].right())
-        self.assertLess(lyric_rects[0].bottom(), min(row.top() for row in text_rects))
+        lyric_panel, info_panel = visual._dual_panel_music_rects(rect)
+        self.assertEqual(lyric_rects[0], lyric_panel.adjusted(30., 16., -30., -14.))
+        side = max(48., min(66., info_panel.height() - 26.))
+        self.assertEqual(cover_rects[0], QRectF(info_panel.left() + 22.,
+            info_panel.center().y() - side / 2., side, side))
+        self.assertLess(lyric_rects[0].bottom(), cover_rects[0].top())
         self.assertTrue(any(key in visual.music_button_rects for key in ("music:previous", "music:toggle_play_pause", "music:next")))
 
     def test_dual_panel_expanded_background_uses_neutral_lower_panel(self):
