@@ -240,10 +240,10 @@ class CdpSession:
         return False
 
     async def pause(self, track_id, request_id, *, expected_generation=None, guard=lambda: True):
-        """Explicit, one-attempt Pause using only an observed native contract.
+        """One Pause on the current track through the same channel as seek.
 
-        Success requires independent raw Paused readback. An uncertain write is
-        never retried, and this method never creates or prepares a channel.
+        Success requires an independent PlayState readback. This does not
+        create a channel, and it does not require a previously observed pause.
         """
         generation = self.generation
         request_key = (generation, str(request_id))
@@ -253,9 +253,6 @@ class CdpSession:
             return False
         if not guard():
             self.pause_diagnostic = 'guard-rejected'
-            return False
-        if self._pause_observation_generation != generation:
-            self.pause_diagnostic = 'observation-inactive'
             return False
         if expected_generation not in (None, generation):
             self.pause_diagnostic = 'generation-mismatch'
