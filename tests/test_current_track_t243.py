@@ -116,6 +116,18 @@ class SharedCurrentTrackTests(unittest.TestCase):
         self.assertEqual(window._track_visual[0], self.owner.media_track_id)
         self.assertIsNone(window._pending_fullscreen)
 
+    def test_reused_provider_id_with_new_metadata_retires_geometry_bitmap(self):
+        window = self.window()
+        snapshot = QImage(40, 30, QImage.Format.Format_RGB32)
+        snapshot.fill(QColor("red"))
+        window._geometry_transition_snapshot = snapshot
+        window._mode_lyric_snapshot_track = "first"
+        window._pending_fullscreen = False
+        window._mode_animation.setEndValue(QRect(0, 0, 960, 540))
+        self.publish(replace(self.data.track, title="Changed title", artist="Changed artist"))
+        self.assertTrue(window._geometry_transition_snapshot.isNull())
+        self.assertEqual(window._track_visual[:3], ("first", "Changed title", "Changed artist"))
+
     def test_same_track_artwork_updates_do_not_extend_lyric_deadline(self):
         window = self.window()
         self.publish(track("slow"))
@@ -153,6 +165,20 @@ class SharedCurrentTrackTests(unittest.TestCase):
         self.publish(replace(self.data.track, album_art_source="original", album_art_lookup_state="original"), now=131.)
         self.assertFalse(window._artwork_is_loading())
         self.assertEqual(self.owner.album_art_source, "original")
+
+    def test_resolved_original_after_visual_deadline_does_not_log_timeout(self):
+        window = self.window()
+        self.publish(track("complete"))
+        image = QImage(640, 640, QImage.Format.Format_RGB32)
+        image.fill(QColor("green"))
+        self.owner.album_art = image
+        self.owner.album_art_source = "original"
+        self.owner.album_art_lookup_state = "original"
+        with patch("local.music_surface_window.log_artwork_event") as log:
+            window._track_transition(140., QColor(40, 80, 120), QColor(20, 30, 60))
+            self.assertFalse(window._artwork_is_loading())
+        self.assertFalse(window._art_loading_timed_out)
+        log.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -597,7 +597,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             # A frozen geometry/layout bitmap includes title, cover and loader.
             # Retire it at publication, before another timer/paint can display
             # a different song from the island (including hidden windows).
-            self._finish_stale_track_transition()
+            self._finish_stale_track_transition(force=True)
             self._reset_window_compact()
             self._cancel_lyric_resize()
             self._layout_animation.stop()
@@ -1043,9 +1043,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._sync_surface_shape()
         self.update()
 
-    def _finish_stale_track_transition(self):
+    def _finish_stale_track_transition(self, *, force=False):
         if (self._geometry_transition_snapshot.isNull() or self._mode_lyric_snapshot_track is None
-                or self._mode_lyric_snapshot_track == self._visual_track_identity()):
+                or not force and self._mode_lyric_snapshot_track == self._visual_track_identity()):
             return
         # Finish the chosen destination when its frozen bitmap belongs to
         # the preceding song. Cancelling midway would strand its geometry.
@@ -1860,6 +1860,14 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             # no longer an in-flight download, and must not hold lyric feedback
             # behind a permanently repeating artwork ring.
             return False
+        image = QImage(getattr(self.owner, "album_art", QImage()))
+        source = str(getattr(self.owner, "album_art_source", "") or "")
+        pending = image.isNull() or source == "thumbnail"
+        if (source == "original" or source.endswith("-original")) and self._art_loading_preview_key is not None:
+            completed = lookup_state in {"original", "ready"} and min(image.width(), image.height()) >= 320
+            pending = not completed and self._artwork_display_key(image) == self._art_loading_preview_key
+        if not pending:
+            return False
         if (self._art_loading_started_at is not None
                 and self._art_loading_observed_at - self._art_loading_started_at >= 30.):
             # Acquisition retries belong to the provider. The visual wait is
@@ -1874,22 +1882,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                     str(getattr(self.owner, "album_art_source", "")),
                     min(image.width(), image.height()), "fallback", "timeout")
             return False
-        image = QImage(getattr(self.owner, "album_art", QImage()))
-        source = str(getattr(self.owner, "album_art_source", "") or "")
         # Acquisition provenance belongs to the provider. Resizing the
         # surface cannot restart a completed download or change lyric layout.
-        if image.isNull() or source == "thumbnail":
-            return True
-        if (source == "original" or source.endswith("-original")) and self._art_loading_preview_key is not None:
-            # The source label can arrive before decoding updates the image.
-            # Keep the actual displayed preview soft until it is replaced.
-            # A same-object original can legitimately contain the exact same
-            # pixels as its 320px preview. The provider's completed result,
-            # rather than a changed QImage key, ends that upgrade. Tiny retained
-            # previews and pending results still keep their existing guard.
-            completed = lookup_state in {"original", "ready"} and min(image.width(), image.height()) >= 320
-            return not completed and self._artwork_display_key(image) == self._art_loading_preview_key
-        return False
+        return True
 
     @staticmethod
     def _artwork_display_key(image: QImage) -> int:
@@ -3136,7 +3131,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             QImage(getattr(self.owner, "album_art", QImage())),
             QColor(primary), QColor(secondary),
         )
-        if self._track_visual is not None and visual[0] != self._track_visual[0]:
+        if self._track_visual is not None and visual[:3] != self._track_visual[:3]:
             self._track_cover_previous = self._track_cover_snapshot(now)
             self._track_cover_started_at = now if not self._track_cover_previous.isNull() else 0.
             self._cover_upgrade_previous = QImage()
