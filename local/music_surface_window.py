@@ -375,6 +375,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._display_kinds_source = None
         self._init_lyric_resize()
         self._song_layout_key = None
+        self._song_layout_track_key = None
         self._song_layouts: tuple[tuple[QTextLayout, float], ...] = ()
         self._song_secondary_layouts: tuple[tuple[QTextLayout, float, float] | None, ...] = ()
         self._song_parenthetical_layouts: tuple[tuple[QTextLayout, float, float] | None, ...] = ()
@@ -3434,6 +3435,11 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             # only replaces the latest pending snapshot, never processes text.
             prepared = store.get(translated=translated,
                                  source=source if self._translation_exit_source is not None else None)
+            if prepared is None and self._translation_exit_source is None:
+                # Opening the page can precede bilingual preparation. Reuse
+                # the owner's already-ready original while the worker runs;
+                # word seeks and established ink need no new loading cycle.
+                prepared = store.previous_compatible()
             if prepared is None:
                 terminal_failure = (store.failed is not None
                                     and store.active is None and store.pending is None)
@@ -5788,6 +5794,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             if self._song_layout_key != key:
                 old = self._song_layout_key
                 if (old is not None and self._song_layouts
+                        and self._song_layout_track_key == self._visual_track_identity()
                         and old[:4] + old[5:7] + old[8:] == key[:4] + key[5:7] + key[8:]):
                     # Provider refreshes can remove/add companions after the
                     # click. Identical primary text/geometry stays paintable
@@ -5795,6 +5802,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                     # uses these committed companion strings until promotion.
                     return self._song_layouts, self._song_row_tops
                 return (), ()
+        self._song_layout_track_key = self._visual_track_identity()
         return self._song_layouts, self._song_row_tops
 
     def _advance_song_layout_build(

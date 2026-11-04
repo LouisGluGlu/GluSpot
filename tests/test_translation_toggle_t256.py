@@ -48,7 +48,7 @@ class TranslationToggleT256Tests(unittest.TestCase):
         for name, result in (("lyric_emphasis_plan", LyricEmphasisPlan()), ("explicit_slow_unit_groups", ())):
             self.stack.enter_context(patch("local.music_surface_window." + name, return_value=result))
 
-    def _surface(self, size=(960, 540), *, translated=False, layout="lyrics"):
+    def _surface(self, size=(960, 540), *, translated=False, layout="lyrics", row_count=96):
         with patch("local.music_surface_window.time.monotonic", return_value=100.0):
             owner = _LayerOwner()
             owner.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
@@ -62,7 +62,7 @@ class TranslationToggleT256Tests(unittest.TestCase):
             owner._estimated_media_position = lambda _now: owner.media_position_seconds
             owner.timed_lyrics = [
                 (index * 20.0, f"A steady lyric sentence number {index} stays visible\n翻译：第{index}句的译文一直保持可见")
-                for index in range(96)
+                for index in range(row_count)
             ]
             owner.timed_lyric_units = [()] * len(owner.timed_lyrics)
             owner.timed_lyric_timing_kinds = ["line"] * len(owner.timed_lyrics)
@@ -80,7 +80,7 @@ class TranslationToggleT256Tests(unittest.TestCase):
         self.addCleanup(window.shutdown)
         return owner, window
 
-    def _render(self, owner, window, now):
+    def _render(self, owner, window, now, *, translation_ink=None):
         owner.media_position_sampled_at = now
         primary = "A steady lyric sentence number 8 stays visible"
         painted = []
@@ -89,6 +89,8 @@ class TranslationToggleT256Tests(unittest.TestCase):
         future = window._draw_future_wrapped_layout
 
         def observe(painter, layout, origin, text, offsets):
+            if translation_ink is not None and "曲译文" in text and painter.opacity() > .001:
+                translation_ink.append(text)
             if text != primary:
                 return
             first = layout.lineAt(0)
@@ -276,6 +278,33 @@ class TranslationToggleT256Tests(unittest.TestCase):
         self.assertEqual(window._translation_layer_pose(8, text, now), collapsed)
         self.assertTrue(painted and after)
         self.assertAlmostEqual(after[0][0], top, delta=.5)
+
+    def test_new_track_with_same_primaries_never_reuses_old_translation_ink(self):
+        owner, window = self._surface(translated=True, row_count=192)
+        owner.media_duration_seconds = 5000.
+        owner.timed_lyrics = [
+            (stamp, text.split("\n", 1)[0] + f"\n翻译：旧曲译文{index}")
+            for index, (stamp, text) in enumerate(owner.timed_lyrics)
+        ]
+        owner.lyrics = [text for _, text in owner.timed_lyrics]
+        self._warm(owner, window)
+        old_ink = []
+        self._render(owner, window, 101.0, translation_ink=old_ink)
+        self.assertTrue(any("旧曲译文" in text for text in old_ink))
+        owner.media_track_id = "new-track-with-identical-primary-lyrics"
+        owner.track_title = "New track"
+        owner.timed_lyrics = [(stamp, text.replace("旧曲译文", "新曲译文")) for stamp, text in owner.timed_lyrics]
+        owner.lyrics = [text for _, text in owner.timed_lyrics]
+        new_ink_seen = False
+        for frame in range(30):
+            ink = []
+            self._render(owner, window, 102.0 + frame / 60.0, translation_ink=ink)
+            self.assertFalse(
+                any("旧曲译文" in text for text in ink),
+                f"New-track companion preparation painted old translation on frame {frame}: {ink}",
+            )
+            new_ink_seen = new_ink_seen or any("新曲译文" in text for text in ink)
+        self.assertTrue(new_ink_seen, "The new track's bounded companion build must eventually paint its own translation")
 
     def test_rapid_reversals_preserve_current_height_opacity_and_painted_anchor(self):
         owner, window = self._surface()
