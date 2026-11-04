@@ -3981,7 +3981,8 @@ class IslandStackVisual(QWidget):
                 self._sea_frame_bands = ()
                 frame = getattr(provider, "get_audio_frame", lambda: None)()
                 if frame is not None:
-                    self._sea_frame_bands = (frame.low, frame.mid, frame.high)
+                    self._sea_frame_bands = tuple(getattr(frame, name, 0.0) or 0.0
+                                                  for name in ("low", "mid", "high"))
                     self._sea_low_sample = getattr(frame, "low", 0.0) or 0.0
                     # Older/fixture providers may only supply real bands.
                     self._sea_peak_sample = getattr(frame, "peak", None)
@@ -12939,7 +12940,7 @@ class IslandStackVisual(QWidget):
     def _compact_cover_radius(self, rect: QRectF, two_line: bool) -> float:
         return self._island_cover_geometry(rect)[1]
 
-    def _island_cover_geometry(self, rect: QRectF) -> tuple[QRectF, float]:
+    def _island_cover_geometry(self, rect: QRectF, *, right_reserve: float = 0.0) -> tuple[QRectF, float]:
         """Artwork follows the painted shell, including every spring frame.
 
         Eight logical pixels gives a 32 px cover in a 48 px pill. Short native
@@ -12947,10 +12948,13 @@ class IslandStackVisual(QWidget):
         free island's VISUAL_SCALE. All three exterior insets stay equal.
         """
         height = max(0.0, float(rect.height()))
-        inset = min(height / 2.0, max(min(8.0, height / 6.0), height - rect.width()))
+        available_width = max(0.0, rect.width() - right_reserve)
+        inset = min(height / 2.0, max(min(8.0, height / 6.0), height - available_width))
         side = max(0.0, height - 2.0 * inset)
         cover = QRectF(rect.left() + inset, rect.top() + inset, side, side)
-        shell_radius = self._music_shell_radius(rect, bool(getattr(self, "expanded", False)))
+        # Identical painted geometry keeps identical artwork rounding in
+        # Finder and Tasker, independently of native attachment corner rules.
+        shell_radius = min(height / 2.0, self._u(30.0))
         radius = min(side / 4.0, max(0.0, shell_radius - inset))
         return cover, radius
 
@@ -14069,6 +14073,13 @@ class IslandStackVisual(QWidget):
         button_size = max(self._u(20.0), min(rect.height() - pad * 2.0, rect.width() * 0.40))
         cover, cover_radius = self._island_cover_geometry(rect)
         button = QRectF(rect.right() - pad - button_size, rect.center().y() - button_size / 2.0, button_size, button_size)
+        if button.left() < cover.right():
+            # A very narrow native slot cannot fit both default squares.
+            # Fit their existing painters without sacrificing equal artwork
+            # insets, the gap, or their independent click targets.
+            button_size = max(0.0, (rect.width() - rect.height() / 2.0 - 2.0 * pad) / 1.5)
+            cover, cover_radius = self._island_cover_geometry(rect, right_reserve=button_size + 2.0 * pad)
+            button = QRectF(rect.right() - pad - button_size, rect.center().y() - button_size / 2.0, button_size, button_size)
         self.music_cover_rect = QRectF(cover)
         self.music_button_rects = {"music:toggle_play_pause": QRectF(button)}
         self._paint_interactive_music_cover(painter, cover, cover_radius)

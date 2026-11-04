@@ -174,6 +174,19 @@ class IslandCoverInsetTests(unittest.TestCase):
             self.paint(rect, expanded=True)
         self.assertNotEqual(with_lyrics.copy(crop), self.last_image.copy(crop))
 
+    def test_crowded_taskbar_slots_keep_equal_insets_and_separate_actions(self):
+        for width in (28., 52., 58.):
+            for style in ("sea_level", "solid_album", "system"):
+                with self.subTest(width=width, style=style):
+                    shell = self.paint(QRectF(13., 11., width, 44.), mode="tasker", style=style)
+                    cover = self.assert_equal_insets(shell)
+                    self.assertEqual(set(self.visual.music_button_rects), {"music:toggle_play_pause"})
+                    button = self.visual.music_button_rects["music:toggle_play_pause"]
+                    self.assertTrue(shell.contains(button))
+                    self.assertFalse(cover.intersects(button))
+                    self.assertEqual(self.visual._hit_test(cover.center()), "music:open_surface")
+                    self.assertEqual(self.visual._hit_test(button.center()), "music:toggle_play_pause")
+
 
 if __name__ == "__main__":
     unittest.main()

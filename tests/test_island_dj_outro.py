@@ -251,16 +251,27 @@ class IslandDjOutroTests(unittest.TestCase):
         image = QImage(580, 240, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
         poses = []
+        cover_opacity = []
+        shell = QRectF(0., 0., 580., 240.)
+        def record_cover(painter, *_args, **_kwargs):
+            cover_opacity.append(painter.opacity())
         for now in (100., 100.08, 100.16, 100.24, 100.32):
             with patch("local.island_stack_visual.time.monotonic", return_value=now), \
-                    patch.object(visual, "_paint_interactive_music_cover") as cover, \
+                    patch.object(visual, "_paint_interactive_music_cover", side_effect=record_cover) as cover, \
                     patch.object(visual, "_paint_music_control_button"), \
                     patch.object(visual, "_paint_scrolling_text"), \
                     patch.object(visual, "_paint_lyric_viewport"), QPainter(image) as painter:
-                visual._paint_music_expanded(painter, QRectF(0., 0., 580., 240.))
+                visual._paint_music_expanded(painter, shell)
                 poses.append(QRectF(cover.call_args.args[1]))
         self.assertTrue(all(a.width() >= b.width() for a, b in zip(poses, poses[1:])))
-        self.assertEqual(poses[-1], QRectF(visual._u(16), visual._u(14), visual._u(58), visual._u(58)))
+        self.assertEqual(poses[-1], QRectF(8., 8., 224., 224.))
+        for pose in poses:
+            inset = pose.left() - shell.left()
+            self.assertAlmostEqual(pose.top() - shell.top(), inset)
+            self.assertAlmostEqual(shell.bottom() - pose.bottom(), inset)
+        self.assertEqual(cover_opacity[0], 0.)
+        self.assertAlmostEqual(cover_opacity[-1], 1.)
+        self.assertTrue(all(a <= b for a, b in zip(cover_opacity, cover_opacity[1:])))
 
     def test_short_shell_metadata_keeps_full_width_without_preload_captions(self):
         visual = self.visual()

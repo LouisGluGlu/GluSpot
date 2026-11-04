@@ -6148,12 +6148,17 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             bands=(0.90, 0.58, 0.34),
         )
 
-        quiet_image = self._paint_music_background_image(quiet)
-        reactive_image = self._paint_music_background_image(reactive)
+        # t237 moves collapsed sea audio to four bars; the retained water
+        # response belongs to the expanded background.
+        quiet_image = self._paint_music_background_image(quiet, expanded=True)
+        reactive_image = self._paint_music_background_image(reactive, expanded=True)
         lower = self._image_region_difference(quiet_image, reactive_image, QRect(38, 56, 244, 26))
-        upper = self._image_region_difference(quiet_image, reactive_image, QRect(38, 25, 244, 22))
+        # The old compact sky probe crossed the expanded waterline. These
+        # expanded probes measure 1618 (water) / 0 (sky) on the original HEAD.
+        upper = self._image_region_difference(quiet_image, reactive_image, QRect(70, 25, 160, 14))
 
-        self.assertGreater(lower, 2400)
+        self.assertGreater(lower, 1500)
+        self.assertEqual(upper, 0)
         self.assertGreater(lower, upper)
 
     def test_integrated_duotone_full_reactivity_changes_side_wave_regions(self):
@@ -6184,8 +6189,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             bands=(0.62, 0.74, 0.48),
         )
 
-        quiet_image = self._paint_music_background_image(quiet)
-        reactive_image = self._paint_music_background_image(reactive)
+        # This retired selector migrates to sea_level, whose water remains
+        # on the expanded surface after t237.
+        quiet_image = self._paint_music_background_image(quiet, expanded=True)
+        reactive_image = self._paint_music_background_image(reactive, expanded=True)
         left_side = self._image_region_difference(quiet_image, reactive_image, QRect(28, 30, 68, 42))
         right_side = self._image_region_difference(quiet_image, reactive_image, QRect(224, 30, 68, 42))
 
@@ -6463,10 +6470,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._u = lambda value: float(value)
         rect = QRectF(0.0, 0.0, 280.0, 40.0)
 
-        self.assertEqual(
-            visual._compact_cover_radius(rect, two_line=False),
-            visual._music_shell_radius(rect, expanded=False),
-        )
+        cover, radius = visual._island_cover_geometry(rect)
+        self.assertEqual(visual._compact_cover_radius(rect, two_line=False), radius)
+        self.assertEqual(radius, cover.height() / 4.0)
+        self.assertGreater(radius, 0.0)
 
     def test_expanded_tasker_music_uses_windows_corner_radius(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -9209,6 +9216,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
     def test_album_island_compact_replaces_standard_music_cover_layout(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        # Album-only presentation remains on the other backgrounds. The
+        # sea compact face now keeps its cover, title and four bars.
+        visual.music_ambience_style = "solid_album"
         visual.no_lyrics_display_mode = "album_island"
         visual.no_lyrics_text = "no lyrics"
         visual.lyrics = ["no lyrics"]
@@ -9230,6 +9240,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
     def test_compact_lyric_can_hide_album_cover_and_left_align_text(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_ambience_style = "solid_album"
         visual.no_lyrics_display_mode = "text"
         visual.lyric_flow_style = "wave_stream"
         visual.compact_lyric_show_cover = False
@@ -10891,14 +10902,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._active_lyric_color_fill_paints_background = lambda _style=None: False
         visual.music_expanded_layout_style = "standard"
         calls = []
-        visual._paint_music_glass_body = lambda *_args: calls.append("glass")
-        visual._paint_bottom_ambience = lambda *_args: calls.append("ambience")
-        visual._paint_music_blur_mask = lambda *_args: calls.append("blur")
-        visual._paint_music_light_wave = lambda *_args: calls.append("wave")
-        visual._paint_music_reactive_background_overlay = lambda *_args: calls.append("reactive")
-        visual._paint_music_surface_transition_wash = lambda *_args: calls.append("transition")
-        visual._paint_music_compact = lambda *_args: calls.append("compact")
-        visual._paint_music_border = lambda *_args: calls.append("border")
+        visual._execute_music_surface_paint_step = lambda step, *_args: calls.append(step)
 
         for style in ("yaoguang", "bilateral_diffraction"):
             with self.subTest(style=style):
@@ -10906,7 +10910,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
                 calls.clear()
                 self.assertEqual(visual._effective_music_ambience_style(), "sea_level")
                 visual._paint_music(None, QRectF(20.0, 20.0, 240.0, 48.0), False)
-                self.assertEqual(calls, ["glass", "ambience", "blur", "wave", "reactive", "transition", "compact", "border"])
+                self.assertEqual(calls, ["pure_black_background", "compact_content"])
 
     def test_music_surface_paint_plan_order_keeps_dual_panel_isolated(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
