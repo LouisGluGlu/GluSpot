@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, QVariantAnimation, QEasingCurve
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QTextLayout, QTransform
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRegion, QTextLayout, QTransform
 from PySide6.QtWidgets import QApplication, QAbstractButton
 
 from api.models import ColorToken, TimedLyricLine, TimedLyricUnit
@@ -39,6 +39,7 @@ else:
     from veil import VeilOverlay, BackgroundEdgeVeil
 from local.personal_dj_icon import paint_personal_dj_icon
 from local.music_control_glass import fused_control_path
+from local.glass_style import GLASS_CLEAR
 
 SONGS = [("夜航的信", "林间电台"), ("晚风经过", "陈小雨"), ("云与海之间", "南方来信"), ("星光落下来", "木子"), ("慢慢的旅程", "夏日回声"), ("下一站黎明", "白昼乐队"), ("你听见了吗", "无名旅人"), ("再见之前", "海边房间")]
 LYRICS = ["在夜色中慢慢走", "把心事交给晚风", "那些没有说完的话", "会在星光里重逢", "让时间轻轻流过", "我们还在这条路上", "等天边亮起微光", "再一起迎接远方", "城市把灯光放低", "远处有汽笛回响", "我把这首歌留给你", "天亮以前不要散场"]
@@ -792,8 +793,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         return {key: rect for group in super()._glass_control_groups(time.monotonic())
                 for key, rect in group.items()}
 
-    def _refresh_chrome_backdrop(self, now):
-        self._clear_control_renderer.live_tint_scene = self._lyric_resize_backdrop_scene()
+    def _refresh_chrome_backdrop(self, now, *, force=False):
         # Rasterize shared content into a cached, unfiltered backdrop without
         # grabbing the widget or scheduling another visible paint. Width
         # merges freeze this endpoint; blur remains owned by the renderer.
@@ -804,12 +804,25 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 or not hasattr(self, "visibility")
                 or (self.visibility.progress <= .001 and self.visibility.opacity.target <= 0.)):
             return
-        raw = super()._surface_glass_backdrop()
+        if force:
+            # Artwork publication precedes the next widget paint. Prepare its
+            # background here so cover, ambient field and glass share that
+            # publication rather than waiting for playback/progress to repaint.
+            palette = self._art_palette()
+            target = QImage(1, 1, QImage.Format.Format_RGB32)
+            with QPainter(target) as layer:
+                super()._paint_background(layer, QRectF(self.rect()), QColor(palette.primary),
+                                          QColor(palette.secondary), now,
+                                          ambient_colors=palette.ambient_colors,
+                                          ambient_weights=palette.ambient_weights)
+        raw = self._lyric_resize_backdrop_scene()
         key = (self.width(), self.height(), self.devicePixelRatioF(), self.mode,
                self._visual_track_identity(), raw.cacheKey(), self.owner.album_art.cacheKey(),
                self.source_lines(), self.ink_position(), self._queue_scroll,
-               self.visibility.progress)
-        if key == self._chrome_backdrop_key or now - self._chrome_backdrop_at < .1:
+               self.visibility.progress, self.lyric_focus(),
+               now if self._track_cover_animating(now) else 0.,
+               bool(self.owner.enable_dual_line_lyrics))
+        if not force and (key == self._chrome_backdrop_key or now - self._chrome_backdrop_at < .1):
             return
         ratio = self.devicePixelRatioF()
         image = QImage(round(self.width() * ratio), round(self.height() * ratio),
@@ -821,6 +834,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             with QPainter(image) as painter:
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                # Only these padded bands can contribute to a glass sample.
+                # Middle-of-page lyric/queue damage cannot dirty the chrome.
+                region = QRegion()
+                material = GLASS_CLEAR.at_level(self._surface_glass_level())
+                padding = math.ceil(material.lens * (1. + material.chroma) + material.blur * 3. + 2.)
+                for group in self.glass_groups():
+                    for control in group.values():
+                        region |= QRegion(control.adjusted(-padding, -padding, padding, padding).toAlignedRect())
+                painter.setClipRegion(region)
                 painter.drawImage(QRectF(self.rect()), raw)
                 _content, cover, column = self._content_column_geometry()
                 if self.narrow and self.mode == "lyrics":
@@ -832,29 +854,47 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                         path = QPainterPath()
                         painted_cover = self._current_cover_rect(now)
                         path.addRoundedRect(painted_cover, painted_cover.width() * .055, painted_cover.height() * .055)
-                        painter.setClipPath(path)
-                        painter.drawImage(painted_cover, self.owner.album_art)
+                        painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+                        self._paint_track_cover_image(painter, painted_cover, painted_cover.width() * .055, now)
                         painter.restore()
                     center_plan = self._centered_album_plan(cover) if self.mode == "cover_lyrics" else None
                     self._paint_lyric_column(painter, QRectF(self.rect()), center_plan=center_plan)
                     if self.mode == "playlist":
                         scale = self._surface_scale()
                         self._paint_playback_queue(painter, column.adjusted(0., 8. * scale, 0., -4. * scale))
+                # Content painters may replace their local clip. Discard any
+                # resulting pixels outside the glass footprint before testing
+                # dirtiness, including queue rows in the middle of the page.
+                painter.setClipRegion(QRegion(self.rect()) - region)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
         finally:
             self._capturing_content_snapshot = False
-        self._chrome_backdrop = image
         self._chrome_backdrop_key, self._chrome_backdrop_at = key, now
+        self._diagnostics['chrome_backdrop_prepares'] = self._diagnostics.get('chrome_backdrop_prepares', 0) + 1
+        if force or self._chrome_backdrop is None or image != self._chrome_backdrop:
+            self._chrome_backdrop = image
+            self._diagnostics['chrome_backdrop_changes'] = self._diagnostics.get('chrome_backdrop_changes', 0) + 1
+            self._controls_key = None
+            self._wide_lyrics_dirty = True
+            if force:
+                # A new artwork event replaces every visible material face
+                # together, including the renderer's staggered resting slots.
+                self._clear_control_renderer.clear()
+        self._clear_control_renderer.live_tint_scene = self._chrome_backdrop
 
     def _surface_glass_backdrop(self):
         scene = self._lyric_resize_backdrop_scene()
-        self._clear_control_renderer.live_tint_scene = scene
         frozen = getattr(self, "_width_glass_backdrop", None)
         if frozen is not None:
+            self._clear_control_renderer.live_tint_scene = frozen
             return frozen
         backdrop = getattr(self, "_chrome_backdrop", None)
         if backdrop is not None and not self._capturing_content_snapshot:
+            self._clear_control_renderer.live_tint_scene = backdrop
             return backdrop
         if getattr(self, '_lyric_resize_frozen', False):
+            self._clear_control_renderer.live_tint_scene = scene
             return scene
         return super()._surface_glass_backdrop()
 
@@ -1403,8 +1443,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def refresh_controls(self, now):
         """Capture production control pixels outside paint; fade only blends.
 
-        Keep the same sampled scene for the 300ms reveal. Resting controls
-        refresh at 10Hz; input/feedback/layout changes invalidate immediately.
+        Resting controls refresh only after their sampled scene changes;
+        input/feedback/layout changes invalidate immediately.
         """
         if self.variant == "A" or self._width_chrome_active:
             return
@@ -1426,27 +1466,35 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if hidden and key == self._controls_key:
             return
         fading = not self.visibility.settled(now)
-        if (key == self._controls_key and self._controls_bands is not None
-                and (fading or now - self._controls_at < .1)):
-            return
+        if key == self._controls_key and self._controls_bands is not None:
+            scene = self._surface_glass_backdrop()
+            pending = any(self._clear_control_renderer.would_refresh(role, scene, now, pose, state)
+                          for role, pose, state in getattr(self, '_controls_roles', ()))
+            if not pending or fading or now - self._controls_at < .1:
+                return
         ratio = self.devicePixelRatioF()
         image = QImage(round(self.width() * ratio), round(self.height() * ratio),
                        QImage.Format.Format_ARGB32_Premultiplied)
         image.setDevicePixelRatio(ratio)
         image.fill(Qt.GlobalColor.transparent)
         self._clear_control_renderer.begin_frame(now)
-        with QPainter(image) as layer:
-            layer.setRenderHint(QPainter.RenderHint.Antialiasing)
-            layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            layout = NarrowLayout(self.width(), self.height(),
-                                  library_available=self._library_back_available(),
-                                  dj_available=self.dj_available)
-            self._capturing_chrome = True
-            try:
-                self.paint_controls(layer, layout, 1.0)
-            finally:
-                self._capturing_chrome = False
-        self._clear_control_renderer.end_frame()
+        self._clear_control_renderer.record_roles = []
+        try:
+            with QPainter(image) as layer:
+                layer.setRenderHint(QPainter.RenderHint.Antialiasing)
+                layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                layout = NarrowLayout(self.width(), self.height(),
+                                      library_available=self._library_back_available(),
+                                      dj_available=self.dj_available)
+                self._capturing_chrome = True
+                try:
+                    self.paint_controls(layer, layout, 1.0)
+                finally:
+                    self._capturing_chrome = False
+        finally:
+            self._controls_roles = self._clear_control_renderer.record_roles
+            self._clear_control_renderer.record_roles = None
+            self._clear_control_renderer.end_frame()
         self._controls_bands = (image.copy(0, 0, image.width(), round(VeilOverlay.TOP_END * ratio)),
                                 image.copy(0, round((self.height() - VeilOverlay.BOTTOM_HEIGHT) * ratio),
                                            image.width(), round(VeilOverlay.BOTTOM_HEIGHT * ratio)))

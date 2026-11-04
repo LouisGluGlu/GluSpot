@@ -418,6 +418,8 @@ class GlassControlRenderer:
         self.record_roles = None
         self.backdrop_tint = ChromeBackdropTint()
         self.live_tint_scene = None
+        self.scene_regions = {}
+        self.pending_regions = {}
 
     def begin_frame(self, now):
         # Reserve refreshes for the oldest eligible patches, independent of paint order.
@@ -440,6 +442,30 @@ class GlassControlRenderer:
         self.versions.clear()
         self.backdrop_tint.clear()
         self.live_tint_scene = None
+        self.scene_regions.clear()
+        self.pending_regions.clear()
+
+    def _scene_region(self, role, scene, pose):
+        """Compare only pixels that the padded lens/blur can actually read."""
+        key = (scene.cacheKey(), pose)
+        pending = self.pending_regions.get(role)
+        if pending is not None and pending[0] == key:
+            return pending[1]
+        geometry, x, y, level = pose[:4]
+        w, h, _radius, dpr, token, _path = geometry
+        spec = token.at_level(level)
+        pad = math.ceil((spec.lens * (1. + spec.chroma) + spec.blur * 3.) * dpr + 3.)
+        bounds = QRectF((x - pad) / dpr, (y - pad) / dpr,
+                        (w + 2 * pad) / dpr, (h + 2 * pad) / dpr)
+        sx, sy = scene.width() / max(1., pose[5]), scene.height() / max(1., pose[6])
+        source = QRectF(bounds.x() * sx, bounds.y() * sy,
+                        bounds.width() * sx, bounds.height() * sy).toAlignedRect().intersected(scene.rect())
+        region = (source, QImage() if source.isEmpty() else scene.copy(source))
+        self.pending_regions[role] = (key, region)
+        return region
+
+    def _scene_region_changed(self, role, scene, pose):
+        return self.scene_regions.get(role) != self._scene_region(role, scene, pose)
 
     def would_refresh(self, role, scene, now, pose, state):
         previous = self.patches.get(role)
@@ -457,7 +483,7 @@ class GlassControlRenderer:
         throttled = (interval > 0. and previous is not None and not material_changed and not path_changed and
                      0. <= now - previous[2] < interval)
         return not throttled and (previous is None or previous[0] != pose or
-            (previous[1] != scene.cacheKey() and (moving or
+            (previous[1] != scene.cacheKey() and self._scene_region_changed(role, scene, pose) and (moving or
              (now - previous[2] >= GLASS_MATERIAL_FRAME_SECONDS and
               (self.refresh_roles is None or role in self.refresh_roles)))))
 
@@ -469,9 +495,11 @@ class GlassControlRenderer:
         interval = glass_style.GLASS_MOVING_REFRESH_SECONDS
         throttled = (moving and interval > 0. and previous is not None and
                      0. <= now - previous[2] < interval)
-        if (previous is not None and not throttled and self.refresh_roles is not None
-                and role in self.refresh_roles and previous[1] == scene.cacheKey()):
-            self.patches[role] = (previous[0], previous[1], now, previous[3])
+        if previous is not None and not throttled:
+            unchanged = previous[1] == scene.cacheKey() or not self._scene_region_changed(role, scene, previous[0])
+            if unchanged:
+                touched = now if self.refresh_roles is not None and role in self.refresh_roles else previous[2]
+                self.patches[role] = (previous[0], scene.cacheKey(), touched, previous[3])
 
     def paint(self, painter, rect, *, scene, scene_bounds, ink, now, role,
               state=None, hover=0., path=None, kind="circle", level=50,
@@ -513,11 +541,15 @@ class GlassControlRenderer:
             if previous is not None:
                 self.bytes -= previous[3].sizeInBytes()
             self.patches[role] = (pose, scene.cacheKey(), now, image)
+            self.scene_regions[role] = self._scene_region(role, scene, pose)
             self.versions[role] = self.versions.get(role, 0) + 1
             self.bytes += image.sizeInBytes()
             self.patches.move_to_end(role)
             while len(self.patches) > 32 or self.bytes > 8 * 1024 * 1024:
-                self.bytes -= self.patches.popitem(last=False)[1][3].sizeInBytes()
+                retired, entry = self.patches.popitem(last=False)
+                self.bytes -= entry[3].sizeInBytes()
+                self.scene_regions.pop(retired, None)
+                self.pending_regions.pop(retired, None)
         else:
             image = previous[3]
             self.touch(role, scene, now, state)
