@@ -462,7 +462,7 @@ class ArtworkProviderLadderTests(unittest.TestCase):
 
     def test_expired_generation_cannot_publish_into_retry(self):
         clock = Clock()
-        self.provider._resolve_netease_art_url.side_effect = ["https://test/old.jpg", "https://test/new.jpg"]
+        self.provider._resolve_netease_art_url.return_value = "https://test/new.jpg"
         with patch("api.providers.time.monotonic", clock):
             self.assertTrue(self.schedule())
             old_worker = ManualThread.jobs.pop(0)
@@ -473,9 +473,11 @@ class ArtworkProviderLadderTests(unittest.TestCase):
             self.assertTrue(self.schedule())
             new_worker = ManualThread.jobs.pop(0)
             old_worker()
+            self.provider._resolve_netease_art_url.assert_not_called()
             self.assertNotIn("track", self.provider._current_art_url_by_track_id)
             new_worker()
         self.assertEqual(self.provider._current_art_url_by_track_id["track"], "https://test/new.jpg")
+        self.provider._resolve_netease_art_url.assert_called_once()
         self.provider._schedule_queue_album_art_prefetch.assert_called_once_with("https://test/new.jpg")
 
     def test_metadata_workers_and_track_urls_are_bounded(self):

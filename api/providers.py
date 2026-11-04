@@ -2548,6 +2548,8 @@ class WindowsMediaProvider:
                 generations.pop(url, None)
                 inflight.discard(url)
                 failed_until[url] = self._artwork_retry_after("download", url)
+                while len(failed_until) > 64:
+                    failed_until.pop(next(iter(failed_until)))
                 self._last_refresh_at = 0.0
             log_artwork_event("download", track_id, source, 0, "failed", error)
 
