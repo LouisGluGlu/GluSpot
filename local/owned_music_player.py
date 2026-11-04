@@ -19,6 +19,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from api.models import AlbumQueueEntry, ColorToken, IslandVisualData, TrackData
 from api.lyric_timeline import has_sufficient_word_timing
+from api.lyric_diagnostics import log_lyric_event
 from api.online_music import CatalogPage, LyricPayload, OnlineMusicError, OnlineSong, StreamInfo
 from api.online_music_artwork import ONLINE_ARTWORK_MAX_BYTES, fetch_online_artwork, online_artwork_colors, online_artwork_min_side, online_artwork_thumbnail_bytes
 from api.owned_stream_cache import OwnedStreamCache, PreparedAudio, StreamDownloadError
@@ -1965,6 +1966,11 @@ class OwnedMusicPlayer(QObject):
         if self._closed:
             return
         kind, epoch, *extra = token
+        if kind in {"lyrics", "dj_lyrics", "lyrics_refresh", "lyrics_enrichment"}:
+            log_lyric_event("owned_completion", self.track.track_id if self.track is not None else "",
+                "stale_epoch" if epoch != self._epoch else "result_error" if error else "result_received",
+                epoch=epoch, current_epoch=self._epoch, current_generation=self._lyrics_generation,
+                error=bool(error))
         if kind == "artwork":
             self._artwork_completed(epoch, extra, result, error)
             return
@@ -2506,6 +2512,8 @@ class OwnedMusicPlayer(QObject):
             return
         self.track = replace(self.track, timed_lyrics=match.timed_lyrics, lyrics=match.lyrics,
                              lyrics_source=match.source)
+        log_lyric_event("owned_publish", self.track.track_id, "match_applied",
+                        rows=len(match.lyrics), timed=len(match.timed_lyrics))
         self.changed.emit()
         self._schedule_lyrics_enrichment(match)
 
@@ -2626,6 +2634,7 @@ class OwnedMusicPlayer(QObject):
         if self.track is not None:
             self.track = replace(self.track, timed_lyrics=(),
                 lyrics=("暂无歌词",), lyrics_source="")
+            log_lyric_event("owned_publish", self.track.track_id, "lyrics_unavailable")
             self.changed.emit()
 
     @staticmethod
@@ -3064,6 +3073,9 @@ class OwnedMusicPlayer(QObject):
     def _fetch_lyrics(self, song, preferences):
         if song.media_kind == "dj_voice":
             return LyricPayload(song.source_id, song.song_id), None
+        debug_track = f"owned:{song.source_id}:{song.song_id}"
+        began = time.monotonic()
+        log_lyric_event("owned_lookup", debug_track, "fetch_begin")
         try:
             payload = self.service.lyrics(song.source_id, song.song_id)
         except OnlineMusicError as error:
@@ -3072,10 +3084,26 @@ class OwnedMusicPlayer(QObject):
             # failure's provenance without inventing any lyric text. Explicit
             # service/account cancellation keeps its existing request fence.
             if error.code in {"cancelled", "closed"}:
+                log_lyric_event("owned_lookup", debug_track, "fetch_cancelled", error=True)
                 raise
+            log_lyric_event("owned_lookup", debug_track, "official_unavailable", error=True)
             payload = LyricPayload(song.source_id, song.song_id,
                 source=f"{song.source_id}_unavailable")
-        return payload, self._parse_lyrics_payload(payload, preferences, song=song)
+        except Exception:
+            log_lyric_event("owned_lookup", debug_track, "fetch_failed", error=True,
+                            elapsed_ms=round((time.monotonic() - began) * 1000))
+            raise
+        try:
+            match = self._parse_lyrics_payload(payload, preferences, song=song)
+        except Exception:
+            log_lyric_event("owned_lookup", debug_track, "parse_failed", error=True,
+                            elapsed_ms=round((time.monotonic() - began) * 1000))
+            raise
+        log_lyric_event("owned_lookup", debug_track, "fetch_ready" if match is not None else "fetch_empty",
+                        rows=len(match.lyrics) if match is not None else 0,
+                        timed=len(match.timed_lyrics) if match is not None else 0,
+                        elapsed_ms=round((time.monotonic() - began) * 1000))
+        return payload, match
 
     def _parse_lyrics_payload(self, payload, preferences, enrichment=None, *, song=None):
         # Parsing is read-only; a shallow view preserves the established

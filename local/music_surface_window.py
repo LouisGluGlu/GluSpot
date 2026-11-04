@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QWidget
 
 from api.artwork_sources import artwork_text_key, log_artwork_event
 from api.lyric_timeline import active_index_for_position
+from api.lyric_diagnostics import lyric_debug_enabled, log_lyric_event
 from api.capture.seek import record_seek_decision
 from local.music_lyric_preparation import (
     coalesced_timed_lyrics, prepare_lyric_presentation, snapshot_lyric_input,
@@ -106,6 +107,7 @@ from local.translation_style_variants import resolve_translation_style
 
 
 MUSIC_WINDOW_ASPECT_RATIO = 16.0 / 9.0
+_LYRIC_LOADING_MARKERS = frozenset({"查找歌词中", "寻找歌词中", "加载歌词中"})
 
 
 def constrained_window_size(
@@ -2514,9 +2516,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         waiting = getattr(self.owner, "_music_surface_waiting_for_loaded_lyrics", None)
         if callable(waiting) and waiting():
             return True
-        return len(lines) == 1 and str(lines[0]).strip() in {
-            "查找歌词中", "寻找歌词中", "加载歌词中",
-        }
+        return len(lines) == 1 and str(lines[0]).strip() in _LYRIC_LOADING_MARKERS
 
     def _update_lyric_loading_state(
         self, now: float, lines: list[str] | None = None,
@@ -2562,6 +2562,51 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             and float(now) >= self._lyric_loading_started_at + 1.0
         ):
             self._lyric_loading_has_shown = True
+        self._log_lyric_loading_state(now, pending, lines, timed)
+
+    def _log_lyric_loading_state(self, now, pending, lines, timed):
+        if not lyric_debug_enabled():
+            return
+        if lines is None or timed is None:
+            lines, timed = self._display_lyrics()
+        raw_lines = getattr(self.owner, "lyrics", ()) or ()
+        raw_timed = getattr(self.owner, "timed_lyrics", ()) or ()
+        store = getattr(self.owner, "_lyric_presentation_store", None)
+        failed = store is not None and store.failed is not None
+        closed = store is not None and store.closed
+        frozen = bool(self._lyric_resize_frozen)
+        moving = bool(self._lyric_width_in_motion())
+        provider_pending = not raw_timed and (not raw_lines or (
+            len(raw_lines) == 1 and str(raw_lines[0]).strip() in _LYRIC_LOADING_MARKERS
+        ))
+        if frozen:
+            reason = "resize_motion" if moving else "resize_settle"
+        elif pending:
+            reason = ("provider_pending" if provider_pending else "preparation_closed" if closed
+                      else "preparation_failed" if failed else "preparation_pending")
+        elif self._lyric_loading_holds_result(now):
+            reason = "result_cycle_exit"
+        else:
+            reason = "preparation_failed_exit" if failed else "resolved" if timed else "untimed_or_empty_exit"
+        state = (
+            self._visual_track_identity(), reason, len(raw_lines), len(raw_timed), len(lines), len(timed),
+            bool(self._lyric_loading_waiting), bool(self._lyric_loading_visible(now)),
+            closed, bool(store is not None and store.active is not None),
+            bool(store is not None and store.pending is not None), failed, frozen, moving,
+        )
+        # Transitions are immediate; a stalled state repeats once per five
+        # seconds so PC logs distinguish a stuck lookup from a stopped timer.
+        if (state == getattr(self, "_lyric_debug_state", None)
+                and float(now) - getattr(self, "_lyric_debug_at", 0.) < 5.):
+            return
+        self._lyric_debug_state, self._lyric_debug_at = state, float(now)
+        log_lyric_event("surface", self._visual_track_identity(), reason,
+            raw_rows=len(raw_lines), raw_timed=len(raw_timed), display_rows=len(lines), display_timed=len(timed),
+            waiting=state[6], visible=state[7], store_closed=closed, store_active=state[9],
+            store_pending=state[10], store_failed=failed, resize_frozen=frozen,
+            resize_capturing=bool(self._lyric_resize_capturing), width_moving=moving,
+            age_ms=max(0, round((float(now) - self._lyric_loading_started_at) * 1000)),
+            hold_ms=max(0, round((self._lyric_loading_release_at - float(now)) * 1000)))
 
     def _lyric_loading_holds_result(self, now: float) -> bool:
         return bool(self._lyric_loading_release_at and float(now) < self._lyric_loading_release_at)
@@ -3253,8 +3298,14 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             prepared = store.get(translated=translated,
                                  source=source if self._translation_exit_source is not None else None)
             if prepared is None:
+                cached = self._display_lyrics_cache
+                cached_loading = (cached is not None and not cached[1] and len(cached[0]) == 1
+                                  and str(cached[0][0]).strip() in _LYRIC_LOADING_MARKERS)
                 if (self._display_lyrics_cache is not None
-                        and getattr(self, "_prepared_lyric_identity", None) == self._visual_track_identity()):
+                        and getattr(self, "_prepared_lyric_identity", None) == self._visual_track_identity()
+                        and not (store.failed is not None and cached_loading)):
+                    # Preserve established lyric ink through same-track work,
+                    # but a failed result must terminate a cached loader.
                     return self._display_lyrics_cache
                 self._display_timed_units = self._display_timed_kinds = self._display_row_timings = ()
                 self._display_timed_read_ends = self._display_raw_source_texts = ()
