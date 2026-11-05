@@ -577,7 +577,7 @@ class PlaybackEntryWindowTests(unittest.TestCase):
                 self.window.set_login_snapshot(SimpleNamespace(source_id="netease", state=state))
                 self.assertEqual(self.window._login_placeholder_text(), placeholder)
                 self.assertTrue(self.window.refresh_button.isEnabled())
-                self.assertEqual(self.window.refresh_button.text(), "刷新二维码" if state == "expired" else "重新登录")
+                self.assertEqual(self.window.refresh_button.text(), "刷新二维码")
                 self.assertEqual(self.window.refresh_button.accessibleName(), self.window.refresh_button.text())
                 refreshed = QSignalSpy(self.window.refreshRequested)
                 self.window.refresh_button.click()
@@ -599,7 +599,7 @@ class PlaybackEntryWindowTests(unittest.TestCase):
                                                              qr_image_bytes=_image_bytes(), message=message))
                 self.assertEqual(self.window.message_label.text(), message)
                 if state == "error":
-                    self.assertEqual(self.window.refresh_button.text(), "刷新二维码" if "刷新" in message else "重新登录")
+                    self.assertEqual(self.window.refresh_button.text(), "刷新二维码")
 
     def test_login_qr_status_and_action_remain_adjacent_without_overlap_on_short_display(self):
         self._login_page()

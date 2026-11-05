@@ -27,8 +27,8 @@ from local.music_surface_palette import idle_surface_palette
 from local.backdrop_variants import BACKDROP_VARIANTS, resolve_backdrop_variant
 from local.music_source_icons import paint_music_source_icon
 from local.source_page_backdrop import (
-    FIELD_BLEND_SECONDS, avatar_dominant_color, blend_color, icon_dominant_color,
-    render_source_color_field,
+    FIELD_BLEND_INTERVAL_MS, FIELD_BLEND_SECONDS, avatar_dominant_color,
+    crossfade_color_fields, icon_dominant_color, render_source_color_field,
 )
 from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop, widget_glass_level
 from local.control_hover import install_control_hover
@@ -581,6 +581,8 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
         self._field_from: tuple[QColor | None, QColor] | None = None
         self._field_target: tuple[QColor | None, QColor] | None = None
         self._field_blend_at = 0.0
+        self._field_plate_from = QImage()
+        self._field_plate_to = QImage()
         self._field_timer = QTimer(self)
         self._field_timer.setInterval(200)
         self._field_timer.timeout.connect(self._advance_platform_field)
@@ -1209,42 +1211,57 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
     def _color_id(color: QColor | None):
         return None if color is None else color.rgba()
 
-    def _displayed_field_colors(self, now: float) -> tuple[QColor, QColor]:
-        origin = self._field_from or self._field_target
-        target = self._field_target
+    def _field_blend_amount(self, now: float) -> float:
+        if self._field_target is None or self._field_from == self._field_target:
+            return 1.0
         elapsed = now - self._field_blend_at
-        amount = 1.0 if elapsed >= FIELD_BLEND_SECONDS else max(0.0, elapsed / FIELD_BLEND_SECONDS)
-        icon = blend_color(origin[1], target[1], amount)
-        start = origin[0] if origin[0] is not None else origin[1]
-        end = target[0] if target[0] is not None else target[1]
-        return blend_color(start, end, amount), icon
+        if elapsed >= FIELD_BLEND_SECONDS:
+            return 1.0
+        return max(0.0, elapsed / FIELD_BLEND_SECONDS)
 
     def _retarget_platform_colors(self, now: float):
         target = self._platform_color_targets()
         target_id = (self._color_id(target[0]), self._color_id(target[1]))
         current_id = None if self._field_target is None else (
             self._color_id(self._field_target[0]), self._color_id(self._field_target[1]))
-        if target_id == current_id:
-            return
-        shown = self._displayed_field_colors(now) if self._field_target is not None else None
-        if shown is None:
+        plate = self._compose_field_plate(target)
+        colors_changed = (self._field_target is not None and target_id != current_id
+                          and not self._background_frame.isNull())
+        if not colors_changed:
+            # Variant or size changes replace the plate immediately. A color
+            # change is the only path that crossfades.
             self._field_from = target
+            self._field_target = target
             self._field_blend_at = now - FIELD_BLEND_SECONDS
-        else:
-            self._field_from = shown
-            self._field_blend_at = now
+            self._field_plate_from = QImage()
+            self._field_plate_to = plate
+            self._background_frame = plate
+            return
+        self._field_from = self._field_target
+        self._field_plate_from = self._background_frame.copy()
         self._field_target = target
+        self._field_plate_to = plate
+        if self._field_plate_from.size() != plate.size():
+            self._field_plate_from = self._compose_field_plate(self._field_from)
+        self._field_blend_at = now
 
-    def _blit_platform_field(self, now: float):
-        avatar, icon = self._displayed_field_colors(now)
-        settled = now - self._field_blend_at >= FIELD_BLEND_SECONDS
-        if self._field_target is not None and self._field_target[0] is None and settled:
-            avatar = None
+    def _compose_field_plate(self, colors: tuple[QColor | None, QColor]) -> QImage:
+        avatar, icon = colors
         frame = render_source_color_field(self.size(), avatar, icon, self._field_seconds, self.backdrop_variant)
         with QPainter(frame) as painter:
             veil = (152 if self.login_variant == "sidebar" else 188) if self.backdrop_variant == "classic" else 28
             painter.fillRect(frame.rect(), QColor(12, 14, 20, veil))
-        self._background_frame = frame
+        return frame
+
+    def _blit_platform_field(self, now: float):
+        amount = self._field_blend_amount(now)
+        if amount < 1.0 and not self._field_plate_from.isNull() and not self._field_plate_to.isNull():
+            self._background_frame = crossfade_color_fields(self._field_plate_from, self._field_plate_to, amount)
+            return
+        if self._field_plate_to.isNull() and self._field_target is not None:
+            self._field_plate_to = self._compose_field_plate(self._field_target)
+        if not self._field_plate_to.isNull():
+            self._background_frame = self._field_plate_to.copy()
 
     def _paint_selected_field(self, now: float, *, animate: bool = False):
         key = self._platform_field_key()
@@ -1260,18 +1277,34 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
             self._field_timer.stop()
             return
         now = time.monotonic()
+        blending = self._field_blend_amount(now) < 1.0
+        if blending:
+            # Pose stays put so the cached plates remain aligned.
+            self._field_clock = now
+            self._blit_platform_field(now)
+            self.update()
+            return
         self._field_seconds += max(0.0, now - self._field_clock)
         self._field_clock = now
-        self._blit_platform_field(now)
+        if self._field_target is not None:
+            self._field_plate_to = self._compose_field_plate(self._field_target)
+            self._background_frame = self._field_plate_to
         self.update()
+        self._sync_field_timer()
 
     def _sync_field_timer(self):
         want = self.page == "sources" and self.isVisible() and bool(self.selected_source)
-        if want and not self._field_timer.isActive():
+        if not want:
+            if self._field_timer.isActive():
+                self._field_timer.stop()
+            return
+        blending = self._field_blend_amount(time.monotonic()) < 1.0
+        interval = FIELD_BLEND_INTERVAL_MS if blending else 200
+        if self._field_timer.interval() != interval:
+            self._field_timer.setInterval(interval)
+        if not self._field_timer.isActive():
             self._field_clock = time.monotonic()
             self._field_timer.start()
-        elif not want and self._field_timer.isActive():
-            self._field_timer.stop()
 
     def _paint_library_field(self):
         """Freeze the shared artwork scene; no login timer/capture."""
@@ -1439,13 +1472,7 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
             return "重试账号核验"
         if self.login_state in {"starting", "loading"}:
             return "正在连接…"
-        if self.login_state == "expired" or (self.login_state == "error" and "刷新" in self.message_label.text()):
-            return "刷新二维码"
-        if self.login_state in {"error", "cancelled"}:
-            return "重新登录"
-        if self._account is not None and self._source_status.get(self._account.source_id) == "error":
-            return "重新登录"
-        return "登录"
+        return "刷新二维码"
 
     def _layout_children(self):
         modes = self.page == "modes"

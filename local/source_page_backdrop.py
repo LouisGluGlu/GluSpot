@@ -29,6 +29,9 @@ _BLOBS = (
 )
 FIELD_PERIODS = tuple(blob[-1] for blob in _BLOBS)
 FIELD_BLEND_SECONDS = 0.6
+# One step of a 60 fps clock. The 600 ms blend is a crossfade of two cached
+# plates, so this interval does not rebuild the blobs.
+FIELD_BLEND_INTERVAL_MS = 16
 # Library variants stay distinguishable, and frosted uses the shared cap.
 _VARIANT_SHADE = {"classic": 1.0, "flow": 0.90, "frosted": 0.78, "noir": 0.55}
 _VARIANT_CAP = {"classic": 0.265, "flow": 0.16, "frosted": BACKDROP_MAX_LUMINANCE, "noir": 0.045}
@@ -190,3 +193,28 @@ def render_source_color_field(size: QSize, avatar: QColor | None, icon: QColor,
     rgba[..., :3] = pixels
     rgba[..., 3] = 255
     return QImage(rgba.data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
+
+
+def _tight_rgba(image: QImage) -> np.ndarray:
+    sample = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    raw = np.frombuffer(bytes(sample.constBits()), dtype=np.uint8)
+    view = raw.reshape(sample.height(), sample.bytesPerLine())[:, :sample.width() * 4]
+    return view.reshape(sample.height(), sample.width(), 4)
+
+
+def crossfade_color_fields(start: QImage, end: QImage, amount: float) -> QImage:
+    """Blend two cached plates. No blob rebuild, blur, or color sampling."""
+    if start.isNull():
+        return end.copy()
+    if end.isNull() or amount <= 0.0:
+        return start.copy()
+    if amount >= 1.0:
+        return end.copy()
+    before = _tight_rgba(start).astype(np.float32)
+    after = _tight_rgba(end)
+    if before.shape != after.shape:
+        return (end if amount >= 0.5 else start).copy()
+    mixed = before * (1.0 - amount) + after.astype(np.float32) * amount
+    pixels = np.clip(np.rint(mixed), 0, 255).astype(np.uint8)
+    height, width, _channels = pixels.shape
+    return QImage(pixels.data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()

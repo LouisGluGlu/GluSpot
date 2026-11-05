@@ -14,9 +14,11 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from api.online_music import AccountSnapshot
 from local.playback_entry_window import ENTRY_SOURCES, PlaybackEntryWindow
+import time
+
 from local.source_page_backdrop import (
-    FIELD_BLEND_SECONDS, FIELD_PERIODS, blend_color, extract_dominant_color,
-    icon_dominant_color, render_source_color_field,
+    FIELD_BLEND_SECONDS, FIELD_PERIODS, blend_color, crossfade_color_fields,
+    extract_dominant_color, icon_dominant_color, render_source_color_field,
 )
 
 
@@ -173,13 +175,60 @@ class SourceAccountPageTests(unittest.TestCase):
         self.assertEqual(spy.at(0), ["netease"])
         self.assertEqual(self.window._source_status["qq"], "connected")
 
-    def test_signed_out_detail_shows_only_login(self):
-        self.window.set_login_snapshot(SimpleNamespace(source_id="netease", state="waiting", message="等待扫码"))
-        self.assertEqual(self.window.refresh_button.text(), "登录")
+    def test_qr_page_keeps_the_refresh_label_for_every_login_state(self):
+        for state in ("waiting", "scanned", "expired", "error", "cancelled"):
+            with self.subTest(state=state):
+                self.window.set_login_snapshot(SimpleNamespace(source_id="netease", state=state, message="状态"))
+                self.assertEqual(self.window.refresh_button.text(), "刷新二维码")
+                self.assertNotIn(self.window.refresh_button.text(), ("登录", "重新登录"))
         self.assertFalse(self.window.refresh_button.isHidden())
         self.assertTrue(self.window.enter_button.isHidden())
         self.assertTrue(self.window.account_logout_button.isHidden())
         self.assertEqual(self.window.refresh_button.height(), 38)
+
+    def test_platform_blend_crossfades_cached_plates_at_60fps(self):
+        """Offscreen stand-in for the stutter: time the old plate rebuild against the cached crossfade.
+
+        ``QT_QPA_PLATFORM=offscreen`` has no vsync. A 600 ms blend at 60 fps is
+        36 presented frames, so the gate is those 36 frames finishing inside
+        600 ms, including the window paint.
+        """
+        size = self.window.size()
+        start = render_source_color_field(size, QColor(210, 96, 64), QColor(220, 40, 36), 0.0)
+        end = render_source_color_field(size, None, QColor(40, 90, 220), 0.0)
+        frames = 36
+        began = time.perf_counter()
+        for index in range(frames):
+            render_source_color_field(size, QColor(180, 70, 50), QColor(80, 90, 200), index / frames)
+        rebuild = time.perf_counter() - began
+        began = time.perf_counter()
+        faded = start
+        for index in range(frames):
+            faded = crossfade_color_fields(start, end, index / (frames - 1))
+        fade = time.perf_counter() - began
+        self.assertLess(fade, 0.6)
+        self.assertLess(fade * 4, rebuild)
+        self.assertGreater(faded.pixelColor(faded.width() // 2, faded.height() // 2).blue(),
+                           start.pixelColor(start.width() // 2, start.height() // 2).blue())
+        self.window.show()
+        self.app.processEvents()
+        self.window.select_source("kugou")
+        self.window._expansion.stop()
+        self.window._set_expanded(1.0)
+        self.window._field_blend_at = time.monotonic()
+        self.window._sync_field_timer()
+        self.assertEqual(self.window._field_timer.interval(), 16)
+        with patch("local.playback_entry_window.render_source_color_field") as rebuilds:
+            began = time.perf_counter()
+            for _index in range(frames):
+                # Hold the blend open so the sample counts only crossfades.
+                self.window._field_blend_at = time.monotonic()
+                self.window._advance_platform_field()
+                self.app.processEvents()
+            painted = time.perf_counter() - began
+        rebuilds.assert_not_called()
+        self.assertLess(painted, 0.6)
+        self.assertLessEqual(self.window._background_frame.width(), 256)
 
     def test_selected_platform_field_is_stable_across_layout_and_bounded(self):
         self.window.set_account(AccountSnapshot("netease", True, "n", "LouisHerm", state="verified"))
