@@ -14032,11 +14032,25 @@ class IslandStackVisual(QWidget):
                 delattr(self, "_compact_lyric_clip_path")
         self._paint_taskbar_music_hover_overlay(painter, rect)
 
+    # Historical slot was 20px wide with strokes of width/6. The capsules are
+    # 1.7x that stroke. Gaps stay a fixed fraction of the stroke so four
+    # columns remain separate, and the group stays centered on the old slot.
+    _SEA_BAR_THICKNESS_SCALE = 1.7
+    _SEA_BAR_GAP_RATIO = 0.45
+
     def _sea_level_bars_rect(self, rect: QRectF) -> QRectF:
         scale = min(1.0, max(0.0, rect.height()) / 48.0)
-        width, height = 20.0 * scale, 24.0 * scale
-        return QRectF(rect.right() - 12.0 * scale - width,
-                      rect.center().y() - height / 2.0, width, height)
+        base_width, height = 20.0 * scale, 24.0 * scale
+        stroke = base_width / 6.0 * self._SEA_BAR_THICKNESS_SCALE
+        gap = stroke * self._SEA_BAR_GAP_RATIO
+        width = 4.0 * stroke + 3.0 * gap
+        old_left = rect.right() - 12.0 * scale - base_width
+        left = old_left + (base_width - width) / 2.0
+        # Keep the round caps inside the pill. The right margin used to be
+        # 12px; growing evenly still leaves clearance at the capsule curve.
+        margin = 4.0 * scale
+        left = min(max(left, rect.left() + margin), rect.right() - margin - width)
+        return QRectF(left, rect.center().y() - height / 2.0, width, height)
 
     def _sea_level_bar_color(self) -> QColor:
         color = QColor(self._xiaomi_duotone_palette()[0])
@@ -14051,17 +14065,28 @@ class IslandStackVisual(QWidget):
         display = getattr(self, "_song_wave_display", None)
         if display is not None:
             levels = display.bar_levels(levels)
-        width = rect.width() / 6.0
-        step = (rect.width() - width) / 3.0
+        # Fill the slot: thicker strokes, even gaps, round caps. Level still
+        # runs from a circular cap up to the slot height.
+        gap_ratio = self._SEA_BAR_GAP_RATIO
+        thickness = rect.width() / (4.0 + 3.0 * gap_ratio)
+        gap = thickness * gap_ratio
         painter.save()
+        painter.setClipRect(rect)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self._sea_level_bar_color())
-        for index, level in enumerate(levels):
-            height = width + (rect.height() - width) * level
-            bar = QRectF(rect.left() + index * step, rect.center().y() - height / 2.0,
-                         width, height)
-            painter.drawRoundedRect(bar, width / 2.0, width / 2.0)
+        x = rect.left()
+        for level in levels:
+            try:
+                amount = float(level)
+            except (TypeError, ValueError):
+                amount = 0.0
+            amount = max(0.0, min(1.0, amount))
+            height = thickness + (rect.height() - thickness) * amount
+            height = min(rect.height(), max(thickness, height))
+            bar = QRectF(x, rect.center().y() - height / 2.0, thickness, height)
+            painter.drawRoundedRect(bar, thickness / 2.0, thickness / 2.0)
+            x += thickness + gap
         painter.restore()
 
     def _paint_sea_level_compact(self, painter: QPainter, rect: QRectF):

@@ -100,15 +100,23 @@ class IslandAudioBarPaintTests(unittest.TestCase):
         self.app.processEvents()
 
     def test_paint_has_exactly_four_separate_columns_at_both_dprs(self):
+        shell = QRectF(0.0, 0.0, 220.0, 48.0)
+        slot = self.visual._sea_level_bars_rect(shell)
+        historical = 20.0 / 6.0
+        stroke = slot.width() / (4.0 + 3.0 * self.visual._SEA_BAR_GAP_RATIO)
+        self.assertGreaterEqual(stroke / historical, 1.5)
+        self.assertLessEqual(stroke / historical, 2.0)
+        self.assertLessEqual(slot.right(), shell.right() - 4.0)
+        self.assertGreaterEqual(slot.left(), shell.left())
         for dpr in (1, 2):
             with self.subTest(dpr=dpr):
-                image = QImage(80 * dpr, 60 * dpr, QImage.Format.Format_RGBA8888)
+                image = QImage(240 * dpr, 60 * dpr, QImage.Format.Format_RGBA8888)
                 image.setDevicePixelRatio(dpr)
                 image.fill(Qt.GlobalColor.transparent)
                 self.visual._island_bar_state = SimpleNamespace(levels=(.2, .8, .5, 1.))
                 with QPainter(image) as painter:
-                    self.visual._paint_sea_level_bars(painter, QRectF(10., 10., 20., 24.))
-                rgba = np.frombuffer(image.constBits(), np.uint8).reshape(60 * dpr, 80 * dpr, 4)
+                    self.visual._paint_sea_level_bars(painter, slot)
+                rgba = np.frombuffer(image.constBits(), np.uint8).reshape(60 * dpr, 240 * dpr, 4)
                 columns = np.any(rgba[:, :, 3] > 0, axis=0)
                 starts = np.flatnonzero(columns & ~np.roll(columns, 1))
                 self.assertEqual(len(starts), 4)
@@ -119,6 +127,12 @@ class IslandAudioBarPaintTests(unittest.TestCase):
                 ys = np.flatnonzero(rgba[:, x + 1, 3])
                 self.assertLess(rgba[ys[0], x:x + 5 * dpr, 3].sum(),
                                 rgba[ys[len(ys) // 2], x:x + 5 * dpr, 3].sum())
+                # Ink stays inside the slot. The shell clip is the pill; this
+                # slot clip is the bar group itself.
+                opaque = np.argwhere(rgba[:, :, 3] > 0)
+                self.assertGreater(len(opaque), 0)
+                self.assertGreaterEqual(opaque[:, 1].min() / dpr, slot.left() - 0.01)
+                self.assertLess(opaque[:, 1].max() / dpr, slot.right() + 0.01)
 
     def test_dark_palette_color_is_lifted_without_losing_its_hue(self):
         for source in ("#020509", "#300410", "#031b18", "#090909"):
