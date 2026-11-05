@@ -131,6 +131,8 @@ Jamendo 在 music-lib 里被标成 CC 曲库。它有没有官方 API、歌词�
 
 ## 5. 建议先做哪几个
 
+下面三段是 2026-11-05 第一次调研时的建议。当天稍后用户已经改了顺序：汽水、Apple Music、Spotify 优先，酷我和咪咕靠后，并且允许非官方接口，只要长期能用。当前方案以第 8 节为准。
+
 建议顺序：
 
 1. 酷我。它和现在的模型一样：搜索、歌单、一个播放地址、一份歌词，国内用户用得上。listen1 和一份 Apache-2.0 的 Node 服务都证明有人把这四件事接通过。登录是缺口，仓库也旧，所以第一版可以先做“能搜公开歌单和歌曲”，我的歌单等登录查清再做。
@@ -143,16 +145,18 @@ Jamendo 在 music-lib 里被标成 CC 曲库。它有没有官方 API、歌词�
 
 ## 6. 需要拍板
 
-| 要定的事 | 为什么现在不能代你定 |
+2026-11-05 已定的两件事：可以走非官方接口，但只保留长期还能用的做法；项目不卖软件、不接广告，顶多在爱发电这类地方收捐赠。捐赠算不算上游 README 里的“商用”，仍然未确认，不能当成已经合法。
+
+| 要定的事 | 状态 |
 | --- | --- |
-| 新平台是否继续走非官方接口 | 现在的三家就是这条路。若以后只接受官方 SDK，酷我、咪咕、千千都不该做，Spotify / Apple 也给不了现有播放器要的地址 |
-| GluSpot 将来的许可证，以及能不能商用 | 仓库还没有项目 LICENSE。多家上游 MIT 正文允许商用，README 又禁止商用 |
-| 酷我第一版没有登录、没有我的歌单，能不能上 | 公开资料里没有确认可用的酷我扫码 |
-| 咪咕若同样没有个人歌单，还接不接 | music-lib 作者表是这么写的，本次未复测 |
-| 酷狗歌词要不要排在新平台前面 | 改动比新平台小，但不是这次点名的新平台 |
-| 汽水保持不可用，直到有不捆绑官方签名组件、可随程序分发的方案 | 现有文档和这次看到的新项目都没给到这种方案 |
-| Spotify 的歌词跟唱算不算“把录音和视觉内容同步” | 官方写了禁止同步，没有写歌词算不算。未确认前不要开做 |
-| 要不要做跨平台换源或解灰 | 现有桥接明确没有。YesPlayMusic、music-lib 有。这会改变“播的是不是这一家的授权文件” |
+| 新平台是否继续走非官方接口 | 已定：可以，但必须能长期用。失效后先退回系统媒体会话和官方公开接口 |
+| 商用还是捐赠 | 已定：不商用，只接受捐赠。仓库仍然没有项目 LICENSE |
+| 优先平台 | 已定：汽水、Apple Music、Spotify 先做；酷我、咪咕靠后 |
+| 酷我第一版没有登录、没有我的歌单，能不能上 | 还没定。公开资料里没有确认可用的酷我扫码 |
+| 咪咕若同样没有个人歌单，还接不接 | 还没定。music-lib 作者表是这么写的，本次未复测 |
+| 酷狗歌词要不要排在新平台前面 | 还没定。改动比新平台小 |
+| Spotify 的歌词跟唱算不算“把录音和视觉内容同步” | 还没定。官方写了禁止同步，没有写歌词算不算 |
+| 要不要做跨平台换源或解灰 | 还没定。现有桥接明确没有。按长期可用，不建议做 |
 
 ## 7. 这次没核实的事
 
@@ -162,3 +166,90 @@ Jamendo 在 music-lib 里被标成 CC 曲库。它有没有官方 API、歌词�
 - 没有核对咪咕仓库为什么没有许可证，只确认 GitHub 的 license 字段为空。
 - Apple Music 在 Windows 上除了嵌网页以外有没有支持的原生播放 SDK：未确认。
 - YouTube 在中国大陆的网络可达性：未确认。
+- 汽水、Apple Music、Spotify 的 Windows 客户端这次没有实机播放，系统媒体会话是否真的上报：未确认。
+- 抖音开放平台“汽水音乐”页这次只读到目录名，接口正文没有展开。
+
+## 8. 前提：不商用，只接受捐赠
+
+从这一节起，许可和条款都按这个前提读：GluSpot 不出售软件、不放广告、不把播放能力卖给别人。用户可以在爱发电等处自愿捐赠。这是产品决定，不是律师意见。
+
+| 规则 | 在“不商用、只捐赠”下怎么看 | 来源 |
+| --- | --- | --- |
+| MIT 正文 | 允许使用、修改、分发，要保留版权声明。捐赠不改变“必须带声明” | [listen1 LICENSE](https://github.com/listen1/listen1_desktop/blob/master/LICENSE.md) |
+| README 另写“禁止商用” | 爱发电捐赠算不算商用：未确认。不能因为“我们只收捐赠”就抄这些仓库 | [YesPlayMusic README](https://github.com/qier222/YesPlayMusic)、[KuGouMusicApi 免责声明](https://github.com/MakcRe/KuGouMusicApi)、[qq-music-api README](https://github.com/yakult-green-tea/qq-music-api/blob/master/README.md) |
+| GPL / AGPL | 不商用也不能免除。复制进程序后，分发时仍要按对应许可证公开源码 | [MusicFree LICENSE](https://github.com/maotoumao/MusicFree/blob/master/LICENSE)、[music-lib](https://github.com/guohuiyuan/music-lib) |
+| Spotify 播放条款 | 不商用对上了“不能做商业串流集成”这一条的字面。另一条“不能把录音和幻灯片、视频等视觉内容同步”没有写“非商业就可以”。歌词跟唱算不算：未确认 | [Web Playback SDK 入门](https://developer.spotify.com/documentation/web-playback-sdk/quick-start) |
+| Musixmatch | 条款默认只授予非商业使用，同时写明要付适用的费用。和“不卖软件”对得上，但不是免费全词。本次看到的定价从每月 49 美元起，基础档只有静态歌词，没有逐字时间，也不许缓存 | [API Terms 1.1](https://about.musixmatch.com/apiterms)、[定价](https://developer.musixmatch.com/plans) |
+| LRCLIB | 服务端代码是 MIT。歌词正文的版权是另一件事，作者没有把它说成 CC0。维护者在讨论里说展示歌词“generally OK”，并要求带能联系到的客户端标识；这不是歌词版权授权 | [lrclib 仓库](https://github.com/tranxuanthang/lrclib)、[讨论 #53](https://github.com/tranxuanthang/lrclib/discussions/53) |
+| Apple MusicKit | 要用它，得是付费的 Apple Developer Program 成员。这是开发者账号费用，不是把 GluSpot 变成商业软件 | [Apple 工程师说明](https://developer.apple.com/forums/thread/706861) |
+
+## 9. 什么叫长期可用
+
+一种接法要同时过三关，才算能长期用：
+
+1. 接口有公开文档，或者是操作系统自己的接口，不靠猜签名。
+2. 维护还在。归档、几年不更新、或作者写明随时会封，都不算。
+3. 挂了以后有退路。退路顺序：先读 Windows 正在播放的客户端状态，再用官方公开接口补歌名和歌词。拿不到就只显示歌名，不换源、不解密。
+
+| 方式 | 稳定性 | 维护 | 挂了以后 | 长期可用 |
+| --- | --- | --- | --- | --- |
+| Windows 系统媒体会话（SMTC） | 高。系统从 Windows 10 1809 起提供标题、歌手、专辑、封面缩略图 | 微软公开 API，不跟某一家音乐接口改版 | 客户端不上报时，这一路本来就没有数据，不能再去扒窗口凑 | 适合当保底。它不包含歌词 | [媒体属性](https://learn.microsoft.com/en-us/uwp/api/windows.media.control.globalsystemmediatransportcontrolssessionmediaproperties?view=winrt-22621)、[封面](https://learn.microsoft.com/en-us/uwp/api/windows.media.control.globalsystemmediatransportcontrolssessionmediaproperties.thumbnail?view=winrt-28000) |
+| 现有歌词链：网易云搜索、QQ 搜索、LRCLIB | 中。三家都按歌名和歌手找词，不要求用户登录那一家 | 网易云、QQ 是非官方页面或接口，会失效。LRCLIB 有公开文档，匿名可用，但限流数字不保证 | 一家失效就用下一家。三家都没有时，沿用现在的无歌词封面 | 可做歌词保底。不是逐字承诺 | [api/lyrics.py](../api/lyrics.py) 的 `ONLINE_SOURCE_ORDER`、[LRCLIB 文档](https://lrclib.net/docs) |
+| Spotify 官方 Web API / 网页播放 SDK | 中高。文档在，但播放音频留在 Spotify 播放器里，不给文件地址 | Spotify 自己维护。入门写明要 Premium，且不能做商业串流 | 不能播时退回系统媒体会话，只读状态和封面 | 适合以后做“控制官方客户端”。不适合替换现在的库内播放 | [Web API](https://developer.spotify.com/documentation/web-api)、[播放 SDK](https://developer.spotify.com/documentation/web-playback-sdk) |
+| Apple MusicKit / Apple Music API | 中高。目录、搜索、资料库、网页播放都有文档 | Apple 维护。要付费开发者会员才能签 token。没有订阅时只能碰已购或同步的资料库，曲库播放要订阅 | 公开接口没有逐字歌词。词用 LRCLIB 和现有搜索链。不要用网页特权 token | 官方播放长期可维护，但要改播放器模型，不进最小版本 | [MusicKit](https://developer.apple.com/musickit/)、[生成 developer token](https://developer.apple.com/documentation/applemusicapi/generating-developer-tokens)、[WWDC26：没有订阅只能访问已购或已同步的音乐](https://developer.apple.com/videos/play/wwdc2026/254/) |
+| 抖音开放平台里的汽水目录 | 未确认。这次只看到目录里有“首页推荐”“相关歌曲推荐” | 官方页面还在，正文没读到 | 没有播放和歌词正文前，不能当保底 | 未确认。不能写成已经能接播放 | [汽水音乐 OpenAPI 目录](https://developer.open-douyin.com/docs/resource/zh-CN/dop/develop/openapi/qishui-music/) |
+| Musixmatch 官方 API | 条款稳定，默认非商业，并且要付费 | 官方在维护。本次定价页最低是每月 49 美元的基础档：有静态歌词，没有逐字时间，不许缓存。逐字时间从每月 199 美元的档开始 | 没有买到对应档位就不要显示它的词，退回 LRCLIB | 许可方向和“不商用”一致，但要月费，不进最小版本 | [API Terms](https://about.musixmatch.com/apiterms)、[定价](https://developer.musixmatch.com/plans) |
+| 汽水 / Spotify / Apple 的非官方整曲或私有歌词接口 | 低。签名、cookie、特权 token 会变 | 社区项目在跟，Apple 工程师写明非文档 token 可能随时被挡。汽水解密还要调用官方客户端组件 | 不要自动换一家的音频来顶。退回系统媒体会话加公开歌词 | 不过长期可用这一关。最小版本不做 | [Apple 论坛](https://developer.apple.com/forums/thread/702228)、[music-lib 汽水说明](https://github.com/guohuiyuan/music-lib) |
+| UIA 读窗口、CDP 附调试端口 | 低到中。网易云、QQ 已经有专用路径，这三家没有 | 客户端一改界面就坏 | 退回 SMTC 的进度，哪怕它几秒才跳一次 | 不作为这三家的第一版 | [api/capture/capabilities.py](../api/capture/capabilities.py)、[api/providers.py](../api/providers.py) 的 `_player_position_reader_for` |
+
+现有程序内播放用的网易云、QQ、酷狗包，也按这三关看：包还在更新的可以继续用；归档仓库和 2023 年后再无推送的酷我包，不能因为“以前能播”就当成长期方案。挂了以后同样退回系统媒体会话，不换源。
+
+## 10. 最小版本：只读客户端状态，再加上歌词
+
+先不做登录，也不在 GluSpot 里放这三家的音频。用户自己打开官方客户端听歌。GluSpot 只读 Windows 正在播放会话，再用歌名去找歌词。
+
+系统会话能给的，微软写明了：标题、歌手、专辑、封面缩略图，以及时间轴和播放状态。歌词不在这里。来源见上一节的微软文档。GluSpot 现在的系统抓取已经会挑一个外部会话，读这些字段，并按歌名、歌手、专辑、时长去找词。封面走会话缩略图。来源：[api/providers.py](../api/providers.py) 的 `_select_media_session`、`_read_visual_data`、`_read_thumbnail`；歌词顺序是网易云、QQ、LRCLIB，见 [api/lyrics.py](../api/lyrics.py)。
+
+这一路不区分是不是会员曲。客户端肯上报，就有歌名和进度；不肯上报，就没有。进度可能几秒才动一次，歌词跟唱会比网易云的调试端口粗。这是保底，不是逐字承诺。
+
+UIA 和 CDP 对这三家都不可行，作为第一版：进度读取器只为网易云和 QQ 创建；CDP 暂停补发也只认网易云进程。汽水在设置里有一个默认安装路径，那只是配置占位，没有对应的窗口读取器。
+
+| 平台 | 系统抓取现在能不能认 | 库内登录播放 | 最小版本实际怎么做 |
+| --- | --- | --- | --- |
+| Spotify | 代码已把 `spotify.exe` 和名字里的 Spotify 标成 SMTC。实机有没有上报：未确认 | 不行。官方播放器不交出音频地址。非官方整曲不过长期可用 | 先在 Windows 上确认现有抓取已经能跟上 Spotify。歌词用现有三来源。不新做登录 |
+| Apple Music | 代码没有单独的 Apple Music 名字。会话若出现，会落到通用抓取，显示名可能是一长串应用 id。第三方工具自称能读到 Windows 版 Apple Music 的会话，GluSpot 没复测 | 不行，作为最小版本。MusicKit 要付费开发者账号；曲库播放还要用户订阅。公开 API 没有逐字歌词 | 只加显示名，并在 Windows 上看会话出不出现。词仍走现有搜索。不嵌 MusicKit |
+| 汽水 | 应用 id 里若带“汽水 / qishui / douyin”，显示名会写成汽水音乐。没有专用 SMTC 能力项，也没有窗口读取器。官方客户端有 Windows 10 及以上的下载页。它会不会上报会话：未确认 | 不行。本仓库已认定没有可分发的扫码适配器。新的非官方做法要解密或调用官方签名组件，两份说明还互相矛盾 | 先确认官方 Windows 客户端会不会出现在系统正在播放里。会，就沿用通用抓取和现有歌词。不会，这一版就停，不扒窗口 |
+
+来源：[api/capture/capabilities.py](../api/capture/capabilities.py)、[api/providers.py](../api/providers.py) 的 `_source_app_name` 与 `_player_position_reader_for`、[local/settings_store.py](../local/settings_store.py) 的 `qishui` 配置、[汽水 Windows 下载页](https://www.qishui.com/download)、[一份自称读取 Apple Music Windows 会话的插件说明](https://github.com/Brian-Simmons1/vencord-apple-music-windows)。
+
+LRCLIB 文档现在要求请求带上应用名和联系方式。GluSpot 现有请求头只有来源网页，没有应用名。最小版本若继续用它，应补上标识。这是文档要求，不是新接口。来源：[LRCLIB 客户端标识](https://lrclib.net/docs)、[api/lyrics.py](../api/lyrics.py) 的 `_lrclib_headers`。
+
+### 三家各自的官方能力
+
+| 平台 | 登录 | 官方能给 | 歌词 |
+| --- | --- | --- | --- |
+| Spotify | OAuth。播放 SDK 入门要求 Premium 账号的 token。注册地区有香港、澳门、台湾，没有中国大陆 | 资料、搜索、歌单、控制播放。音频在 Spotify 自己的播放器里 | 本次读到的 Web API 概览没有歌词。词用 LRCLIB 和现有网易云/QQ 搜索。Musixmatch 要付费，基础档还没有逐字时间 |
+| Apple Music | 用户授权，外加开发者自己签的 token。开发者必须是付费 Apple Developer Program 成员 | 目录、搜索、资料库、网页里的 MusicKit 播放。整首文件地址未在公开目录里出现 | 公开对象只有“有没有歌词”。逐字词在未公开接口上，官方说可能随时被挡。合法保底仍是 LRCLIB 和现有搜索 |
+| 汽水 | 官方目录这次没看到登录或扫码说明。未确认 | 目录名只有首页推荐、相关歌曲推荐。播放地址未确认 | 官方歌词：未确认。保底仍是按歌名去现有歌词链 |
+
+Spotify 与 Apple 的链接见第 4 节和第 9 节。汽水官方目录见 [开放平台](https://developer.open-douyin.com/docs/resource/zh-CN/dop/develop/openapi/qishui-music/)。
+
+### 最小版本要改什么
+
+| 项 | 范围 | 工作量 | 风险 |
+| --- | --- | --- | --- |
+| 认人和显示名 | Spotify 已有。Apple Music、汽水只补名字映射，不新写抓取器 | 小 | 实机会话没出现时，改名也没有歌 |
+| 歌词 | 继续网易云、QQ、LRCLIB。给 LRCLIB 补应用标识 | 小 | 歌名对不上就没有词。LRCLIB 限流会变，文档写明数字不保证 |
+| 进度和封面 | 继续系统会话。不给这三家做 UIA / CDP | 小，主要是 Windows 验收 | 进度粗，封面可能没有或很小 |
+| 库内登录播放 | 不做 | 不做 | 非官方整曲和特权歌词都过不了长期可用 |
+| 条款 | 不卖软件。Spotify 歌词跟唱是否违规仍未确认，最小版本先只读客户端，不把 Spotify 音频放进 GluSpot | 文档和验收 | 未确认前，不要宣传成“官方授权歌词” |
+
+## 11. 建议的实施顺序
+
+1. Spotify 的只读会话。代码已经认得进程，先在 Windows 上看歌名、进度、封面和现有歌词链是否够用。
+2. Apple Music 的只读会话。补显示名，同一套歌词。MusicKit 等有人拿到付费开发者账号、并接受公开接口没有逐字歌词之后再单独立项。
+3. 汽水的只读会话。先看官方 Windows 客户端会不会上报。官方开放平台在播放和歌词上仍是未确认，非官方解密不排进这一版。
+4. 酷我和咪咕仍靠后。它们的非官方包要么多年不更新，要么没有许可证，过不了这次的长期可用标准。
+
+三家都挂了系统会话时，降级是同一句：只留歌名和封面，歌词空着，不换源、不解密。
+
