@@ -177,6 +177,7 @@ from local.audio_output_icons import paint_audio_output_icon
 from local.island_audio_device_motion import IslandDevicePayload, reliable_device_battery
 from local.metadata_marquee import (
     FRAME_SECONDS as MARQUEE_FRAME_SECONDS,
+    ISLAND_TITLE_SPEED_SCALE,
     marquee_pose,
     paint_faded_text,
 )
@@ -16053,7 +16054,11 @@ class IslandStackVisual(QWidget):
         text = " ".join(str(text or "").split())
         if not text or rect.width() <= 1.0 or rect.height() <= 1.0:
             return
-        font = self._font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        # The expanded island title stays the original bold face. J's
+        # semibold size and cover-colored artist belong only on the wide panel.
+        weight = QFont.Weight.Bold if field == "title" or bold else QFont.Weight.Normal
+        font = self._font(size, weight)
+        pace = ISLAND_TITLE_SPEED_SCALE if field == "title" else 1.0
         text_width = float(QFontMetrics(font).horizontalAdvance(text))
         view = float(rect.width())
         identity = (
@@ -16078,7 +16083,7 @@ class IslandStackVisual(QWidget):
             samples.pop(field, None)
             previous = clocks[field]
         elapsed = now - float(previous[1])
-        pose = marquee_pose(text_width, view, elapsed)
+        pose = marquee_pose(text_width, view, elapsed, pace)
         if pose.moving:
             last = samples.get(field)
             if last is not None and 0.0 <= now - float(last[0]) < MARQUEE_FRAME_SECONDS:
@@ -16091,6 +16096,7 @@ class IslandStackVisual(QWidget):
         painter.setPen(color)
 
         def draw(target: QPainter) -> None:
+            target.setFont(font)
             target.drawText(
                 QRectF(rect.left() - pose.offset, rect.top(), text_width + 4.0, rect.height()),
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,

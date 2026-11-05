@@ -33,6 +33,8 @@ LEFT_FADE_FRACTION = 0.06
 RIGHT_FADE_FRACTION = 0.08
 FRAME_SECONDS = 1.0 / 30.0
 OVERFLOW_EPSILON = 1.0
+# The expanded island title uses the same pause/travel/fade shape, twice as brisk.
+ISLAND_TITLE_SPEED_SCALE = 2.0
 
 
 @dataclass(frozen=True)
@@ -44,18 +46,25 @@ class MarqueePose:
     fade_right: bool
 
 
-def cycle_seconds(text_width: float) -> float:
-    return max(MIN_CYCLE_SECONDS, max(0.0, float(text_width)) / PIXELS_PER_CYCLE_SECOND)
+def cycle_seconds(text_width: float, speed_scale: float = 1.0) -> float:
+    """Full pause-travel-pause cycle. ``speed_scale`` 2 halves it."""
+    scale = float(speed_scale) if speed_scale and float(speed_scale) > 0.0 else 1.0
+    return max(
+        MIN_CYCLE_SECONDS / scale,
+        max(0.0, float(text_width)) / (PIXELS_PER_CYCLE_SECOND * scale),
+    )
 
 
-def marquee_pose(text_width: float, view_width: float, elapsed: float) -> MarqueePose:
+def marquee_pose(
+    text_width: float, view_width: float, elapsed: float, speed_scale: float = 1.0,
+) -> MarqueePose:
     """Offset grows from 0 to the overflow, then the cycle restarts at 0."""
     text_width = max(0.0, float(text_width))
     view_width = max(0.0, float(view_width))
     overflow = text_width - view_width
     if overflow <= OVERFLOW_EPSILON:
         return MarqueePose(0.0, False, float("inf"), False, False)
-    duration = cycle_seconds(text_width)
+    duration = cycle_seconds(text_width, speed_scale)
     start_hold = START_HOLD_FRACTION * duration
     travel = TRAVEL_FRACTION * duration
     elapsed = float(elapsed) % duration

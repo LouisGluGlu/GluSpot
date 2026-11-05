@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 from local.island_stack_visual import IslandStackVisual
 from local.metadata_marquee import (
     FRAME_SECONDS,
+    ISLAND_TITLE_SPEED_SCALE,
     brightened_cover_accent,
     cycle_seconds,
     marquee_pose,
@@ -60,6 +61,28 @@ class MetadataMarqueeTests(unittest.TestCase):
         self.assertEqual(marquee_pose(text_width, view, duration).offset, 0.0)
         self.assertFalse(marquee_pose(80.0, 200.0, 3.0).moving)
         self.assertEqual(marquee_pose(80.0, 200.0, 3.0).delay, float("inf"))
+
+    def test_island_title_pace_doubles_speed_and_halves_the_hold(self):
+        text_width, view = 280.0, 160.0
+        overflow = text_width - view
+        slow = cycle_seconds(text_width)
+        fast = cycle_seconds(text_width, ISLAND_TITLE_SPEED_SCALE)
+        self.assertEqual(slow, 10.0)
+        self.assertEqual(fast, 5.0)
+        self.assertAlmostEqual(0.14 * slow, 1.4)
+        self.assertAlmostEqual(0.14 * fast, 0.7)
+        slow_speed = overflow / (0.72 * slow)
+        fast_speed = overflow / (0.72 * fast)
+        self.assertAlmostEqual(slow_speed, 120.0 / 7.2)
+        self.assertAlmostEqual(fast_speed, slow_speed * 2.0)
+        self.assertEqual(marquee_pose(text_width, view, 0.9).offset, 0.0)
+        self.assertGreater(marquee_pose(text_width, view, 0.9, ISLAND_TITLE_SPEED_SCALE).offset, 0.0)
+        fast_mid = 0.14 * fast + 0.72 * fast * 0.5
+        self.assertAlmostEqual(
+            marquee_pose(text_width, view, fast_mid, ISLAND_TITLE_SPEED_SCALE).offset,
+            overflow * 0.5,
+            delta=0.05,
+        )
 
     def test_short_text_uses_an_eight_second_cycle(self):
         self.assertEqual(cycle_seconds(28.0), 8.0)
@@ -144,6 +167,12 @@ class MetadataMarqueeTests(unittest.TestCase):
             visual.track_title = "Gold Up In My Teeth (Remastered 2024 Deluxe Edition)"
             visual.artist = "Haley"
             visual.scroll_phase = 4.2
+            weights = []
+            original_font = visual._font
+            def capture_font(size, weight=QFont.Weight.Normal, shrink=True):
+                weights.append(weight)
+                return original_font(size, weight, shrink=shrink)
+            visual._font = capture_font
             rect = QRectF(0, 0, 90, 24)
             image = QImage(140, 40, QImage.Format.Format_ARGB32_Premultiplied)
             image.fill(QColor(0, 0, 0, 0))
@@ -154,6 +183,8 @@ class MetadataMarqueeTests(unittest.TestCase):
                 visual._paint_island_metadata_line(
                     painter, QRectF(0, 26, 90, 16), visual.artist, 9, QColor(180, 180, 180), False, "artist",
                 )
+            self.assertEqual(weights, [QFont.Weight.Bold, QFont.Weight.Normal])
+            self.assertNotEqual(weights[0], QFont.Weight.DemiBold)
             self.assertEqual(visual._island_metadata_clocks["title"][1], 10.0)
             self.assertEqual(visual._island_metadata_clocks["artist"][1], 10.0)
             visual.scroll_phase = 80.0
