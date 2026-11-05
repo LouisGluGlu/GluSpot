@@ -41,11 +41,20 @@ class InstantPlaybackTests(unittest.TestCase):
         self.player.play_queue((self.song,))
         self.player.track = replace(self.player.track, position_seconds=41, is_playing=False)
         self.assertTrue(self.controller.return_from_music_surface())
+        resumed = []
+
+        def send(command):
+            resumed.append(command)
+            self.player.track = replace(self.player.track, is_playing=True)
+            return True
+
+        self.player.send_playback_command = send
         before = tuple(self.player.calls)
         self.controller.play_collection(row, "default", QRect())
         self.assertEqual(tuple(self.player.calls), before)
+        self.assertEqual(resumed, ["toggle_play_pause"])
         self.assertEqual(self.player.track.position_seconds, 41)
-        self.assertFalse(self.player.track.is_playing)
+        self.assertTrue(self.player.track.is_playing)
         self.assertFalse(self.window.isVisible())
 
     def test_reopen_album_restores_its_song_when_another_session_is_showing(self):

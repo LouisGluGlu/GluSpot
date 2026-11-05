@@ -120,6 +120,68 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
         self.assertEqual(frozen.reason, "external_title_only")
         self.assertAlmostEqual(frozen.position_seconds, 48.5)
 
+    async def test_ui_thread_projects_cached_smtc_without_blocking_on_the_read(self):
+        import time
+        session = Session("spotify.exe", title="外部歌曲", artist="外部歌手")
+        session.position = 36.0
+
+        def slow_timeline():
+            time.sleep(0.2)
+            return SimpleNamespace(position=session.position, start_time=0.0, end_time=200.0)
+
+        session.get_timeline_properties = slow_timeline
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="spotify.exe", session=session)
+        lines = []
+
+        class Collect(logging.Handler):
+            def emit(self, record):
+                lines.append(record.getMessage())
+
+        handler = Collect()
+        logger = logging.getLogger("GluSpot.capture.clock")
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        holder = {}
+
+        def ui_call():
+            mark = time.perf_counter()
+            holder["track"] = self.provider.get_visual_data().track
+            holder["elapsed"] = time.perf_counter() - mark
+            holder["thread"] = threading.get_ident()
+
+        try:
+            worker = threading.Thread(target=ui_call)
+            worker.start()
+            worker.join(1.0)
+            self.assertFalse(worker.is_alive())
+            self.assertLess(holder["elapsed"], 0.1)
+            self.assertEqual(holder["track"].position_source, "external-title-only")
+            self.assertNotEqual(holder["thread"], threading.get_ident())
+            await asyncio.wait_for(asyncio.wrap_future(self.provider._external_clock_task), 1.0)
+        finally:
+            logger.removeHandler(handler)
+        self.assertTrue(any(line.startswith("source=smtc ") and "blocked=0" in line and "ok=1" in line for line in lines))
+        elapsed = next(float(part.split("=", 1)[1]) for line in lines if line.startswith("source=smtc ") for part in line.split() if part.startswith("elapsed_ms="))
+        self.assertGreater(elapsed, 100.0)
+        self.assertEqual(self.provider._external_clock_timings[-1][4], threading.get_ident())
+        reads = []
+        session.get_timeline_properties = lambda: reads.append(1) or SimpleNamespace(
+            position=40.0, start_time=0.0, end_time=200.0)
+        again = {}
+
+        def second_call():
+            again["track"] = self.provider.get_visual_data().track
+
+        follow = threading.Thread(target=second_call)
+        follow.start()
+        follow.join(1.0)
+        self.assertFalse(follow.is_alive())
+        self.assertEqual(reads, [])
+        self.assertEqual(again["track"].position_source, "capture-model")
+        self.assertGreater(again["track"].position_seconds, 36.0)
+
     async def test_netease_pin_uses_ready_cdp_progress_without_opening_a_channel(self):
         session = Session("cloudmusic.exe", title="云端歌曲", artist="歌手")
         session.get_timeline_properties = lambda: SimpleNamespace(

@@ -481,15 +481,18 @@ class MusicLibraryController(QObject):
         return str(getattr(track, "track_id", "") or "") == str(getattr(owned, "track_id", "") or "")
 
     def _restore_retained_album_playback(self):
-        """Resume the album already on the owned player without reloading it."""
+        """Play the retained album from its current song and position."""
         owned = self.player.track
-        if owned is None or self._published_track_matches(owned):
+        if owned is None:
             return
         playing = getattr(self.player, "interruption_playing", None)
         audible = bool(playing()) if callable(playing) else bool(getattr(owned, "is_playing", False))
         command = getattr(self.player, "send_playback_command", None)
+        # Reopening the album is a play request, including after a pause.
         if not audible and callable(command):
             command("toggle_play_pause")
+        if self._published_track_matches(owned):
+            return
         visual = self.player.visual_data() if callable(getattr(self.player, "visual_data", None)) else None
         apply = getattr(self.island, "_apply_visual_data", None)
         if visual is not None and callable(apply):
@@ -1155,8 +1158,8 @@ class MusicLibraryController(QObject):
         if (self._active_collection == (identity, self._origin_token())
                 and self.player.track is not None
                 and self.player.status not in {"idle", "stream_unavailable", "playback_failed"}):
-            # The same album keeps its song and position. If another session
-            # is what the island is showing, bring this album back in front.
+            # The same album keeps its song and position, and starts playing
+            # even when the listener left it paused.
             self._restore_retained_album_playback()
             self.window.finish_open_transition()
             self.open_now_playing()

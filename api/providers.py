@@ -927,6 +927,73 @@ class PlaybackSourceProvider:
             return None
         return number == 4
 
+    def _provider_loop_is_caller(self):
+        """WinRT timeline reads belong on the media loop, never the UI thread."""
+        loop = getattr(self.system, "_loop", None)
+        if loop is None or not loop.is_running():
+            return True
+        try:
+            return asyncio.get_running_loop() is loop
+        except RuntimeError:
+            return False
+
+    def _record_clock_read(self, source, elapsed_ms, ok, blocked):
+        entry = (source, round(float(elapsed_ms), 2), int(bool(ok)), int(bool(blocked)), threading.get_ident())
+        timings = self.__dict__.setdefault("_external_clock_timings", [])
+        timings.append(entry)
+        if len(timings) > 32:
+            del timings[:-32]
+        logging.getLogger("GluSpot.capture.clock").info(
+            "source=%s elapsed_ms=%.2f ok=%d blocked=%d",
+            source, float(elapsed_ms), int(bool(ok)), int(bool(blocked)),
+        )
+
+    def _remember_smtc_clock(self, session, clock):
+        marker = id(session) if session is not None else 0
+        if clock is None:
+            self._external_clock_cache = None
+            return
+        position, duration, playing, sampled_at = clock
+        self._external_clock_cache = (marker, position, duration, bool(playing), float(sampled_at))
+
+    def _cached_smtc_clock(self, session, now):
+        cached = getattr(self, "_external_clock_cache", None)
+        if cached is None or session is None or cached[0] != id(session):
+            return None
+        _marker, position, duration, playing, sampled_at = cached
+        age = now - sampled_at
+        if age < -0.05 or age > 2.5:
+            return None
+        if playing:
+            position += age
+            if duration > 0.0:
+                position = min(duration, position)
+        return (position, duration, playing, sampled_at)
+
+    def _schedule_smtc_clock_read(self, session):
+        """One timeline read on the media loop at a time, at most twice a second."""
+        loop = getattr(self.system, "_loop", None)
+        if loop is None or not loop.is_running() or session is None:
+            return
+        now = time.monotonic()
+        task = getattr(self, "_external_clock_task", None)
+        if task is not None and not task.done():
+            return
+        if now - float(getattr(self, "_external_clock_read_at", 0.0) or 0.0) < 0.5:
+            return
+        self._external_clock_read_at = now
+
+        async def job():
+            started = time.perf_counter()
+            clock = self._smtc_playback_clock(session, time.monotonic())
+            self._record_clock_read("smtc", (time.perf_counter() - started) * 1000.0, clock is not None, False)
+            self._remember_smtc_clock(session, clock)
+
+        try:
+            self._external_clock_task = asyncio.run_coroutine_threadsafe(job(), loop)
+        except Exception:
+            self._external_clock_task = None
+
     def _smtc_playback_clock(self, session, now):
         if session is None or not callable(getattr(session, "get_timeline_properties", None)):
             return None
@@ -980,10 +1047,34 @@ class PlaybackSourceProvider:
             position = min(duration, position)
         return (position, duration, bool(playing), now)
 
+    def _read_external_playback_clock(self, pin, now, track):
+        """CDP is an in-memory sample. SMTC is read on the media loop, then projected.
+
+        A background snapshot that already has a real timeline is kept. Reading
+        the session again on the UI thread was the visible hitch.
+        """
+        cdp = self._cdp_playback_clock(pin, now)
+        if cdp is not None:
+            return cdp
+        if self._visual_progress_usable(track):
+            return "keep"
+        session = getattr(pin, "session", None)
+        if self._provider_loop_is_caller():
+            started = time.perf_counter()
+            clock = self._smtc_playback_clock(session, now)
+            self._record_clock_read("smtc", (time.perf_counter() - started) * 1000.0, clock is not None, True)
+            self._remember_smtc_clock(session, clock)
+            return clock
+        cached = self._cached_smtc_clock(session, now)
+        self._schedule_smtc_clock_read(session)
+        return cached
+
     def _apply_external_playback_clock(self, data, pin):
         """Follow the captured session clock, or withhold progress when it cannot be read."""
         now = time.monotonic()
-        clock = self._cdp_playback_clock(pin, now) or self._smtc_playback_clock(getattr(pin, "session", None), now)
+        clock = self._read_external_playback_clock(pin, now, data.track)
+        if clock == "keep":
+            return data
         track = data.track
         if clock is None:
             if self._visual_progress_usable(track):
