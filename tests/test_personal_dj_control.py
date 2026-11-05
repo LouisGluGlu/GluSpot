@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from api.models import AudioFrame
 from local.owned_audio_bridge import OwnedAudioBridge
 from local.personal_dj_icon import (DJ_RING_CYCLE_SECONDS, DJ_RING_HOLD_SECONDS, DJ_RING_TRAVEL_SECONDS,
-                                   paint_personal_dj_icon, personal_dj_ring_color, personal_dj_ring_poses, personal_dj_status_color,
+                                   paint_personal_dj_icon, personal_dj_icon_bounds, personal_dj_ring_color, personal_dj_ring_poses, personal_dj_status_color,
                                    personal_dj_status_opacity, personal_dj_travel_progress)
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_owned_audio_bridge_handoff import Owner
@@ -254,6 +254,28 @@ class PersonalDjControlTests(unittest.TestCase):
             self.assertFalse(self.window._button_rects)
         self.window._reset_control_idle(111)
         self.assertEqual(self.window._personal_dj_reveal_at(111), 1)
+
+    def test_status_dot_sits_on_the_waveform_corner_in_wide_and_narrow(self):
+        self.enabled = True
+        self.presentation = {"state": "ready", "next_title": "", "token": 1}
+        for size in ((960, 540), (440, 340)):
+            with self.subTest(size=size):
+                self.window.resize(*size)
+                with patch("local.music_surface_window.time.monotonic", return_value=100):
+                    self.window._sync_owned_playback_mode()
+                region = QRectF(self.window.rect())
+                icon, _caption = self.window._personal_dj_geometry(region, 100, expansion=0, posed=False)
+                inner = icon.adjusted(icon.width() * .18, icon.height() * .14,
+                                      -icon.width() * .18, -icon.height() * .14)
+                glyph = personal_dj_icon_bounds(inner, elapsed=0)
+                badge = self.window._personal_dj_status_badge_rect(icon, inner, None, 0)
+                self.assertFalse(glyph.isNull())
+                self.assertAlmostEqual(badge.center().x(), glyph.right())
+                self.assertAlmostEqual(badge.center().y(), glyph.bottom())
+                self.assertAlmostEqual(badge.width(), max(6.0, min(10.0, icon.width() * 0.22)))
+                self.assertAlmostEqual(badge.height(), badge.width())
+                self.assertLess(badge.center().x(), icon.right() - icon.width() * 0.08)
+                self.assertLess(badge.center().y(), icon.bottom() - icon.height() * 0.08)
 
     def test_button_is_bottom_right_with_own_round_hit_shape(self):
         for size in ((640, 360), (960, 540), (1920, 1080)):

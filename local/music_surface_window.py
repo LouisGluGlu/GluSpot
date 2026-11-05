@@ -93,7 +93,10 @@ from local.audio_output_motion import OutputConnectionMotion, connection_capsule
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_mode_controls import PRESENTATION_GLYPH_STATES, paint_presentation_glyph
 from local.music_source_icons import paint_music_source_icon
-from local.personal_dj_icon import DJ_RING_CYCLE_SECONDS, paint_personal_dj_icon, personal_dj_status_color, personal_dj_status_opacity
+from local.personal_dj_icon import (
+    DJ_RING_CYCLE_SECONDS, paint_personal_dj_icon, personal_dj_icon_bounds,
+    personal_dj_status_badge, personal_dj_status_color, personal_dj_status_opacity,
+)
 from local.liquid_glass import GlassCaptureMixin, paint_liquid_glass, widget_glass_level, glass_material_tint, live_glass_paint, clear_glass_cache
 from local.ui_theme import app_dark_mode
 from local.control_hover import HoverMotion
@@ -9955,6 +9958,14 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         bounds = bounds.adjusted(-20., -20., 20., 20.)
         paint_control_overlay(painter, bounds, lambda layer: self._draw_personal_dj_control(layer, rect))
 
+    def _personal_dj_status_badge_rect(self, button: QRectF, glyph_box: QRectF, frame, elapsed: float) -> QRectF:
+        """Dot size stays on the round button; its center sits on the waveform corner."""
+        glyph = personal_dj_icon_bounds(glyph_box, bands=frame, elapsed=elapsed)
+        if glyph.isNull():
+            glyph = QRectF(glyph_box)
+        dot = max(6.0, min(10.0, button.width() * 0.22))
+        return personal_dj_status_badge(glyph, dot)
+
     def _draw_personal_dj_control(self, painter: QPainter, rect: QRectF):
         now = time.monotonic()
         reveal = self._personal_dj_reveal_at(now)
@@ -10000,19 +10011,18 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             status_color = QColor("#16c777")
         else:
             status_color = QColor("#8b919c")
-        if status_reveal < .999 and not icon.isEmpty():
-            painter.save()
-            painter.setOpacity(reveal * (1.0 - status_reveal))
-            dot = max(6.0, min(10.0, icon.width() * 0.22))
-            badge = QRectF(icon.right() - dot * 0.82, icon.bottom() - dot * 0.82, dot, dot)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(status_color)
-            painter.drawEllipse(badge)
-            painter.restore()
         control_ink = self._surface_glass_ink(status_rect if status_reveal > .001 else button, live=True)
         color = (self._interpolated_control_color("dj-accent", self._album_accent_color(button)) if self._owned_dj_speaking
                  and self._owned_personal_dj_enabled and status_reveal < .999 else control_ink)
         inner = icon.adjusted(icon.width() * .18, icon.height() * .14, -icon.width() * .18, -icon.height() * .14)
+        if status_reveal < .999 and not icon.isEmpty():
+            painter.save()
+            painter.setOpacity(reveal * (1.0 - status_reveal))
+            badge = self._personal_dj_status_badge_rect(icon, inner, frame, elapsed)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(status_color)
+            painter.drawEllipse(badge)
+            painter.restore()
         neutral = control_ink
         paint_personal_dj_icon(painter, inner, color, bands=frame, elapsed=elapsed, neutral=neutral)
         if expansion > .25 and self._dj_next_title and not self._dj_voice_selector_active:

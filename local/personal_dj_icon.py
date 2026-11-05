@@ -40,6 +40,37 @@ def personal_dj_ring_poses(elapsed: float):
     return tuple(sorted(poses, key=lambda item: item[1]))
 
 
+def personal_dj_icon_ellipses(rect: QRectF, *, bands=None, elapsed: float = 0.0):
+    """One ellipse per visible speech ring, in the same place the icon paints them."""
+    values = (bands.low, bands.mid, bands.high) if bands is not None else (0.0, 0.0, 0.0)
+    levels = tuple(max(0.0, min(1.0, float(level) * 4.0)) for level in values)
+    ellipses = []
+    for identity, x, height_fraction, opacity in personal_dj_ring_poses(elapsed):
+        energy = levels[(0, 1, 2, 1, 0)[identity]]
+        height = rect.height() * min(1.0, height_fraction + energy * .10)
+        width = rect.width() * (.15 + height_fraction * .13 + energy * .055)
+        ellipse = QRectF(rect.left() + rect.width() * x - width / 2,
+                         rect.center().y() - height / 2, width, height)
+        ellipses.append((identity, x, opacity, energy, ellipse))
+    return tuple(ellipses)
+
+
+def personal_dj_icon_bounds(rect: QRectF, *, bands=None, elapsed: float = 0.0) -> QRectF:
+    """Tight box around the waveform, not the round button behind it."""
+    bounds = QRectF()
+    for _identity, _x, opacity, _energy, ellipse in personal_dj_icon_ellipses(
+            rect, bands=bands, elapsed=elapsed):
+        if opacity <= 0.001:
+            continue
+        bounds = QRectF(ellipse) if bounds.isNull() else bounds.united(ellipse)
+    return bounds
+
+
+def personal_dj_status_badge(glyph: QRectF, dot: float) -> QRectF:
+    """Center the dot on the waveform's bottom-right corner so it overlaps the edge."""
+    return QRectF(glyph.right() - dot / 2.0, glyph.bottom() - dot / 2.0, dot, dot)
+
+
 def paint_personal_dj_icon(
     painter: QPainter, rect: QRectF, color: QColor, *, bands=None,
     elapsed: float = 0.0, neutral: QColor | None = None,
@@ -47,19 +78,13 @@ def paint_personal_dj_icon(
     backdrop: QColor | Callable[[QRectF], QColor] | None = None,
 ):
     """Keep page tones, or blend island side light into its actual backdrop."""
-    values = (bands.low, bands.mid, bands.high) if bands is not None else (0.0, 0.0, 0.0)
-    levels = tuple(max(0.0, min(1.0, float(level) * 4.0)) for level in values)
     neutral = QColor(neutral or QColor(245, 246, 248))
     painter.save()
     parent_opacity = painter.opacity()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    for identity, x, height_fraction, opacity in personal_dj_ring_poses(elapsed):
-        energy = levels[(0, 1, 2, 1, 0)[identity]]
-        height = rect.height() * min(1.0, height_fraction + energy * .10)
-        width = rect.width() * (.15 + height_fraction * .13 + energy * .055)
-        ellipse = QRectF(rect.left() + rect.width() * x - width / 2,
-                         rect.center().y() - height / 2, width, height)
+    for identity, x, opacity, energy, ellipse in personal_dj_icon_ellipses(
+            rect, bands=bands, elapsed=elapsed):
         painter.setOpacity(parent_opacity * opacity)
         # Only island callers supply their background. Their left rim keeps
         # the cover characteristic instead of gaining positional white tint.
