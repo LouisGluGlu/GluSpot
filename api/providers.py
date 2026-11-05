@@ -445,17 +445,38 @@ class PlaybackSourceProvider:
         self._interruption_last_edge = None
         if event["will_play"]:
             self._interruption_suspended = False
+            pin = self.__dict__.get("_interruption_pin")
+            if pin is not None:
+                # This play resumes the library. Do not pause the session the
+                # island is currently capturing, and do not let that session's
+                # own SMTC identity count as an earlier external start.
+                self._interruption_preserved_session = getattr(pin, "session", None)
 
     def _owned_interruption_started(self, event):
         if not self._interruption_enabled or event["serial"] != self.owned._interruption_serial:
             return
         self._interruption_owned_playing = True
         self._interruption_owned_at = event["at"]
-        self._interruption_cooldown_until = 0.0  # Explicit user Play takes precedence.
+        from api.capture.interruption import is_self_app, same_session
+        preserved = getattr(self, "_interruption_preserved_session", None)
+        if preserved is not None:
+            # The pause of other players, and a 300 ms CDP supplement, must not
+            # be read as a new external start that pauses the library again.
+            self._interruption_cooldown_until = max(
+                float(self._interruption_cooldown_until or 0.0), time.monotonic() + 1.0)
+        else:
+            self._interruption_cooldown_until = 0.0  # A later external start can still yield.
         observer = self._interruption_observer
         snapshots = () if observer is None else observer.snapshots()
-        targets = tuple(item for item in snapshots if item.playing and item.observed_at <= event["at"]
-                        and self._interruption_policy.allows(item.kind))
+        targets = tuple(
+            item for item in snapshots
+            if item.playing and item.observed_at <= event["at"]
+            and self._interruption_policy.allows(item.kind)
+            and not is_self_app(getattr(item, "app_id", ""))
+            and not (preserved is not None and (
+                item.session is preserved or same_session(item.session, preserved)))
+        )
+        self._interruption_preserved_session = None
         if observer is None:
             self._interruption_log(phase="owned-start", decision="skip", reason="observer-missing",
                                    targets=0, observer="missing")
@@ -691,6 +712,10 @@ class PlaybackSourceProvider:
             generation, self._interruption_intent, event, music, self._interruption_edge)
 
     async def _send_netease_cdp_pause(self, observation, generation, intent, guard, observer, match, *, supplement=False):
+        if intent != self._interruption_intent or generation != self._interruption_generation:
+            self._interruption_log(phase="cdp-fallback", decision="skip", reason="guard-revoked",
+                                   app_id=observation.app_id, match=match)
+            return False
         once = (generation, intent, observation.binding_id, observation.interval, supplement)
         if once in self._interruption_cdp_once:
             self._interruption_log(phase="cdp-fallback", decision="skip", reason="already-sent",
@@ -1192,6 +1217,23 @@ class PlaybackSourceProvider:
         return self.system.get_audio_route_snapshot()
 
     def send_playback_command(self, command):
+        pin = self.__dict__.get("_interruption_pin")
+        if pin is not None and command == "toggle_play_pause":
+            # The in-app play control must not toggle the session we are
+            # capturing. Toggle on a live player pauses it: the capture locks
+            # itself. A newer intent also drops a 300 ms CDP supplement.
+            now = time.monotonic()
+            self._interruption_intent += 1
+            self._interruption_intent_at = now
+            self._interruption_candidate = None
+            self._interruption_cooldown_until = max(
+                float(self._interruption_cooldown_until or 0.0), now + 1.0)
+            self._interruption_preserved_session = getattr(pin, "session", None)
+            if getattr(pin, "playing", None) is True:
+                self._interruption_log(phase="pause-external", decision="skip", reason="self-capture",
+                                       app_id=str(getattr(pin, "app_id", "") or ""))
+                return True
+            return self.owned.send_playback_command(command)
         if self._owned_active():
             return self.owned.send_playback_command(command)
         return self._system_enabled() and self.system.send_playback_command(command)

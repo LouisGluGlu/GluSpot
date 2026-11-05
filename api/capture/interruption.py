@@ -53,7 +53,7 @@ _LOG_REASONS = frozenset({
     'native-rejected', 'stale-after-send', 'readback-unconfirmed', 'paused',
     'error', 'absent', 'rejected', 'owned-not-playing', 'suspended', 'missing-start',
     'not-after-boundary', 'missing-nonplaying', 'nonplaying-before-boundary',
-    'overlap', 'cooldown', 'owned-pause-failed',
+    'overlap', 'cooldown', 'owned-pause-failed', 'self-capture',
     'uncertain-wait', 'settled', 'already-sent', 'library-earlier',
     'external-earlier', 'unknown-order',
 })
@@ -273,6 +273,18 @@ def _text(value) -> str:
     return value.strip() if isinstance(value, str) else ''
 
 
+def is_self_app(app_id) -> bool:
+    """GluSpot's own SMTC identity is never an external player.
+
+    A path or ``.exe`` suffix must not make the in-app player look like the
+    external session that started first.
+    """
+    if not isinstance(app_id, str) or not app_id:
+        return False
+    name = app_id.replace('\\', '/').rsplit('/', 1)[-1].split('!', 1)[0].casefold()
+    return name in {'gluspot', 'gluspot.exe'}
+
+
 class MediaClassifier:
     """Use current session evidence, independent of the application's category.
 
@@ -283,7 +295,7 @@ class MediaClassifier:
     MUSIC_APPS = frozenset(('cloudmusic.exe', 'orpheus.exe', 'qqmusic.exe', 'spotify.exe'))
 
     def classify(self, app_id, playback, properties, *, artwork_readable=False):
-        if not isinstance(app_id, str) or not app_id or app_id.casefold() == 'gluspot':
+        if not isinstance(app_id, str) or not app_id or is_self_app(app_id):
             return MediaKind.UNKNOWN
         try:
             types = (_enum_value(getattr(playback, 'playback_type', None)),
@@ -446,10 +458,10 @@ class SmtcInterruptionObserver:
         counts = Counter(str(getattr(s, 'source_app_user_model_id', '') or '').casefold()
                          for s in sessions)
         ambiguous = tuple(sorted(app for app, count in counts.items()
-                                 if count > 1 and app and app != 'gluspot'))
+                                 if count > 1 and app and not is_self_app(app)))
         kept = [s for s in sessions
                 if (app_id := str(getattr(s, 'source_app_user_model_id', '') or ''))
-                and app_id.casefold() != 'gluspot' and counts[app_id.casefold()] == 1]
+                and not is_self_app(app_id) and counts[app_id.casefold()] == 1]
         signature = (len(sessions), len(kept), ambiguous)
         if signature != self._membership_signature:
             self._membership_signature = signature

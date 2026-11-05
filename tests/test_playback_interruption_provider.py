@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import replace
 import gc
 import logging
+import time
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -307,6 +308,64 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
         self.assertFalse(any('revalidate-stale' in line or 'reason=removed' in line for line in lines))
         self.assertEqual(sum('reason=baseline' in line for line in lines), 1)
 
+    async def test_in_app_play_does_not_pause_the_captured_session(self):
+        music = Session('cloudmusic.exe', playing=False)
+        music.try_toggle_play_pause_async = AsyncMock(side_effect=AssertionError('toggle would pause the capture'))
+        await self.enable([music])
+        await self.start_owned()
+        await self.collect()
+        music.playing = True
+        music.pauses = 0
+        await self.collect()
+        self.assertIs(self.provider._interruption_pin.session, music)
+        self.assertEqual(self.owned_pauses(), 1)
+        paused_before = music.pauses
+        self.assertTrue(self.provider.send_playback_command('toggle_play_pause'))
+        await self.flush()
+        self.assertEqual(music.pauses, paused_before)
+        self.assertEqual(self.owned_pauses(), 1)
+        self.assertGreater(self.provider._interruption_cooldown_until, time.monotonic())
+
+    async def test_stale_cdp_supplement_cannot_pause_after_in_app_play(self):
+        music = Session('cloudmusic.exe', playing=False)
+        await self.enable([music])
+        await self.start_owned()
+        await self.collect()
+        music.playing = True
+        await self.collect()
+        pin = self.provider._interruption_pin
+        self.assertIs(pin.session, music)
+        old_intent = self.provider._interruption_intent
+        cdp = SimpleNamespace(ready=True, generation=3, latest={'trackId': 'native'},
+            pause=AsyncMock(return_value=True), pause_diagnostic='paused')
+        self.system._netease_cdp_session = cdp
+        self.system._last_data = empty_visual_data()
+        self.system._last_data = replace(self.system._last_data, track=replace(
+            self.system._last_data.track, title=music.title, artist=music.artist,
+            source_app_id='cloudmusic.exe', track_id='captured'))
+        self.system._capture_runtime = SimpleNamespace(
+            source=SimpleNamespace(session=music),
+            _cef_source=SimpleNamespace(session=cdp, native_track_id='native', generation=3, fresh=True),
+            identity=('cloudmusic.exe', 'captured'))
+        self.assertTrue(self.provider.send_playback_command('toggle_play_pause'))
+        self.assertNotEqual(self.provider._interruption_intent, old_intent)
+        observer = self.provider._interruption_observer
+        sent = await self.provider._send_netease_cdp_pause(
+            pin, self.provider._interruption_generation, old_intent,
+            lambda: False, observer, 'cloudmusic', supplement=True)
+        self.assertFalse(sent)
+        cdp.pause.assert_not_called()
+
+    async def test_own_app_session_is_not_an_earlier_external(self):
+        own = Session(r'C:\Program\GluSpot.exe', title='Library song', artist='GluSpot')
+        music = Session('cloudmusic.exe')
+        await self.enable([own, music])
+        await self.start_owned()
+        self.assertEqual(own.pauses, 0)
+        self.assertEqual(music.pauses, 1)
+        apps = [str(item.app_id).casefold() for item in self.provider._interruption_observer.snapshots()]
+        self.assertFalse(any(app.endswith('gluspot.exe') or app == 'gluspot' for app in apps))
+
     async def test_library_start_pauses_browser_music_but_never_video_or_unknown(self):
         music = Session('chrome.exe')
         video = Session('edge.exe', media_type=2)
@@ -486,14 +545,14 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
         self.assertEqual(cdp.pause.await_args.args[0], 'native')
         cdp.start.assert_not_called()
         self.assertEqual(self.saved, [])
-        # Returning from a temporary pin clears the display cache, but can
-        # retain the already-verified native binding as read-only evidence.
+        # Returning to in-app playback must not pause the session we are
+        # already capturing. A second SMTC/CDP Pause would lock that player.
         self.provider._set_interruption_route(self.provider._interruption_observer.snapshots()[0])
         self.system._last_data = replace(data, track=replace(data.track, title=music.title,
             artist=music.artist, source_app_id='cloudmusic.exe', track_id='captured'))
         await self.start_owned()
-        self.assertEqual(cdp.pause.await_count, 2)
-        self.assertEqual(music.pauses, 2)
+        self.assertEqual(cdp.pause.await_count, 1)
+        self.assertEqual(music.pauses, 1)
         self.assertIsNone(self.provider._interruption_pin)
 
     async def test_temporary_read_provenance_cannot_ensure_cdp_after_unpin_or_off(self):
