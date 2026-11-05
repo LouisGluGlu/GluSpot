@@ -265,15 +265,6 @@ DEFAULT_SETTINGS = {
     "v2_ember_blur_panel_strength": 18,
     "v2_ember_lyric_offset_seconds": 0.0,
     "v2_no_lyrics_display_mode": "text",
-    "v2_album_island_cover_count": 5,
-    "v2_album_island_cover_size": 30,
-    "v2_album_island_compact_cover_size": 30,
-    "v2_album_island_expanded_cover_size": 72,
-    "v2_album_island_spacing": 112,
-    "v2_album_island_secondary_style": "perspective_dim",
-    "v2_album_island_perspective_amount": 100,
-    "v2_album_island_listened_seconds_total": 0.0,
-    "v2_album_island_history": [],
     "v2_theme_mode": "system",
     "v2_theme_dark_start": "22:00",
     "v2_theme_dark_end": "07:00",
@@ -394,10 +385,7 @@ FIXED_DEFAULT_SETTING_KEYS = frozenset({
     "v2_gelv_color_fill_enabled", "v2_gelv_word_fill_enabled",
     "v2_enable_dual_line_lyrics", "v2_dual_line_font_size",
     "v2_dual_line_secondary_weight", "v2_dual_line_secondary_spacing",
-    "v2_album_island_cover_count", "v2_album_island_cover_size",
-    "v2_album_island_compact_cover_size", "v2_album_island_expanded_cover_size",
-    "v2_album_island_spacing", "v2_album_island_secondary_style",
-    "v2_album_island_perspective_amount", "v2_barrage_y_offset",
+    "v2_barrage_y_offset",
     "v2_barrage_font_size", "v2_barrage_speed", "v2_barrage_use_backdrop",
     "v2_barrage_show_icon", "v2_barrage_display_mode",
     "v2_enable_message_detection", "v2_enable_wechat_notification",
@@ -425,6 +413,18 @@ _REMOVED_VISUAL_SETTING_KEYS = {
     "v2_fullscreen_reading_effect",
     "v2_plugin_count",
     "v2_taskbar_fusion_mode",
+    # Album-island cover row. Old settings.json may still contain these keys;
+    # load skips them and set() ignores them so a legacy file cannot error or
+    # turn the removed arrangement back on.
+    "v2_album_island_cover_count",
+    "v2_album_island_cover_size",
+    "v2_album_island_compact_cover_size",
+    "v2_album_island_expanded_cover_size",
+    "v2_album_island_spacing",
+    "v2_album_island_secondary_style",
+    "v2_album_island_perspective_amount",
+    "v2_album_island_listened_seconds_total",
+    "v2_album_island_history",
 }
 
 
@@ -546,11 +546,11 @@ class SettingsManager(QObject):
             ambience_values = self._settings.get("v2_music_ambience_values")
             self._settings["v2_music_ambience_values"] = normalize_music_ambience_values(ambience_values, original_style)
             migrated = migrated or ambience_values != self._settings["v2_music_ambience_values"]
-            if str(self._settings.get("v2_lyric_flow_style")) not in {"wave_stream", "album_island"}:
+            if str(self._settings.get("v2_lyric_flow_style")) != "wave_stream":
                 self._settings["v2_lyric_flow_style"] = "wave_stream"
                 migrated = True
-            if self._settings.get("v2_album_island_secondary_style") != "perspective_dim":
-                self._settings["v2_album_island_secondary_style"] = "perspective_dim"
+            if str(self._settings.get("v2_no_lyrics_display_mode") or "text") != "text":
+                self._settings["v2_no_lyrics_display_mode"] = "text"
                 migrated = True
             raw_sparse_threshold = self._settings.get("v2_music_sparse_highlight_seconds_per_unit")
             self._settings["v2_music_sparse_highlight_seconds_per_unit"] = normalize_sparse_seconds_per_unit(raw_sparse_threshold)
@@ -646,10 +646,8 @@ class SettingsManager(QObject):
             value = normalize_music_ambience_style(value) if value or key == "v2_music_ambience_style" else ""
         if key == "v2_music_ambience_values":
             value = normalize_music_ambience_values(value)
-        if key == "v2_lyric_flow_style" and str(value) not in {"wave_stream", "album_island"}:
+        if key == "v2_lyric_flow_style" and str(value) != "wave_stream":
             value = "wave_stream"
-        if key == "v2_album_island_secondary_style":
-            value = "perspective_dim"
         if key == "v2_music_sparse_highlight_seconds_per_unit":
             value = normalize_sparse_seconds_per_unit(value)
         if key == "v2_system_lyric_offset_seconds":

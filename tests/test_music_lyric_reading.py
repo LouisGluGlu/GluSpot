@@ -903,9 +903,6 @@ class MusicLyricReadingTests(unittest.TestCase):
             visual.media_is_playing = False
             self.assertEqual(visual._effective_animation_fps(True, now=10.0), 60)
             visual.media_is_playing = True
-            visual._should_paint_album_island = lambda: True
-            self.assertEqual(visual._effective_animation_fps(True, now=10.0), 60)
-            visual._should_paint_album_island = lambda: False
             self.assertEqual(visual._effective_animation_fps(False, now=10.0), 60)
 
     def test_shared_feather_crosses_word_boundary_without_restarting(self):

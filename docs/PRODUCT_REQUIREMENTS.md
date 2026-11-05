@@ -104,7 +104,7 @@ Must support:
 
 - Album art.
 - Track title and artist where space allows.
-- Current lyric or album island fallback.
+- Current lyric, or the configured no-lyrics text when a song has none.
 - Play/pause and basic controls where enabled.
 - Background style selection.
 - Optional music-reactive background.
@@ -575,7 +575,7 @@ Settings must be organized by user intent.
 Primary settings groups:
 
 - Basic settings: theme, startup, placement, empty island behavior, font, animation.
-- Media control: provider/player mode, app profiles, lyric style, lyric offsets, album island, ambience.
+- Media control: provider/player mode, app profiles, lyric style, lyric offsets, ambience.
 - Music visuals: background style, reactive background, intensity, per-style advanced controls.
 - Plugin settings: TIME, weather, agenda, fullscreen plugin alert style.
 - Notification settings: barrage, message notifications, detail toggles.

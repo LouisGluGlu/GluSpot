@@ -124,27 +124,6 @@ class IslandCoverInsetTests(unittest.TestCase):
                     shell = self.paint(QRectF(13.25, 11.5, width, height), dpr=dpr)
                     self.assert_equal_insets(shell)
 
-    def test_resolved_no_lyrics_keeps_current_cover_in_the_shared_slot(self):
-        self.visual.lyric_flow_style = "album_island"
-        prior_art = self.visual.album_art.copy()
-        prior_art.fill(QColor("#c0ab30"))
-        self.visual.album_history = [{"track_id": "prior", "album_art": prior_art}]
-        next_art = self.visual.album_art.copy()
-        next_art.fill(QColor("#ce2040"))
-        self.visual.album_queue = [{"track_id": "next", "album_art": next_art}]
-        for style in ("sea_level", "solid_album", "system"):
-            with self.subTest(style=style), \
-                    patch.object(self.visual, "_paint_album_island_slot",
-                                 wraps=self.visual._paint_album_island_slot) as slots:
-                shell = self.paint(QRectF(13., 11., 520., 56.), style=style)
-                cover = self.assert_equal_insets(shell)
-                side_slots = [call.args[1] for call in slots.call_args_list if not call.args[1]["center"]]
-                expected = set() if style == "sea_level" else {-1, 1}
-                self.assertEqual({slot["side"] for slot in side_slots}, expected)
-                for slot in side_slots:
-                    self.assertGreater(QRectF(slot["rect"]).left(), cover.right())
-                    self.assertTrue(shell.contains(QRectF(slot["rect"])))
-
     def test_expanded_standard_matches_b4601bd_geometry_in_every_background_and_mode(self):
         visual = self.visual
         u = visual._u
@@ -193,33 +172,6 @@ class IslandCoverInsetTests(unittest.TestCase):
                                cover_size, cover_size))
                     self.assertEqual(lyrics.call_args.args[1],
                         lyric_panel.adjusted(u(30), u(16), -u(30), -u(14)))
-
-    def test_expanded_album_stage_does_not_move_slots_to_the_compact_lane(self):
-        visual = self.visual
-        u = visual._u
-        visual.lyric_flow_style = "album_island"
-        visual.expanded = True
-        visual._album_island_transition_progress = lambda: 1.
-        previous_art, next_art = visual.album_art.copy(), visual.album_art.copy()
-        previous_art.fill(QColor("#c0ab30"))
-        next_art.fill(QColor("#ce2040"))
-        visual.album_history = [{"track_id": "prior", "album_art": previous_art}]
-        visual.album_queue = [{"track_id": "next", "album_art": next_art}]
-        rect = QRectF(13., 11., 520., 136.)
-        stage = QRectF(rect.left() + u(18), rect.top() + u(58), rect.width() - u(36), rect.height() - u(76))
-        for style in ("sea_level", "solid_album", "system"):
-            for mode in ("free", "finder", "tasker"):
-                expected = {int(slot["side"]): QRectF(slot["rect"])
-                            for slot in visual._album_island_slots(stage, reserve_text=True)}
-                with self.subTest(style=style, mode=mode), \
-                        patch.object(visual, "_paint_album_island_slot") as slots, \
-                        patch.object(visual, "_paint_scrolling_text") as text:
-                    self.paint(rect, expanded=True, style=style, mode=mode)
-                    actual = {int(call.args[1]["side"]): QRectF(call.args[1]["rect"])
-                              for call in slots.call_args_list}
-                    self.assertEqual(actual, expected)
-                    self.assertEqual(text.call_args_list[0].args[1],
-                        QRectF(rect.left() + u(18), rect.top() + u(13), rect.width() - u(186), u(24)))
 
     def test_expanded_dual_panel_still_paints_lyric_ink_in_the_baseline_panel(self):
         self.visual.music_expanded_layout_style = "dual_panel"

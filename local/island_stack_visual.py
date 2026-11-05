@@ -79,7 +79,6 @@ from local.audio_reactive_engine import (
     live_audio_availability_request_plan,
 )
 from local.album_art_pipeline import album_art_bytes_signature, album_art_update_plan
-from local.album_island_projection import album_cover_projection
 from local.island_audio_bars import IslandAudioBars
 from local.music_lyric_motion import GLYPH_FLOAT_LIFT, LogicalLineSpringChain, MusicLyricMotion
 from local.music_lyric_reading import (
@@ -504,8 +503,7 @@ class IslandStackVisual(QWidget):
     COLOR_FILL_BLOCKED_AMBIENCE_STYLES = {"sea_level", "solid_album"}
     EMBER_COLOR_FILL_AMBIENCE_STYLES = ("pure_black", "pure_white")
     EMBER_COLOR_BACK_GRAY_AMBIENCE_STYLES = ("sea_level", "duotone_full", "solid_album")
-    LYRIC_FLOW_STYLES = ("wave_stream", "album_island")
-    ALBUM_ISLAND_SECONDARY_STYLES = ("perspective_dim",)
+    LYRIC_FLOW_STYLES = ("wave_stream",)
     # The island reuses a scaled cache, while the music window needs enough
     # source pixels for a 4K desktop. Keep the decoded source bounded, but do
     # not destroy the original cover by reducing it to an island thumbnail.
@@ -611,9 +609,6 @@ class IslandStackVisual(QWidget):
         self.album_history: list[dict[str, object]] = []
         self.album_queue: list[dict[str, object]] = []
         self.album_queue_signature = ""
-        self.album_island_transition_started_at = 0.0
-        self.album_island_transition_reason = ""
-        self.album_island_transition_direction = 1
         self._island_track_transition_started_at = 0.0
         self._island_track_previous_cover = QImage()
         self._island_cover_upgrade_previous = QImage()
@@ -789,13 +784,6 @@ class IslandStackVisual(QWidget):
         self.ember_blur_panel_strength = 18
         self.ember_lyric_offset_seconds = 0.0
         self.no_lyrics_display_mode = "text"
-        self.album_island_cover_count = 5
-        self.album_island_cover_size = 30
-        self.album_island_compact_cover_size = 30
-        self.album_island_expanded_cover_size = 72
-        self.album_island_spacing = 112
-        self.album_island_secondary_style = "perspective_dim"
-        self.album_island_perspective_amount = 100
         self.lyric_transition_kind = ""
         self.lyric_transition_distance = 0
         self.lyric_last_sync_position = 0.0
@@ -884,7 +872,6 @@ class IslandStackVisual(QWidget):
         previous_artist = str(getattr(self, "artist", "") or "")
         previous_lyrics = tuple(getattr(self, "lyrics", ()))
         previous_album_art_key = getattr(self, "album_art", QImage()).cacheKey()
-        previous_album_island = bool(self._should_paint_album_island()) if hasattr(self, "lyrics") else False
         incoming_track_id = track.track_id or f"{track.source_app}:{track.title}:{track.artist}"
         same_visible_track = previous_title == str(track.title or "") and previous_artist == str(track.artist or "")
         message_refresh = bool(getattr(visual_data, "messages", ()))
@@ -949,8 +936,6 @@ class IslandStackVisual(QWidget):
         self.media_is_playing = incoming_is_playing
         self.media_duration_seconds = max(0.0, float(track.duration_seconds))
         self.media_position_seconds = position_plan.position_seconds
-        if position_plan.listened_delta_seconds > 0.0:
-            self.listened_seconds_total = float(getattr(self, "listened_seconds_total", 0.0)) + position_plan.listened_delta_seconds
         self.media_position_sync_at = now
         self.media_raw_position_seconds = position_plan.raw_position_seconds
         self.media_raw_position_source = position_plan.position_source
@@ -1012,11 +997,6 @@ class IslandStackVisual(QWidget):
         if (flow_direction >= 0 or not getattr(self, "album_queue", None)) and (track_changed or queue_changed or not getattr(self, "album_queue", None)):
             self.album_queue = self._album_queue_from_track(getattr(track, "album_queue", ()))
             self.album_queue_signature = queue_signature
-        current_album_island = bool(self._should_paint_album_island())
-        if current_album_island and (track_changed or current_album_island != previous_album_island):
-            self.album_island_transition_started_at = now
-            self.album_island_transition_reason = "track" if track_changed else "mode"
-            self.album_island_transition_direction = flow_direction
         image = QImage()
         art_signature = self._album_art_bytes_signature(track.album_art_bytes)
         cover_reused = bool(
@@ -1648,11 +1628,6 @@ class IslandStackVisual(QWidget):
         has_lyrics = bool(getattr(self, "timed_lyrics", None) or getattr(self, "lyrics", None))
         if not has_lyrics:
             return False
-        try:
-            if self._should_paint_album_island():
-                return False
-        except (AttributeError, RuntimeError):
-            pass
         current = time.monotonic() if now is None else float(now)
         if int(getattr(self, "prev_lyric_index", 0)) != int(getattr(self, "lyric_index", 0)):
             if self._animation_started_active(getattr(self, "lyric_changed_at", 0.0), 0.52, current):
@@ -1829,20 +1804,6 @@ class IslandStackVisual(QWidget):
             )
         plan = presentation_active_visual_animation_plan(
             lyric_kind_transition_active=lyric_kind_transition_active,
-        )
-        if plan.active:
-            return plan
-
-        album_island_transition_active = False
-        try:
-            album_island_transition_active = (
-                self._should_paint_album_island()
-                and self._album_island_transition_progress(now) < 1.0
-            )
-        except Exception:
-            pass
-        plan = presentation_active_visual_animation_plan(
-            album_island_transition_active=album_island_transition_active,
         )
         if plan.active:
             return plan
@@ -2236,8 +2197,7 @@ class IslandStackVisual(QWidget):
                 or not getattr(self, "surface_transition_pixmap", QPixmap()).isNull()
                 or bool(getattr(self, "scene_transition_mode", ""))
                 or bool(getattr(self, "music_surface_transition_mode", ""))
-                or self._active_visual_animation_plan(now, include_media=False).active
-                or self._album_island_transition_progress(now) < 1.):
+                or self._active_visual_animation_plan(now, include_media=False).active):
             return None
         visuals = self._build_visuals()
         if len(visuals) != 1 or visuals[0].kind != IslandKind.MUSIC:
@@ -3401,113 +3361,11 @@ class IslandStackVisual(QWidget):
         self.update()
 
     def set_no_lyrics_display_mode(self, mode: str, notify: bool = True):
-        mode = str(mode or "text").strip()
-        self.no_lyrics_display_mode = mode if mode in {"text", "album_island"} else "text"
+        # The album-island arrangement is gone. An old mode value stays on the
+        # text placeholder instead of raising or painting a cover row.
+        _ignored = str(mode or "text").strip()
+        self.no_lyrics_display_mode = "text"
         self._pulse_stack()
-        if notify:
-            self._notify_settings_changed()
-        self.update()
-
-    def set_album_island_cover_count(self, count: int, notify: bool = True):
-        try:
-            count = int(count)
-        except (TypeError, ValueError):
-            count = 5
-        if count not in (3, 5, 7):
-            count = 5
-        self.album_island_cover_count = count
-        self._pulse_stack()
-        if notify:
-            self._notify_settings_changed()
-        self.update()
-
-    def set_album_island_cover_size(self, size: int, notify: bool = True):
-        self.album_island_cover_size = max(18, min(44, int(size)))
-        self.album_island_compact_cover_size = self.album_island_cover_size
-        self._pulse_stack()
-        if notify:
-            self._notify_settings_changed()
-        self.update()
-
-    def set_album_island_compact_cover_size(self, size: int, notify: bool = True):
-        try:
-            size = int(size)
-        except (TypeError, ValueError):
-            size = 30
-        self.album_island_compact_cover_size = max(18, min(44, size))
-        self.album_island_cover_size = self.album_island_compact_cover_size
-        self._pulse_stack()
-        if notify:
-            self._notify_settings_changed()
-        self.update()
-
-    def set_album_island_expanded_cover_size(self, size: int, notify: bool = True):
-        try:
-            size = int(size)
-        except (TypeError, ValueError):
-            size = 72
-        self.album_island_expanded_cover_size = max(36, min(96, size))
-        self._pulse_stack()
-        if notify:
-            self._notify_settings_changed()
-        self.update()
-
-    def set_album_island_spacing(self, spacing: int, notify: bool = True):
-        self.album_island_spacing = max(48, min(170, int(spacing)))
-        self._pulse_stack()
-        if notify:
-            self._notify_settings_changed()
-        self.update()
-
-    def set_album_island_secondary_style(self, style: str, notify: bool = True):
-        style = str(style or "perspective_dim").strip()
-        if style not in self.ALBUM_ISLAND_SECONDARY_STYLES:
-            style = "perspective_dim"
-        self.album_island_secondary_style = style
-        self._pulse_stack()
-        if notify:
-            self._notify_settings_changed()
-        self.update()
-
-    def set_album_island_perspective_amount(self, amount: int, notify: bool = True):
-        try:
-            amount = int(amount)
-        except (TypeError, ValueError):
-            amount = 100
-        self.album_island_perspective_amount = max(0, min(200, amount))
-        self._pulse_stack()
-        if notify:
-            self._notify_settings_changed()
-        self.update()
-
-    def set_album_island_record(self, listened_seconds: float = 0.0, history=None, notify: bool = True):
-        try:
-            self.listened_seconds_total = max(0.0, float(listened_seconds))
-        except (TypeError, ValueError):
-            self.listened_seconds_total = 0.0
-        normalized: list[dict[str, object]] = []
-        for entry in list(history or [])[:6]:
-            if isinstance(entry, dict):
-                normalized_entry = {
-                    "track_id": str(entry.get("track_id", "") or ""),
-                    "title": str(entry.get("title", "") or ""),
-                    "artist": str(entry.get("artist", "") or ""),
-                    "album_title": str(entry.get("album_title", "") or ""),
-                }
-                image = self._album_art_from_entry(entry)
-                if not image.isNull():
-                    normalized_entry["album_art"] = image
-                normalized.append(normalized_entry)
-        self.album_history = normalized
-        if notify:
-            self._notify_settings_changed()
-        self.update()
-
-    def reset_album_island_record(self, notify: bool = True):
-        self.listened_seconds_total = 0.0
-        self.album_history = []
-        self.album_island_transition_started_at = 0.0
-        self.album_island_transition_reason = ""
         if notify:
             self._notify_settings_changed()
         self.update()
@@ -4701,16 +4559,7 @@ class IslandStackVisual(QWidget):
             "v2_ember_back_opacity": int(getattr(self, "ember_back_opacity", 58)),
             "v2_ember_blur_panel_strength": int(getattr(self, "ember_blur_panel_strength", 18)),
             "v2_ember_lyric_offset_seconds": round(float(getattr(self, "ember_lyric_offset_seconds", 0.0)), 3),
-            "v2_no_lyrics_display_mode": str(getattr(self, "no_lyrics_display_mode", "text")),
-            "v2_album_island_cover_count": int(getattr(self, "album_island_cover_count", 5)),
-            "v2_album_island_cover_size": int(getattr(self, "album_island_cover_size", 30)),
-            "v2_album_island_compact_cover_size": int(getattr(self, "album_island_compact_cover_size", getattr(self, "album_island_cover_size", 30))),
-            "v2_album_island_expanded_cover_size": int(getattr(self, "album_island_expanded_cover_size", 72)),
-            "v2_album_island_spacing": int(getattr(self, "album_island_spacing", 112)),
-            "v2_album_island_secondary_style": str(getattr(self, "album_island_secondary_style", "perspective_dim")),
-            "v2_album_island_perspective_amount": int(getattr(self, "album_island_perspective_amount", 100)),
-            "v2_album_island_listened_seconds_total": round(float(getattr(self, "listened_seconds_total", 0.0)), 3),
-            "v2_album_island_history": self._serializable_album_history(),
+            "v2_no_lyrics_display_mode": "text",
             "v2_no_lyrics_text": getattr(self, "no_lyrics_text", "暂无歌词"),
             "v2_super_topmost": bool(getattr(self, "super_topmost_enabled", True)),
         }
@@ -8856,16 +8705,7 @@ class IslandStackVisual(QWidget):
             content_w = identity_w if instrumental else max(identity_w, lyric_w * 0.82)
             required = self._u(58 + 16 + 15 + 132 + 48) + content_w
             max_w = self._u(940.0)
-            if self._should_paint_album_island():
-                stage_w = self._album_island_preferred_stage_width(expanded=True)
-                required = max(required, stage_w + self._u(36.0))
-                max_w = self._u(1280.0)
             return max(self._u(470.0), min(max_w, required))
-
-        if self._should_paint_album_island():
-            stage_w = self._album_island_preferred_stage_width(expanded=False)
-            required = self._u(9 + 30 + 12 + 25) + stage_w
-            return max(self._u(300.0), min(self._u(760.0), required))
 
         compact_text = self._compact_music_measurement_text()
         compact_metric = QFontMetrics(self._wave_stream_font(compact_lyric_size, QFont.Weight.Bold, shrink=False))
@@ -9290,10 +9130,6 @@ class IslandStackVisual(QWidget):
         if yaoguang_compact:
             height += 12.0 if line_count > 1 else 8.0
         return height
-
-    def _album_island_compact_music_height(self) -> float:
-        cover = max(18, min(44, int(getattr(self, "album_island_cover_size", 30))))
-        return max(46.0, min(72.0, float(cover) + 16.0))
 
     def _gelv_display_lines(self) -> list[str]:
         lyrics = self._island_cleaned_lyric_rows()
@@ -9904,23 +9740,6 @@ class IslandStackVisual(QWidget):
     def _ember_line_progress(self, progress: float, line_count: int) -> float:
         return max(0.0, min(1.0, float(progress)))
 
-    def _should_paint_album_island(self) -> bool:
-        if self._empty_music_text_active():
-            return False
-        if str(getattr(self, "lyric_flow_style", "wave_stream")) == "album_island":
-            return True
-        if str(getattr(self, "no_lyrics_display_mode", "text")) != "album_island":
-            return False
-        if self._is_instrumental_track():
-            return True
-        if self._island_lyric_miss_text() is not None:
-            return True
-        lyrics = [str(line).strip() for line in getattr(self, "lyrics", []) if str(line).strip()]
-        if not lyrics:
-            return True
-        no_text = str(getattr(self, "no_lyrics_text", "暂无歌词")).strip()
-        return len(lyrics) == 1 and lyrics[0] == no_text
-
     def _expanded_no_lyrics_cover_active(self) -> bool:
         """Temporary cover for resolved misses, retaining it during recovery.
 
@@ -9945,110 +9764,6 @@ class IslandStackVisual(QWidget):
         self._expanded_cover_only = active
         return active
 
-    def _album_island_slots(self, rect: QRectF, reserve_text: bool = False) -> list[dict[str, object]]:
-        count = int(getattr(self, "album_island_cover_count", 5))
-        if count not in (3, 5, 7):
-            count = 5
-        center = count // 2
-        stage = QRectF(rect)
-        transition = self._album_island_transition_progress()
-        eased_transition = 1.0 - (1.0 - transition) ** 4
-        history_entries = self._album_island_entries_with_art(getattr(self, "album_history", []) or [])
-        queue_entries = self._album_island_queue_slot_sources(
-            getattr(self, "album_queue", []) or getattr(self, "album_recommendations", []) or []
-        )
-        left_count = min(center, len(history_entries))
-        right_count = min(center, len(queue_entries))
-        if reserve_text and right_count <= 0:
-            text_reserve = min(stage.width() * 0.42, self._u(126.0 if stage.height() < self._u(82.0) else 184.0))
-            stage.setRight(max(stage.left() + self._u(76.0), stage.right() - text_reserve))
-        cover = self._album_island_cover_px(stage)
-        step = self._album_island_step_px(cover, stage, center)
-        center_x = stage.center().x()
-        center_y = stage.center().y()
-        perspective_amount = max(0, min(200, int(getattr(self, "album_island_perspective_amount", 100)))) / 100.0
-        sides = list(range(-left_count, 0)) + [0] + list(range(1, right_count + 1))
-        slots: list[dict[str, object]] = []
-        for side in sides:
-            distance = abs(side)
-            perspective = None
-            scale = max(0.78, 1.0 - 0.08 * distance)
-            alpha = max(92, 255 - 48 * distance)
-            squeeze = min(0.42, (0.10 + 0.055 * distance) * perspective_amount)
-            if side < 0:
-                perspective = {"left_height": 1.0, "right_height": 1.0 - squeeze}
-            elif side > 0:
-                perspective = {"left_height": 1.0 - squeeze, "right_height": 1.0}
-            tilt = 0.0
-            size = cover * scale
-            animated_side = float(side)
-            if eased_transition < 1.0:
-                animated_side += float(getattr(self, "album_island_transition_direction", 1) or 1) * (1.0 - eased_transition)
-            slot_center_x = center_x + animated_side * step
-            x = slot_center_x - size / 2.0
-            y = center_y - size / 2.0 + distance * stage.height() * 0.020
-            if side == 0:
-                album_art = QImage(getattr(self, "album_art", QImage()))
-                placeholder = False
-            elif side < 0:
-                album_art = history_entries[abs(side) - 1]
-                placeholder = False
-            else:
-                queue_source = queue_entries[side - 1]
-                album_art = QImage(queue_source.get("album_art", QImage()))
-                placeholder = bool(queue_source.get("placeholder", False))
-            slots.append(
-                {
-                    "index": side + center,
-                    "side": side,
-                    "rect": QRectF(x, y, size, size),
-                    "alpha": alpha,
-                    "center": side == 0,
-                    "z": 100 - distance * 12,
-                    "tilt": tilt,
-                    "perspective": perspective,
-                    "album_art": album_art,
-                    "placeholder": placeholder,
-                }
-            )
-        if slots:
-            leftmost = min(QRectF(slot["rect"]).left() for slot in slots)
-            if leftmost < stage.left():
-                center_slot = next((slot for slot in slots if bool(slot.get("center"))), None)
-                current_center_x = QRectF(center_slot["rect"]).center().x() if center_slot is not None else center_x
-                max_shift = max(0.0, rect.center().x() - current_center_x)
-                shift = min(stage.left() - leftmost, max_shift)
-                if shift > 0.0:
-                    for slot in slots:
-                        moved = QRectF(slot["rect"])
-                        moved.translate(shift, 0.0)
-                        slot["rect"] = moved
-        return slots
-
-    def _album_island_entries_with_art(self, entries) -> list[QImage]:
-        images: list[QImage] = []
-        current_signatures = self._current_album_art_signatures()
-        seen_signatures: set[str] = set()
-        for entry in list(entries or [])[:6]:
-            image = self._album_art_from_entry(entry)
-            if not image.isNull():
-                signatures = self._entry_album_art_signatures(entry, image)
-                if signatures & current_signatures:
-                    continue
-                if signatures:
-                    if signatures & seen_signatures:
-                        continue
-                    seen_signatures.update(signatures)
-                images.append(image)
-        return images
-
-    def _album_island_queue_entries_with_art(self, entries) -> list[QImage]:
-        return [
-            QImage(source["album_art"])
-            for source in self._album_island_queue_slot_sources(entries)
-            if not bool(source.get("placeholder", False))
-        ]
-
     def _album_queue_entry_has_identity(self, entry) -> bool:
         if isinstance(entry, dict):
             values = (
@@ -10065,84 +9780,6 @@ class IslandStackVisual(QWidget):
                 getattr(entry, "album_title", ""),
             )
         return any(str(value or "").strip() for value in values)
-
-    def _album_island_queue_slot_sources(self, entries) -> list[dict[str, object]]:
-        sources: list[dict[str, object]] = []
-        current_signatures = self._current_album_art_signatures()
-        seen_signatures: set[str] = set()
-        for entry in list(entries or [])[:6]:
-            if self._entry_matches_current_track(entry):
-                continue
-            image = self._album_art_from_entry(entry)
-            placeholder = image.isNull() and self._album_queue_entry_has_identity(entry)
-            if image.isNull() and not placeholder:
-                continue
-            signatures = self._entry_album_art_signatures(entry, image)
-            if signatures & current_signatures:
-                continue
-            if not placeholder and signatures:
-                if signatures & seen_signatures:
-                    continue
-                seen_signatures.update(signatures)
-            sources.append({"album_art": image, "placeholder": placeholder})
-        return sources
-
-    def _album_island_cover_px(self, stage: QRectF) -> float:
-        expanded_stage = bool(getattr(self, "expanded", False)) or float(stage.height()) >= self._u(86.0)
-        if expanded_stage:
-            fallback = int(getattr(self, "album_island_cover_size", 30))
-            configured = max(36, min(96, int(getattr(self, "album_island_expanded_cover_size", max(72, fallback)))))
-        else:
-            configured = max(18, min(44, int(getattr(self, "album_island_compact_cover_size", getattr(self, "album_island_cover_size", 30)))))
-        return min(self._u(float(configured)), stage.height() * 0.84 if not expanded_stage else stage.height() * 0.92)
-
-    def _album_island_step_px(self, cover: float, stage: QRectF, side_capacity: int) -> float:
-        spacing = max(48, min(170, int(getattr(self, "album_island_spacing", 112))))
-        desired = cover * (spacing / 100.0)
-        max_step = stage.width() / max(1.0, side_capacity * 2.0 + 1.0)
-        if self._taskbar_compact_active() and not bool(getattr(self, "expanded", False)):
-            return max(cover * 0.58, min(desired, max_step * 1.04))
-        return max(cover * 0.72, min(desired, max_step * 1.18))
-
-    def _album_island_transition_progress(self, now: float | None = None) -> float:
-        now = time.monotonic() if now is None else float(now)
-        started_at = float(getattr(self, "album_island_transition_started_at", 0.0) or 0.0)
-        if started_at <= 0.0:
-            started_at = float(getattr(self, "audio_started_at", 0.0) or 0.0)
-        if started_at <= 0.0:
-            return 1.0
-        return max(0.0, min(1.0, (now - started_at) / 0.62))
-
-    def _album_island_configured_cover_px(self, expanded: bool = False) -> float:
-        if expanded:
-            fallback = int(getattr(self, "album_island_cover_size", 30))
-            configured = max(36, min(96, int(getattr(self, "album_island_expanded_cover_size", max(72, fallback)))))
-        else:
-            configured = max(18, min(44, int(getattr(self, "album_island_compact_cover_size", getattr(self, "album_island_cover_size", 30)))))
-        return self._u(float(configured))
-
-    def _album_island_preferred_stage_width(self, expanded: bool = False) -> float:
-        count = int(getattr(self, "album_island_cover_count", 5))
-        if count not in (3, 5, 7):
-            count = 5
-        side_capacity = count // 2
-        cover = self._album_island_configured_cover_px(expanded=expanded)
-        step = cover * (max(48, min(170, int(getattr(self, "album_island_spacing", 112)))) / 100.0)
-        history_count = min(side_capacity, len(self._album_island_entries_with_art(getattr(self, "album_history", []) or [])))
-        queue_count = min(side_capacity, len(self._album_island_queue_slot_sources(getattr(self, "album_queue", []) or [])))
-        text_w = self._u(184.0 if expanded else 112.0) if queue_count <= 0 else 0.0
-        span = cover + step * (history_count + queue_count) + text_w + self._u(24.0)
-        minimum = self._u((300.0 if queue_count <= 0 else 240.0) if expanded else (164.0 if queue_count <= 0 else 132.0))
-        return max(minimum, span)
-
-    def _album_island_art_for_side(self, side: int, center: int) -> QImage:
-        if side == 0:
-            return QImage(getattr(self, "album_art", QImage()))
-        history = list(getattr(self, "album_history", []) or [])
-        queue = list(getattr(self, "album_queue", []) or getattr(self, "album_recommendations", []) or [])
-        if side < 0:
-            return self._album_art_from_entry(history[abs(side) - 1] if abs(side) - 1 < len(history) else None)
-        return self._album_art_from_entry(queue[side - 1] if side - 1 < len(queue) else None)
 
     def _album_queue_from_track(self, entries) -> list[dict[str, object]]:
         queue: list[dict[str, object]] = []
@@ -10325,34 +9962,6 @@ class IslandStackVisual(QWidget):
             if loaded.loadFromData(data) and not loaded.isNull():
                 return self._bounded_album_image(loaded, self.STORED_ALBUM_ART_MAX_SIDE)
         return QImage()
-
-    def _album_island_listened_text(self) -> str:
-        seconds = max(0.0, float(getattr(self, "listened_seconds_total", 0.0)))
-        hours = int(seconds / 3600.0)
-        return f"您已听歌 {hours} 小时"
-
-    def _serializable_album_history(self) -> list[dict[str, str]]:
-        history: list[dict[str, str]] = []
-        for entry in list(getattr(self, "album_history", []) or [])[:6]:
-            if isinstance(entry, dict):
-                history.append(
-                    {
-                        "track_id": str(entry.get("track_id", "") or ""),
-                        "title": str(entry.get("title", "") or ""),
-                        "artist": str(entry.get("artist", "") or ""),
-                        "album_title": str(entry.get("album_title", "") or ""),
-                    }
-                )
-            else:
-                history.append(
-                    {
-                        "track_id": str(getattr(entry, "track_id", "") or ""),
-                        "title": str(getattr(entry, "title", "") or ""),
-                        "artist": str(getattr(entry, "artist", "") or ""),
-                        "album_title": str(getattr(entry, "album_title", "") or ""),
-                    }
-                )
-        return history
 
     def _current_album_history_entry(self) -> dict[str, object]:
         return {
@@ -10794,8 +10403,6 @@ class IslandStackVisual(QWidget):
     def _compact_music_content_height_raw(self) -> float:
         if self._personal_dj_island_presenting():
             return 112.0
-        if self._should_paint_album_island():
-            return self._album_island_compact_music_height()
         two_line = bool(getattr(self, "lyrics", None)) and self._has_current_two_line_lyric()
         height = 80.0 if two_line else 46.0
         lines = self._current_lyric_display_lines() if getattr(self, "lyrics", None) else ()
@@ -10824,8 +10431,6 @@ class IslandStackVisual(QWidget):
 
     def _notch_music_needs_content_height(self) -> bool:
         if self._personal_dj_island_presenting():
-            return True
-        if self._should_paint_album_island():
             return True
         return bool(getattr(self, "lyrics", None)) and (
             self._has_current_two_line_lyric() or self._compact_music_content_height_raw() > 46.0
@@ -13170,7 +12775,7 @@ class IslandStackVisual(QWidget):
         self.music_surface_transition_from = (start_primary, start_secondary)
         self.music_surface_transition_to = (target_primary, target_secondary)
         self.music_surface_transition_started_at = time.monotonic()
-        self.music_surface_transition_duration = max(0.42, min(0.82, float(getattr(self, "album_island_transition_duration", 0.62) or 0.62)))
+        self.music_surface_transition_duration = 0.62
         self.music_surface_transition_direction = -1 if direction < 0 else 1
         self.music_surface_transition_mode = str(mode or "queued")
 
@@ -13181,7 +12786,7 @@ class IslandStackVisual(QWidget):
             self.music_surface_transition_from = (QColor(245, 247, 250), QColor(228, 233, 241))
         self.music_surface_transition_to = (target_primary, target_secondary)
         self.music_surface_transition_started_at = time.monotonic()
-        self.music_surface_transition_duration = max(0.42, min(0.72, float(getattr(self, "album_island_transition_duration", 0.62) or 0.62)))
+        self.music_surface_transition_duration = 0.62
         self.music_surface_transition_mode = "white_to_album"
 
     def _related_color_from_qcolor(self, color: QColor, lightness_delta: float = 0.10) -> QColor:
@@ -13980,11 +13585,6 @@ class IslandStackVisual(QWidget):
             text_rect = rect.adjusted(self._u(12.0), top_padding, -self._u(12.0), -bottom_padding)
             self._paint_compact_lyric_viewport(painter, text_rect)
             return
-        if self._should_paint_album_island():
-            self.music_cover_rect = QRectF()
-            self._paint_album_island_compact(painter, rect)
-            self._paint_taskbar_music_hover_overlay(painter, rect)
-            return
         two_line = self._has_current_two_line_lyric()
         top_padding, bottom_padding = self._compact_lyric_vertical_padding(two_line, rect)
         yaoguang_compact = self._effective_music_ambience_style() == "yaoguang"
@@ -14059,7 +13659,7 @@ class IslandStackVisual(QWidget):
         bars = self._sea_level_bars_rect(rect)
         text_rect = QRectF(left, rect.top(), max(0.0, bars.left() - 12.0 * scale - left), rect.height())
         text = self._compact_music_text()
-        title_only = self._should_paint_album_island() or self._empty_music_text_active()
+        title_only = self._empty_music_text_active()
         if title_only:
             text = self.track_title or self.artist or text
         lines = self._lyric_display_lines(text) or [text]
@@ -14217,10 +13817,6 @@ class IslandStackVisual(QWidget):
         clip_path = getattr(self, "_compact_lyric_clip_path", None)
         if isinstance(clip_path, QPainterPath) and not clip_path.isEmpty():
             painter.setClipPath(clip_path, Qt.ClipOperation.IntersectClip)
-        if self._should_paint_album_island():
-            self._paint_album_island(painter, rect)
-            painter.restore()
-            return
         if self._paint_island_lyric_gap(painter, rect):
             painter.restore()
             return
@@ -14504,112 +14100,6 @@ class IslandStackVisual(QWidget):
             x += width
         painter.restore()
 
-    def _paint_album_island(self, painter: QPainter, rect: QRectF):
-        painter.save()
-        painter.setClipRect(rect)
-        raw_slots = self._album_island_slots(rect)
-        self._paint_album_island_slots(painter, raw_slots)
-        painter.setOpacity(1.0)
-        if not any(int(slot.get("side", 0)) > 0 for slot in raw_slots):
-            self._paint_album_island_listened_text(painter, rect, raw_slots)
-        painter.restore()
-
-    def _paint_album_island_slots(self, painter: QPainter, raw_slots: list[dict[str, object]],
-                                  *, shell_rect: QRectF | None = None, stage_rect: QRectF | None = None):
-        if shell_rect is not None:
-            # Keep the current artwork in the common left-hand slot. Retain
-            # the existing history/queue sources and perspective painters in
-            # the available lane to its right, below expanded metadata.
-            cover, cover_radius = self._island_cover_geometry(shell_rect)
-            stage = QRectF(stage_rect if stage_rect is not None else shell_rect)
-            center = next((slot for slot in raw_slots if bool(slot.get("center"))), None)
-            if center is not None:
-                center["rect"], center["radius"] = cover, cover_radius
-            others = sorted((slot for slot in raw_slots if not bool(slot.get("center"))),
-                            key=lambda slot: (abs(int(slot["side"])), int(slot["side"])))
-            left = cover.right() + self._u(10.0)
-            right = stage.right() - self._u(4.0)
-            if others and not any(int(slot["side"]) > 0 for slot in others):
-                left += min(max(0.0, right - left) * .42, self._u(126.0))
-            available = max(0.0, right - left)
-            largest = min(available, max((QRectF(slot["rect"]).width() for slot in others), default=0.0))
-            desired = largest * max(48, min(170, int(getattr(self, "album_island_spacing", 112)))) / 100.0
-            step = min(desired, max(0.0, available - largest) / max(1, len(others) - 1))
-            for index, slot in enumerate(others):
-                side = min(QRectF(slot["rect"]).width(), available, stage.height())
-                slot["rect"] = QRectF(left + index * step, stage.center().y() - side / 2.0, side, side)
-        slots = sorted(raw_slots, key=lambda slot: int(slot.get("z", 0)))
-        for slot in slots:
-            if bool(slot["center"]):
-                self.music_cover_rect = QRectF(slot["rect"])
-            painter.setOpacity(float(slot["alpha"]) / 255.0)
-            radius = float(slot.get("radius", self._u(8.0 if bool(slot["center"]) else 6.0)))
-            self._paint_album_island_slot(painter, slot, radius)
-
-    def _paint_album_island_compact(self, painter: QPainter, rect: QRectF):
-        painter.save()
-        painter.setClipRect(rect)
-        stage = rect.adjusted(self._u(8.0), self._u(4.0), -self._u(8.0), -self._u(4.0))
-        raw_slots = self._album_island_slots(stage, reserve_text=True)
-        self._paint_album_island_slots(painter, raw_slots, shell_rect=rect, stage_rect=stage)
-        painter.setOpacity(1.0)
-        if not any(int(slot.get("side", 0)) > 0 for slot in raw_slots):
-            self._paint_album_island_listened_text(painter, rect, raw_slots)
-        painter.restore()
-
-    def _paint_album_island_slot(self, painter: QPainter, slot: dict[str, object], radius: float):
-        rect = QRectF(slot["rect"])
-        image = slot.get("album_art")
-        if not bool(slot.get("center")) and not bool(slot.get("placeholder", False)) and (not isinstance(image, QImage) or image.isNull()):
-            return
-        tilt = float(slot.get("tilt", 0.0) or 0.0)
-        perspective = slot.get("perspective")
-        painter.save()
-        if isinstance(perspective, dict) and not bool(slot.get("center")):
-            painter.setWorldTransform(album_cover_projection(rect, perspective), combine=True)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            painter.setOpacity(float(slot["alpha"]) / 255.0)
-            cache_key = f"album-island:{slot.get('side', 0)}:{image.cacheKey() if isinstance(image, QImage) else 'empty'}"
-            self._paint_cover(painter, rect, radius, image if isinstance(image, QImage) else None, cache_key)
-            painter.restore()
-            return
-        if abs(tilt) > 0.01:
-            center = rect.center()
-            painter.translate(center)
-            painter.shear(math.tan(math.radians(tilt)) * 0.34, 0.0)
-            painter.translate(-center)
-        cache_key = f"album-island:{slot.get('side', 0)}:{image.cacheKey() if isinstance(image, QImage) else 'empty'}"
-        cover_painter = self._paint_interactive_music_cover if bool(slot.get("center")) else self._paint_cover
-        cover_painter(painter, rect, radius, image if isinstance(image, QImage) else None, cache_key)
-        painter.restore()
-
-    def _paint_album_island_listened_text(self, painter: QPainter, rect: QRectF, slots: list[dict[str, object]]):
-        center_slot = next((slot for slot in slots if bool(slot.get("center"))), None)
-        if center_slot is None:
-            return
-        cover_rect = QRectF(center_slot["rect"])
-        right = rect.right()
-        if not bool(getattr(self, "expanded", False)):
-            right = min((QRectF(slot["rect"]).left() - self._u(6.0)
-                         for slot in slots if not bool(slot.get("center"))), default=right)
-        text_rect = QRectF(
-            cover_rect.right() + self._u(10.0),
-            rect.top(),
-            max(0.0, right - cover_rect.right() - self._u(12.0)),
-            rect.height(),
-        )
-        if text_rect.width() < self._u(46.0):
-            return
-        painter.save()
-        progress = self._album_island_transition_progress()
-        painter.setOpacity(max(0.0, min(1.0, progress)))
-        expanded = rect.height() >= self._u(92.0)
-        painter.setFont(self._font(17 if expanded else 9, QFont.Weight.Bold if expanded else QFont.Weight.DemiBold, shrink=False))
-        painter.setPen(self._music_meta_text_color(218 if expanded else 152))
-        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._album_island_listened_text())
-        painter.restore()
-
     def _compact_lyric_lines(self) -> list[str]:
         if self._empty_music_text_active():
             text = str(getattr(self, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip() or "暂无歌词"
@@ -14629,10 +14119,6 @@ class IslandStackVisual(QWidget):
             text = str(getattr(self, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip() or "暂无歌词"
             row = QRectF(rect.left() + self._u(22.0), rect.center().y() - self._u(18.0), rect.width() - self._u(44.0), self._u(36.0))
             self._paint_scrolling_text(painter, row, text, 18, self._music_lyric_text_color(226), True, centered=True, centered_scroll=True)
-            return
-        if self._expanded_no_lyrics_cover_active() or self._should_paint_album_island():
-            self.music_cover_rect = QRectF()
-            self._paint_album_island_expanded(painter, rect)
             return
         if self._normalize_music_expanded_layout_style(getattr(self, "music_expanded_layout_style", "standard")) == "dual_panel":
             self._paint_music_expanded_dual_panel(painter, rect)
@@ -14746,33 +14232,6 @@ class IslandStackVisual(QWidget):
             br = QRectF(controls_x + i * (button_size + gap), controls_y, button_size, button_size)
             self.music_button_rects[command] = QRectF(br)
             self._paint_music_control_button(painter, br, command, 18 if lower_light else 26, radius=self._u(13.0))
-
-    def _paint_album_island_expanded(self, painter: QPainter, rect: QRectF):
-        painter.save()
-        painter.setClipRect(rect)
-        margin = self._u(18.0)
-        controls_w = self._u(132.0)
-        self.music_button_rects = {}
-
-        info = QRectF(rect.left() + margin, rect.top() + self._u(13.0), rect.width() - controls_w - margin * 2.0 - self._u(18.0), self._u(42.0))
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(24.0)), self.track_title, 12, self._music_meta_text_color(238), True)
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(24.0), info.width(), self._u(18.0)), self.artist, 8, self._music_meta_text_color(132), False)
-
-        controls_x = rect.right() - margin - controls_w
-        commands = self._supported_music_transport_commands(["music:previous", "music:toggle_play_pause", "music:next"])
-        for i, command in enumerate(commands):
-            button_size = self._u(34.0)
-            br = QRectF(controls_x + i * self._u(44.0), rect.top() + self._u(19.0), button_size, button_size)
-            self.music_button_rects[command] = QRectF(br)
-            self._paint_music_control_button(painter, br, command, 34 if command == "music:toggle_play_pause" else 22, radius=self._u(12.0))
-
-        stage = QRectF(rect.left() + margin, rect.top() + self._u(58.0), rect.width() - margin * 2.0, rect.height() - self._u(76.0))
-        raw_slots = self._album_island_slots(stage, reserve_text=True)
-        self._paint_album_island_slots(painter, raw_slots)
-        painter.setOpacity(1.0)
-        if not any(int(slot.get("side", 0)) > 0 for slot in raw_slots):
-            self._paint_album_island_listened_text(painter, stage, raw_slots)
-        painter.restore()
 
     def _lyric_transition_progress(self, duration: float = 0.52) -> tuple[float, float]:
         if getattr(self, "lyric_transition_kind", "") == "seek":
@@ -15185,10 +14644,6 @@ class IslandStackVisual(QWidget):
         painter.save()
         painter.setClipRect(rect)
         if not self.lyrics:
-            painter.restore()
-            return
-        if self._should_paint_album_island():
-            self._paint_album_island(painter, rect)
             painter.restore()
             return
         if self._paint_island_lyric_gap(painter, rect):

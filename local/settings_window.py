@@ -599,12 +599,10 @@ class SettingsWindow(QDialog):
 
     LYRIC_FLOW_STYLES = (
         ("波光逐流", "wave_stream"),
-        ("专辑岛", "album_island"),
     )
 
     NO_LYRICS_DISPLAY_MODES = (
         ("显示特定文字", "text"),
-        ("专辑岛模式", "album_island"),
     )
 
     DUAL_LINE_SECONDARY_SOURCES = (
@@ -616,16 +614,6 @@ class SettingsWindow(QDialog):
         ("不转换", "off"),
         ("转为简体中文", "simplified"),
         ("转为繁体中文", "traditional"),
-    )
-
-    ALBUM_ISLAND_COVER_COUNTS = (
-        ("3 张", 3),
-        ("5 张", 5),
-        ("7 张", 7),
-    )
-
-    ALBUM_ISLAND_SECONDARY_STYLES = (
-        ("透视", "perspective_dim"),
     )
 
     LOCATION_MODES = tuple((label, mode) for mode, label in PLACEMENT_MODE_LABELS.items())
@@ -2167,9 +2155,6 @@ class SettingsWindow(QDialog):
             self._set_lyric_flow_style,
         )
         self._row(c, "文字流转", self.lyric_flow_style)
-        self.reset_album_record_button = GlassPushButton("归零已听记录")
-        self.reset_album_record_button.clicked.connect(self._reset_album_island_record)
-        c.addWidget(self.reset_album_record_button)
 
         self._update_music_ambience_controls()
         self._update_lyric_flow_controls()
@@ -2549,10 +2534,8 @@ class SettingsWindow(QDialog):
         return "可用" if self._dual_line_lyrics_available_for_settings() else "Tasker 模式下不可用"
 
     def _update_lyric_flow_controls(self):
-        style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")))
-        reset_button = getattr(self, "reset_album_record_button", None)
-        if reset_button is not None:
-            reset_button.setVisible(style == "album_island")
+        # The album-island record button is gone. Wave stream has no extra toggles.
+        return
 
     def _active_color_fill_enabled_for_settings(self) -> bool:
         checker = getattr(self.island_widget, "_active_lyric_color_fill_enabled", None)
@@ -3430,6 +3413,8 @@ class SettingsWindow(QDialog):
 
     def _set_lyric_flow_style(self, _index: int = -1):
         style = str(self.lyric_flow_style.currentData() or "wave_stream")
+        if style != "wave_stream":
+            style = "wave_stream"
         if hasattr(self.island_widget, "set_lyric_flow_style"):
             self.island_widget.set_lyric_flow_style(style, notify=False)
         else:
@@ -3728,7 +3713,7 @@ class SettingsWindow(QDialog):
 
     def _set_no_lyrics_display_mode(self, _index: int = -1):
         mode = str(self.no_lyrics_display_mode.currentData() or "text")
-        if mode not in {"text", "album_island"}:
+        if mode != "text":
             mode = "text"
         setter = getattr(self.island_widget, "set_no_lyrics_display_mode", None)
         if callable(setter):
@@ -3738,85 +3723,6 @@ class SettingsWindow(QDialog):
             self.island_widget.update()
         self._save("v2_no_lyrics_display_mode", mode)
         self._update_lyric_flow_controls()
-        self._touch()
-
-    def _set_album_island_cover_count(self, _index: int = -1):
-        count = int(self.album_island_cover_count.currentData() or 5)
-        if hasattr(self.island_widget, "set_album_island_cover_count"):
-            self.island_widget.set_album_island_cover_count(count, notify=False)
-        else:
-            self.island_widget.album_island_cover_count = count
-            self.island_widget.update()
-        self._save("v2_album_island_cover_count", count)
-        self._touch()
-
-    def _set_album_island_cover_size(self, value: int):
-        self._set_album_island_compact_cover_size(value)
-
-    def _set_album_island_compact_cover_size(self, value: int):
-        size = max(18, min(44, int(value)))
-        if hasattr(self.island_widget, "set_album_island_compact_cover_size"):
-            self.island_widget.set_album_island_compact_cover_size(size, notify=False)
-        elif hasattr(self.island_widget, "set_album_island_cover_size"):
-            self.island_widget.set_album_island_cover_size(size, notify=False)
-        else:
-            self.island_widget.album_island_cover_size = size
-            self.island_widget.album_island_compact_cover_size = size
-            self.island_widget.update()
-        self._save("v2_album_island_cover_size", size)
-        self._save("v2_album_island_compact_cover_size", size)
-        self._touch()
-
-    def _set_album_island_expanded_cover_size(self, value: int):
-        size = max(36, min(96, int(value)))
-        if hasattr(self.island_widget, "set_album_island_expanded_cover_size"):
-            self.island_widget.set_album_island_expanded_cover_size(size, notify=False)
-        else:
-            self.island_widget.album_island_expanded_cover_size = size
-            self.island_widget.update()
-        self._save("v2_album_island_expanded_cover_size", size)
-        self._touch()
-
-    def _reset_album_island_record(self):
-        if hasattr(self.island_widget, "reset_album_island_record"):
-            self.island_widget.reset_album_island_record(notify=False)
-        else:
-            self.island_widget.listened_seconds_total = 0.0
-            self.island_widget.album_history = []
-            self.island_widget.update()
-        self._save("v2_album_island_listened_seconds_total", 0.0)
-        self._save("v2_album_island_history", [])
-        self._touch()
-
-    def _set_album_island_secondary_style(self, _index: int = -1):
-        style = str(self.album_island_secondary_style.currentData() or "perspective_dim")
-        if hasattr(self.island_widget, "set_album_island_secondary_style"):
-            self.island_widget.set_album_island_secondary_style(style, notify=False)
-        else:
-            self.island_widget.album_island_secondary_style = style
-            self.island_widget.update()
-        self._save("v2_album_island_secondary_style", style)
-        self._update_lyric_flow_controls()
-        self._touch()
-
-    def _set_album_island_perspective_amount(self, value: int):
-        amount = max(0, min(200, int(value)))
-        if hasattr(self.island_widget, "set_album_island_perspective_amount"):
-            self.island_widget.set_album_island_perspective_amount(amount, notify=False)
-        else:
-            self.island_widget.album_island_perspective_amount = amount
-            self.island_widget.update()
-        self._save("v2_album_island_perspective_amount", amount)
-        self._touch()
-
-    def _set_album_island_spacing(self, value: int):
-        spacing = max(48, min(170, int(value)))
-        if hasattr(self.island_widget, "set_album_island_spacing"):
-            self.island_widget.set_album_island_spacing(spacing, notify=False)
-        else:
-            self.island_widget.album_island_spacing = spacing
-            self.island_widget.update()
-        self._save("v2_album_island_spacing", spacing)
         self._touch()
 
     def _alarm_rows_summary(self) -> str:

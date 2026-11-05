@@ -89,11 +89,6 @@ class LibraryNowPlayingIsland(IslandStackVisual):
     def _expanded_no_lyrics_cover_active(self):
         return False
 
-    def _should_paint_album_island(self):
-        # The library mounts the standard cover/title/lyric instance, keeping
-        # its transport reachable even for an instrumental/lyricless track.
-        return False
-
     def set_context(self, settings_getter=None, island=None):
         self.settings_getter = settings_getter
         if island is not None:

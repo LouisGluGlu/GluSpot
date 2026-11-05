@@ -183,7 +183,7 @@ class IslandPersonalRadioControlTests(unittest.TestCase):
         self.provider.speaking = False
         self.visual._sync_personal_dj_island(100.)
         painters = (self.visual._paint_music_expanded_dual_panel,
-                    self.visual._paint_album_island_expanded,
+                    self.visual._paint_music_expanded,
                     self.visual._paint_taskbar_music_hover_overlay)
         with patch.object(self.visual, "_taskbar_music_hover_overlay_active", return_value=True):
             for painter_method in painters:

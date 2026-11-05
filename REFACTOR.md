@@ -287,3 +287,9 @@ E:\gpt-island\.venv\Scripts\python.exe E:\Claude-spot\_claude\testrun.py gelv
 **提交状态**：尚未提交。按请求暂存上述文件时，Git 无法创建
 `E:/Claude-spot/GluSpot/.git/index.lock`，报 `Permission denied`。
 当前会话无法写入 Git 元数据，未切分支、未 push；需恢复解释器执行与 Git 元数据写入权限后完成全量验证和提交。
+
+## 删除专辑岛封面排列
+
+上文格律删除当时保留的 `album_island` 已从歌词流转和无歌词回退中拿掉。迷你岛不再绘制弧形封面排、侧封面透视和「您已听歌」文案。旧 `settings.json` 里的 `v2_album_island_*` 键在读取时忽略，不报错；`v2_lyric_flow_style=album_island` 归一为 `wave_stream`，无歌词模式归一为 `text`。
+
+展开与紧凑迷你岛回到既有波光逐流布局（歌名、歌手、播放控件、歌词）。青色波浪来自音乐岛背景氛围，不随封面排删除。单曲封面翻转动画仍使用 `album_cover_projection`。换曲时的历史/队列颜色过渡仍保留，它不绘制封面排。

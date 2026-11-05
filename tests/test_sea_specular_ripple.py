@@ -389,14 +389,12 @@ class ExpandedRippleRenderTests(unittest.TestCase):
         self.assertTrue(visual._expanded_no_lyrics_cover_active())
         visual.lyrics = ["查找歌词中"]
         self.assertTrue(visual._expanded_no_lyrics_cover_active())
-        visual._paint_album_island_expanded = Mock()
         visual._paint_lyric_viewport = Mock()
         image = QImage(520, 136, QImage.Format.Format_ARGB32_Premultiplied)
         painter = QPainter(image)
         visual._paint_music_expanded(painter, QRectF(0, 0, 520, 136))
         painter.end()
-        visual._paint_album_island_expanded.assert_called_once()
-        visual._paint_lyric_viewport.assert_not_called()
+        visual._paint_lyric_viewport.assert_called_once()
         visual._notify_settings_changed.assert_not_called()
         visual.lyrics = ["A real lyric"]
         self.assertFalse(visual._expanded_no_lyrics_cover_active())

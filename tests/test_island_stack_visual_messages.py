@@ -1398,35 +1398,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(plan.active)
         self.assertEqual(plan.reason, "media")
 
-    def test_active_visual_animation_plan_reports_album_transition_reason(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.media_is_playing = False
-        visual.finder_mode = False
-        visual.drag_candidate = False
-        visual.dragging = False
-        visual.barrage_hovered = False
-        visual.hover_bounce_until = 0.0
-        visual.stack_bounce_until = 0.0
-        visual.taskbar_left_handle_visible_until = 0.0
-        visual.scene_transition_mode = ""
-        visual.surface_transition_pixmap = QPixmap()
-        visual.music_surface_transition_mode = ""
-        visual.prev_lyric_index = 0
-        visual.lyric_index = 0
-        visual.lyric_transition_kind = ""
-        visual.plugin_time_module_animation = {}
-        visual.plugin_alarm_editor_page_animation = {}
-        visual.plugin_alarm_editor_reflow_animation = {}
-        visual.plugin_alarm_editor_spin_animations = {}
-        visual.music_control_press_started_at = {}
-        visual._should_paint_album_island = lambda: True
-        visual._album_island_transition_progress = lambda _now: 0.42
-
-        plan = visual._active_visual_animation_plan(12.0)
-
-        self.assertTrue(plan.active)
-        self.assertEqual(plan.reason, "album_island_transition")
-
     def test_active_visual_animation_plan_keeps_plugin_animation_checks_lazy(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.media_is_playing = False
@@ -1808,16 +1779,19 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertNotIn("v2_lyric_elastic_mode", snapshot)
         self.assertNotIn("v2_lyric_word_spacing", snapshot)
         self.assertNotIn("v2_wave_color_fill_fallback", snapshot)
-        self.assertEqual(snapshot["v2_no_lyrics_display_mode"], "album_island")
-        self.assertEqual(snapshot["v2_album_island_cover_count"], 7)
-        self.assertEqual(snapshot["v2_album_island_cover_size"], 34)
-        self.assertEqual(snapshot["v2_album_island_compact_cover_size"], 28)
-        self.assertEqual(snapshot["v2_album_island_expanded_cover_size"], 72)
-        self.assertEqual(snapshot["v2_album_island_spacing"], 140)
-        self.assertEqual(snapshot["v2_album_island_secondary_style"], "perspective_dim")
-        self.assertEqual(snapshot["v2_album_island_perspective_amount"], 135)
-        self.assertEqual(snapshot["v2_album_island_listened_seconds_total"], 7260.0)
-        self.assertEqual(snapshot["v2_album_island_history"][0]["track_id"], "a")
+        self.assertEqual(snapshot["v2_no_lyrics_display_mode"], "text")
+        for removed_key in (
+            "v2_album_island_cover_count",
+            "v2_album_island_cover_size",
+            "v2_album_island_compact_cover_size",
+            "v2_album_island_expanded_cover_size",
+            "v2_album_island_spacing",
+            "v2_album_island_secondary_style",
+            "v2_album_island_perspective_amount",
+            "v2_album_island_listened_seconds_total",
+            "v2_album_island_history",
+        ):
+            self.assertNotIn(removed_key, snapshot)
         self.assertFalse(snapshot["v2_compact_lyric_show_cover"])
 
     def test_location_tasker_settings_are_saved_in_snapshot(self):
@@ -4419,33 +4393,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertGreater(tokens["fill_top"].red(), 210)
         self.assertLess(tokens["stroke"].alpha(), 120)
 
-    def test_tasker_compact_album_island_uses_available_side_slots(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.location_mode = "tasker"
-        visual.expanded = False
-        visual.album_island_cover_count = 5
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        visual.album_island_secondary_style = "perspective_dim"
-        visual.album_island_perspective_amount = 100
-        visual.album_island_transition_started_at = 1.0
-        visual.album_island_transition_direction = 1
-        visual._u = lambda value: float(value)
-        art = QImage(16, 16, QImage.Format.Format_ARGB32)
-        art.fill(QColor(120, 80, 50))
-        previous = QImage(16, 16, QImage.Format.Format_ARGB32)
-        previous.fill(QColor(50, 90, 140))
-        next_art = QImage(16, 16, QImage.Format.Format_ARGB32)
-        next_art.fill(QColor(180, 90, 120))
-        visual.album_art = art
-        visual.album_history = [{"track_id": "old", "album_art": previous}]
-        visual.album_queue = [{"track_id": "next", "album_art": next_art}]
-
-        with patch("local.island_stack_visual.time.monotonic", return_value=1.08):
-            slots = visual._album_island_slots(QRectF(0.0, 0.0, 260.0, 34.0), reserve_text=True)
-
-        self.assertEqual([int(slot["side"]) for slot in slots], [-1, 0, 1])
-
     def test_taskbar_material_sampling_skips_own_island_region(self):
         class FakeScreen:
             def __init__(self, exclusion: QRectF):
@@ -5920,30 +5867,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         painter = QPainter(image)
 
         visual._paint_music_expanded(painter, QRectF(12.0, 12.0, 480.0, 176.0))
-        painter.end()
-
-        self.assertEqual([color.black() for color in colors[:2]], [255, 255])
-
-    def test_system_light_album_island_expanded_title_and_artist_use_dark_text(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "system"
-        visual._music_system_dark = False
-        visual.track_title = "Title"
-        visual.artist = "Artist"
-        visual.media_is_playing = True
-        visual.music_button_rects = {}
-        visual._u = lambda value: float(value)
-        visual._font_size = lambda value: int(value)
-        visual._album_island_slots = lambda *_args, **_kwargs: []
-        visual._paint_album_island_slots = lambda *_args, **_kwargs: None
-        visual._paint_album_island_listened_text = lambda *_args, **_kwargs: None
-        colors: list[QColor] = []
-        visual._paint_scrolling_text = lambda _painter, _rect, _text, _size, color, *_args, **_kwargs: colors.append(QColor(color))
-        image = QImage(520, 220, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-
-        visual._paint_album_island_expanded(painter, QRectF(12.0, 12.0, 480.0, 176.0))
         painter.end()
 
         self.assertEqual([color.black() for color in colors[:2]], [255, 255])
@@ -8482,39 +8405,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertGreater(color.saturation(), visual.album_color.saturation())
 
-    def test_album_island_cover_count_allows_only_odd_choices(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.update = lambda: None
-        visual._emit_settings_changed = lambda *_args: None
-
-        visual.set_album_island_cover_count(4, notify=False)
-        self.assertEqual(visual.album_island_cover_count, 5)
-        visual.set_album_island_cover_count(7, notify=False)
-        self.assertEqual(visual.album_island_cover_count, 7)
-
-    def test_should_use_album_island_when_no_lyrics_mode_selected(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.no_lyrics_display_mode = "album_island"
-        visual.lyrics = ["暂无歌词"]
-        visual.no_lyrics_text = "暂无歌词"
-
-        self.assertTrue(visual._should_paint_album_island())
-
-    def test_should_use_album_island_when_selected_as_lyric_flow_style(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.lyric_flow_style = "album_island"
-        visual.no_lyrics_display_mode = "text"
-        visual.lyrics = ["这是一句真实歌词", "下一句歌词"]
-        visual.no_lyrics_text = "暂无歌词"
-
-        self.assertTrue(visual._should_paint_album_island())
-
-    def test_listened_hours_text_has_no_decimals(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.listened_seconds_total = 3660 * 12.4
-
-        self.assertEqual(visual._album_island_listened_text(), "您已听歌 12 小时")
-
     def test_album_history_moves_previous_track_left_on_change(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.album_history = []
@@ -8696,294 +8586,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(queue[0]["album_color"], QColor(220, 120, 40))
         self.assertEqual(queue[0]["secondary_color"], QColor(120, 40, 180))
 
-    def test_album_island_slots_make_center_dominant(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 5
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        old_one = QImage(8, 8, QImage.Format.Format_ARGB32)
-        old_one.fill(QColor(210, 80, 45))
-        old_two = QImage(8, 8, QImage.Format.Format_ARGB32)
-        old_two.fill(QColor(80, 210, 110))
-        next_one = QImage(8, 8, QImage.Format.Format_ARGB32)
-        next_one.fill(QColor(230, 160, 80))
-        next_two = QImage(8, 8, QImage.Format.Format_ARGB32)
-        next_two.fill(QColor(160, 80, 230))
-        visual.album_history = [
-            {"track_id": "old-one", "album_art": old_one},
-            {"track_id": "old-two", "album_art": old_two},
-        ]
-        visual.album_queue = [
-            {"track_id": "next-one", "album_art": next_one},
-            {"track_id": "next-two", "album_art": next_two},
-        ]
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        center_slot = next(slot for slot in slots if slot["center"])
-        left_one = next(slot for slot in slots if slot["side"] == -1)
-        left_two = next(slot for slot in slots if slot["side"] == -2)
-        right_one = next(slot for slot in slots if slot["side"] == 1)
-        center = center_slot["rect"]
-        self.assertGreater(center.width(), left_one["rect"].width())
-        self.assertGreater(left_one["rect"].width(), left_two["rect"].width())
-        self.assertGreater(center_slot["alpha"], left_one["alpha"])
-        self.assertIn("perspective", left_one)
-        self.assertIn("perspective", right_one)
-        center_spacing = center.center().x() - left_one["rect"].center().x()
-        self.assertGreater(center_spacing, center.width() * 0.72)
-
-    def test_album_island_known_queue_transition_slides_new_focus_from_right(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 5
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        visual.album_island_secondary_style = "perspective_dim"
-        visual.album_island_perspective_amount = 100
-        visual.album_island_transition_started_at = 10.0
-        visual.album_island_transition_direction = 1
-        visual.music_surface_transition_mode = "queued"
-        visual._u = lambda value: float(value)
-        current = QImage(8, 8, QImage.Format.Format_ARGB32)
-        current.fill(QColor(10, 120, 210))
-        next_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        next_art.fill(QColor(230, 160, 80))
-        visual.album_art = current
-        visual.album_history = [{"track_id": "old-current", "album_art": current}]
-        visual.album_queue = [{"track_id": "next", "album_art": next_art}]
-
-        with patch("local.island_stack_visual.time.monotonic", return_value=10.12):
-            slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        center_slot = next(slot for slot in slots if slot["center"])
-        right_slot = next(slot for slot in slots if slot["side"] == 1)
-        self.assertGreater(QRectF(center_slot["rect"]).center().x(), 180.0)
-        self.assertGreater(QRectF(right_slot["rect"]).center().x(), QRectF(center_slot["rect"]).center().x())
-
-    def test_album_island_legacy_shrink_style_uses_canonical_perspective(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 5
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        visual.album_island_secondary_style = "shrink_dim"
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        old_one = QImage(8, 8, QImage.Format.Format_ARGB32)
-        old_one.fill(QColor(210, 80, 45))
-        next_one = QImage(8, 8, QImage.Format.Format_ARGB32)
-        next_one.fill(QColor(230, 160, 80))
-        visual.album_history = [{"track_id": "old-one", "album_art": old_one}]
-        visual.album_queue = [{"track_id": "next-one", "album_art": next_one}]
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        side_slots = [slot for slot in slots if not bool(slot["center"])]
-        self.assertTrue(side_slots)
-        self.assertTrue(all(abs(float(slot["tilt"])) <= 0.01 for slot in side_slots))
-        self.assertTrue(all(isinstance(slot["perspective"], dict) for slot in side_slots))
-        self.assertLess(side_slots[0]["perspective"]["right_height"], side_slots[0]["perspective"]["left_height"])
-
-    def test_album_island_secondary_perspective_style_keeps_flatter_side_covers(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 5
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        visual.album_island_secondary_style = "perspective_dim"
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        old_one = QImage(8, 8, QImage.Format.Format_ARGB32)
-        old_one.fill(QColor(210, 80, 45))
-        visual.album_history = [{"track_id": "old-one", "album_art": old_one}]
-        visual.album_queue = []
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        center = next(slot for slot in slots if slot["center"])
-        left = next(slot for slot in slots if slot["side"] == -1)
-        self.assertLess(abs(center["rect"].width() - left["rect"].width()), center["rect"].width() * 0.18)
-        self.assertEqual(left["tilt"], 0.0)
-        self.assertIn("perspective", left)
-
-    def test_album_island_secondary_perspective_uses_horizontal_quad_shape(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 7
-        visual.album_island_cover_size = 34
-        visual.album_island_spacing = 112
-        visual.album_island_secondary_style = "perspective_dim"
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        old_one = QImage(8, 8, QImage.Format.Format_ARGB32)
-        old_one.fill(QColor(210, 80, 45))
-        old_two = QImage(8, 8, QImage.Format.Format_ARGB32)
-        old_two.fill(QColor(160, 80, 45))
-        next_one = QImage(8, 8, QImage.Format.Format_ARGB32)
-        next_one.fill(QColor(230, 160, 80))
-        visual.album_history = [
-            {"track_id": "old-one", "album_art": old_one},
-            {"track_id": "old-two", "album_art": old_two},
-        ]
-        visual.album_queue = [{"track_id": "next-one", "album_art": next_one}]
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        left_one = next(slot for slot in slots if slot["side"] == -1)
-        left_two = next(slot for slot in slots if slot["side"] == -2)
-        right_one = next(slot for slot in slots if slot["side"] == 1)
-        self.assertEqual(left_one["tilt"], 0.0)
-        self.assertIn("perspective", left_one)
-        self.assertLess(left_one["perspective"]["right_height"], left_one["perspective"]["left_height"])
-        self.assertLess(right_one["perspective"]["left_height"], right_one["perspective"]["right_height"])
-        self.assertLess(left_two["perspective"]["right_height"], left_one["perspective"]["right_height"])
-
-    def test_album_island_perspective_amount_controls_side_height_delta(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 5
-        visual.album_island_cover_size = 34
-        visual.album_island_spacing = 112
-        visual.album_island_secondary_style = "perspective_dim"
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        old_one = QImage(8, 8, QImage.Format.Format_ARGB32)
-        old_one.fill(QColor(210, 80, 45))
-        visual.album_history = [{"track_id": "old-one", "album_art": old_one}]
-        visual.album_queue = []
-
-        visual.album_island_perspective_amount = 35
-        soft_slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-        visual.album_island_perspective_amount = 155
-        strong_slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        soft_left = next(slot for slot in soft_slots if slot["side"] == -1)
-        strong_left = next(slot for slot in strong_slots if slot["side"] == -1)
-        soft_delta = soft_left["perspective"]["left_height"] - soft_left["perspective"]["right_height"]
-        strong_delta = strong_left["perspective"]["left_height"] - strong_left["perspective"]["right_height"]
-        self.assertGreater(strong_delta, soft_delta * 2.0)
-
-    def test_album_island_slots_shift_inward_when_left_cover_hits_boundary(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 7
-        visual.album_island_cover_size = 44
-        visual.album_island_spacing = 170
-        visual.album_island_secondary_style = "shrink_dim"
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        visual.album_history = []
-        for index in range(3):
-            image = QImage(8, 8, QImage.Format.Format_ARGB32)
-            image.fill(QColor(210 - index * 30, 80, 45))
-            visual.album_history.append({"track_id": f"old-{index}", "album_art": image})
-        visual.album_queue = []
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 180.0, 64.0), reserve_text=True)
-
-        leftmost = min(QRectF(slot["rect"]).left() for slot in slots)
-        center = next(slot for slot in slots if slot["center"])
-        self.assertGreaterEqual(leftmost, -0.01)
-        self.assertLessEqual(QRectF(center["rect"]).center().x(), 90.0)
-
-    def test_album_island_slots_use_distinct_album_sources(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 5
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        old_one = QImage(8, 8, QImage.Format.Format_ARGB32)
-        old_one.fill(QColor(210, 80, 45))
-        old_two = QImage(8, 8, QImage.Format.Format_ARGB32)
-        old_two.fill(QColor(80, 210, 110))
-        visual.album_history = [
-            {"track_id": "old-one", "album_art": old_one},
-            {"track_id": "old-two", "album_art": old_two},
-        ]
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        center_slot = next(slot for slot in slots if slot["center"])
-        left_slots = [slot for slot in slots if int(slot["side"]) < 0]
-        self.assertEqual(center_slot["album_art"].cacheKey(), visual.album_art.cacheKey())
-        self.assertIn(old_one.cacheKey(), [slot["album_art"].cacheKey() for slot in left_slots if not slot["album_art"].isNull()])
-        self.assertNotIn(visual.album_art.cacheKey(), [slot["album_art"].cacheKey() for slot in slots if not slot["center"] and not slot["album_art"].isNull()])
-
-    def test_album_island_slots_skip_empty_album_placeholders(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 7
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        visual.album_history = []
-        visual.album_queue = []
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        self.assertEqual([slot["side"] for slot in slots], [0])
-
-    def test_album_island_slots_show_only_real_right_queue_covers(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 7
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        next_one = QImage(8, 8, QImage.Format.Format_ARGB32)
-        next_one.fill(QColor(230, 160, 80))
-        visual.album_history = []
-        visual.album_queue = [{"track_id": "next-one", "album_art": next_one}]
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        self.assertEqual([slot["side"] for slot in slots], [0, 1])
-        self.assertEqual(slots[1]["album_art"].cacheKey(), next_one.cacheKey())
-
-    def test_album_island_slots_do_not_duplicate_current_album_on_right_queue(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 5
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        visual.media_track_id = "current"
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        later = QImage(8, 8, QImage.Format.Format_ARGB32)
-        later.fill(QColor(230, 160, 80))
-        visual.album_history = []
-        visual.album_queue = [
-            {"track_id": "current", "album_art": visual.album_art},
-            {"track_id": "later", "album_art": later},
-        ]
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        side_art_keys = [slot["album_art"].cacheKey() for slot in slots if not bool(slot["center"]) and not slot["album_art"].isNull()]
-        self.assertNotIn(visual.album_art.cacheKey(), side_art_keys)
-        self.assertIn(later.cacheKey(), side_art_keys)
-
-    def test_album_island_slots_skip_current_art_when_same_bytes_decode_to_new_image(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 5
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        visual.media_track_id = "current"
-        current_bytes = self._png_bytes(QColor(10, 120, 210))
-        visual.album_art = QImage()
-        self.assertTrue(visual.album_art.loadFromData(current_bytes))
-        visual.album_art_signature = visual._album_art_bytes_signature(current_bytes)
-        repeated = QImage()
-        self.assertTrue(repeated.loadFromData(current_bytes))
-        later = QImage(8, 8, QImage.Format.Format_ARGB32)
-        later.fill(QColor(230, 160, 80))
-        visual.album_history = []
-        visual.album_queue = [
-            {"track_id": "same-cover-next", "album_art": repeated},
-            {"track_id": "later", "album_art": later},
-        ]
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        side_art_keys = [slot["album_art"].cacheKey() for slot in slots if not bool(slot["center"]) and not slot["album_art"].isNull()]
-        self.assertNotIn(repeated.cacheKey(), side_art_keys)
-        self.assertIn(later.cacheKey(), side_art_keys)
-
     def test_album_queue_from_track_skips_current_art_by_album_art_signature(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.media_track_id = "current"
@@ -9015,31 +8617,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(first)
         self.assertIn(image.cacheKey(), cache_after_first)
         self.assertEqual(cache_after_first, getattr(visual, "_album_image_signature_cache", {}))
-
-    def test_album_island_slots_skip_history_art_matching_current_cover(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 5
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        current_bytes = self._png_bytes(QColor(10, 120, 210))
-        visual.album_art = QImage()
-        self.assertTrue(visual.album_art.loadFromData(current_bytes))
-        visual.album_art_signature = visual._album_art_bytes_signature(current_bytes)
-        previous_same_cover = QImage()
-        self.assertTrue(previous_same_cover.loadFromData(current_bytes))
-        older = QImage(8, 8, QImage.Format.Format_ARGB32)
-        older.fill(QColor(230, 160, 80))
-        visual.album_history = [
-            {"track_id": "previous-same-cover", "album_art": previous_same_cover},
-            {"track_id": "older", "album_art": older},
-        ]
-        visual.album_queue = []
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        side_art_keys = [slot["album_art"].cacheKey() for slot in slots if not bool(slot["center"]) and not slot["album_art"].isNull()]
-        self.assertNotIn(previous_same_cover.cacheKey(), side_art_keys)
-        self.assertIn(older.cacheKey(), side_art_keys)
 
     def test_music_surface_transition_paints_visible_wash_over_dark_body(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -9160,88 +8737,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertIn("if context_plan.clip_edge_notch:", segment)
         self.assertIn("painter.setClipPath(self._edge_notch_path(rect, self._edge_notch_edge()))", segment)
 
-    def test_album_island_missing_next_art_appears_as_right_placeholder_not_center_duplicate(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 5
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        visual.media_track_id = "current"
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        visual.album_history = []
-        visual.album_queue = visual._album_queue_from_track(
-            [AlbumQueueEntry("Next", "Artist", track_id="next-without-art")]
-        )
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 360.0, 64.0))
-
-        center = next(slot for slot in slots if bool(slot["center"]))
-        placeholder = next(slot for slot in slots if bool(slot.get("placeholder")))
-        self.assertEqual(center["album_art"].cacheKey(), visual.album_art.cacheKey())
-        self.assertEqual(placeholder["side"], 1)
-        self.assertTrue(placeholder["album_art"].isNull())
-
-    def test_album_island_expanded_width_grows_to_fit_configured_cover_row(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        # Width caches read the real Qt font/DPI measurement context.
-        QWidget.__init__(visual)
-        self.addCleanup(visual.deleteLater)
-        visual.expanded = True
-        visual.lyric_flow_style = "album_island"
-        visual.no_lyrics_display_mode = "text"
-        visual.lyrics = ["Line"]
-        visual.track_title = "Song"
-        visual.artist = "Artist"
-        visual.album_island_cover_count = 7
-        visual.album_island_cover_size = 30
-        visual.album_island_compact_cover_size = 30
-        visual.album_island_expanded_cover_size = 96
-        visual.album_island_spacing = 170
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        visual.album_history = []
-        visual.album_queue = []
-        for index in range(3):
-            left = QImage(8, 8, QImage.Format.Format_ARGB32)
-            left.fill(QColor(210 - index * 20, 80, 45))
-            right = QImage(8, 8, QImage.Format.Format_ARGB32)
-            right.fill(QColor(80, 160 + index * 20, 210))
-            visual.album_history.append({"track_id": f"old-{index}", "album_art": left})
-            visual.album_queue.append({"track_id": f"next-{index}", "album_art": right})
-
-        width = visual._music_target_width(expanded=True)
-        _main_w, main_h = visual._main_size_for_kind(IslandKind.MUSIC, width)
-        stage = QRectF(18.0 * IslandStackVisual.VISUAL_SCALE, 58.0 * IslandStackVisual.VISUAL_SCALE, width - 36.0 * IslandStackVisual.VISUAL_SCALE, main_h - 76.0 * IslandStackVisual.VISUAL_SCALE)
-        slots = visual._album_island_slots(stage, reserve_text=True)
-
-        self.assertGreater(width, 760.0 * IslandStackVisual.VISUAL_SCALE)
-        self.assertGreaterEqual(min(QRectF(slot["rect"]).left() for slot in slots), stage.left() - 0.1)
-        self.assertLessEqual(max(QRectF(slot["rect"]).right() for slot in slots), stage.right() + 0.1)
-
-    def test_album_island_compact_replaces_standard_music_cover_layout(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        # Album-only presentation remains on the other backgrounds. The
-        # sea compact face now keeps its cover, title and four bars.
-        visual.music_ambience_style = "solid_album"
-        visual.no_lyrics_display_mode = "album_island"
-        visual.no_lyrics_text = "no lyrics"
-        visual.lyrics = ["no lyrics"]
-        visual.lyric_index = 0
-        visual.lyric_flow_style = "wave_stream"
-        visual.enable_dual_line_lyrics = False
-        calls = []
-        visual._paint_album_island_compact = lambda *_args: calls.append("album")
-        visual._paint_cover = lambda *_args: calls.append("cover")
-        visual._paint_compact_lyric_viewport = lambda *_args: calls.append("viewport")
-        image = QImage(320, 90, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-
-        visual._paint_music_compact(painter, QRectF(12.0, 12.0, 260.0, 54.0))
-        painter.end()
-
-        self.assertEqual(calls, ["album"])
-
     def test_compact_lyric_can_hide_album_cover_and_left_align_text(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.music_ambience_style = "solid_album"
@@ -9268,78 +8763,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertFalse(any(call[0] == "cover" for call in calls))
         viewport = next(call[1] for call in calls if call[0] == "viewport")
         self.assertLessEqual(viewport.left(), 24.1)
-
-    def test_album_island_expanded_replaces_standard_music_cover_layout(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.no_lyrics_display_mode = "album_island"
-        visual.no_lyrics_text = "no lyrics"
-        visual.lyrics = ["no lyrics"]
-        visual.track_title = "Current Song"
-        visual.artist = "Artist"
-        visual.media_is_playing = True
-        calls = []
-        visual._paint_album_island_expanded = lambda *_args: calls.append("album")
-        visual._paint_cover = lambda *_args: calls.append("cover")
-        visual._paint_scrolling_text = lambda *_args: calls.append("text")
-        visual._paint_lyric_viewport = lambda *_args: calls.append("viewport")
-        image = QImage(520, 240, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-
-        visual._paint_music_expanded(painter, QRectF(18.0, 18.0, 420.0, 160.0))
-        painter.end()
-
-        self.assertEqual(calls, ["album"])
-        self.assertTrue(getattr(visual, "music_cover_rect", QRectF()).isNull())
-
-    def test_album_island_compact_fallback_paints_heard_hours_without_future_slots(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_island_cover_count = 5
-        visual.album_island_cover_size = 30
-        visual.album_island_spacing = 112
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(10, 120, 210))
-        previous = QImage(8, 8, QImage.Format.Format_ARGB32)
-        previous.fill(QColor(210, 80, 45))
-        visual.album_history = [{"track_id": "old-one", "album_art": previous}]
-        visual.album_queue = []
-        visual.listened_seconds_total = 55 * 3600
-        calls = []
-        visual._paint_album_island_slot = lambda _painter, slot, _radius: calls.append(("slot", int(slot["side"])))
-        visual._paint_album_island_listened_text = lambda _painter, _rect, slots: calls.append(
-            ("text", [int(slot["side"]) for slot in slots])
-        )
-        image = QImage(340, 90, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-
-        visual._paint_album_island_compact(painter, QRectF(12.0, 12.0, 280.0, 56.0))
-        painter.end()
-
-        slot_sides = [side for kind, side in calls if kind == "slot"]
-        text_calls = [sides for kind, sides in calls if kind == "text"]
-        self.assertEqual(slot_sides, [-1, 0])
-        self.assertEqual(text_calls, [[-1, 0]])
-
-    def test_album_island_cover_size_and_spacing_are_adjustable(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.update = lambda: None
-        visual._emit_settings_changed = lambda *_args: None
-
-        visual.set_album_island_cover_size(34, notify=False)
-        visual.set_album_island_spacing(140, notify=False)
-
-        self.assertEqual(visual.album_island_cover_size, 34)
-        self.assertEqual(visual.album_island_spacing, 140)
-
-    def test_album_island_spacing_lower_bound_allows_tighter_layout(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.update = lambda: None
-        visual._emit_settings_changed = lambda *_args: None
-
-        visual.set_album_island_spacing(48, notify=False)
-
-        self.assertEqual(visual.album_island_spacing, 48)
 
     def test_apply_visual_data_loads_album_queue_art(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -10572,66 +9995,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         queue = visual._album_queue_from_track(entries)
 
         self.assertEqual([entry["track_id"] for entry in queue], [])
-
-    def test_tasker_album_island_uses_configured_cover_count(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._u = lambda value: float(value)
-        visual.location_mode = "tasker"
-        visual.expanded = False
-        visual.album_island_cover_count = 5
-        visual.album_island_compact_cover_size = 30
-        visual.album_island_expanded_cover_size = 72
-        visual.album_island_spacing = 100
-        visual.album_island_secondary_style = "shrink_dim"
-        visual.album_island_perspective_amount = 100
-        visual.album_island_transition_started_at = 0.0
-        visual.audio_started_at = 0.0
-        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
-        visual.album_art.fill(QColor(20, 80, 220))
-        visual.album_history = []
-        visual.album_queue = []
-        for index in range(2):
-            left = QImage(8, 8, QImage.Format.Format_ARGB32)
-            left.fill(QColor(20 + index, 40, 80))
-            right = QImage(8, 8, QImage.Format.Format_ARGB32)
-            right.fill(QColor(120 + index, 40, 80))
-            visual.album_history.append({"track_id": f"left-{index}", "album_art": left})
-            visual.album_queue.append({"track_id": f"right-{index}", "album_art": right})
-
-        slots = visual._album_island_slots(QRectF(0.0, 0.0, 220.0, 34.0))
-
-        self.assertEqual(len(slots), 5)
-        self.assertEqual([int(slot["side"]) for slot in slots], [-2, -1, 0, 1, 2])
-
-    def test_album_island_uses_expanded_cover_size_for_expanded_stage(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._u = lambda value: float(value)
-        visual.location_mode = "free"
-        visual.expanded = False
-        visual.album_island_cover_size = 30
-        visual.album_island_compact_cover_size = 26
-        visual.album_island_expanded_cover_size = 78
-
-        compact = visual._album_island_cover_px(QRectF(0.0, 0.0, 240.0, 42.0))
-        visual.expanded = True
-        expanded = visual._album_island_cover_px(QRectF(0.0, 0.0, 420.0, 122.0))
-
-        self.assertAlmostEqual(compact, 26.0, delta=0.01)
-        self.assertAlmostEqual(expanded, 78.0, delta=0.01)
-
-    def test_album_island_reset_clears_persistent_record(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.listened_seconds_total = 7210.0
-        visual.album_history = [{"track_id": "old"}]
-        visual.album_island_transition_started_at = 1.0
-        visual.update = lambda: None
-        visual._notify_settings_changed = lambda: None
-
-        visual.reset_album_island_record(notify=False)
-
-        self.assertEqual(visual.listened_seconds_total, 0.0)
-        self.assertEqual(visual.album_history, [])
-        self.assertEqual(visual.album_island_transition_started_at, 0.0)
 
     def test_music_ambience_migrates_removed_styles_and_keeps_supported_styles(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)

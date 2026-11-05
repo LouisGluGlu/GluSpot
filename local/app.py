@@ -648,21 +648,6 @@ class LocalIslandApp:
         self.window.set_lyric_flow_style(str(saved_setting("v2_lyric_flow_style", "wave_stream")), notify=False)
         self.window.set_gelv_font_family(IslandStackVisual.GELV_FONT_FAMILY, notify=False)
         self.window.set_no_lyrics_display_mode(str(saved_setting("v2_no_lyrics_display_mode", "text")), notify=False)
-        self.window.set_album_island_cover_count(int(saved_setting("v2_album_island_cover_count", 5)), notify=False)
-        self.window.set_album_island_cover_size(int(saved_setting("v2_album_island_cover_size", 30)), notify=False)
-        self.window.set_album_island_compact_cover_size(
-            int(saved_setting("v2_album_island_compact_cover_size", saved_setting("v2_album_island_cover_size", 30))),
-            notify=False,
-        )
-        self.window.set_album_island_expanded_cover_size(int(saved_setting("v2_album_island_expanded_cover_size", 72)), notify=False)
-        self.window.set_album_island_spacing(int(saved_setting("v2_album_island_spacing", 112)), notify=False)
-        self.window.set_album_island_secondary_style(str(saved_setting("v2_album_island_secondary_style", "perspective_dim")), notify=False)
-        self.window.set_album_island_perspective_amount(int(saved_setting("v2_album_island_perspective_amount", 100)), notify=False)
-        self.window.set_album_island_record(
-            float(saved_setting("v2_album_island_listened_seconds_total", 0.0) or 0.0),
-            saved_setting("v2_album_island_history", []),
-            notify=False,
-        )
         self.window.set_no_lyrics_text(str(saved_setting("v2_no_lyrics_text", "暂无歌词")), notify=False)
         position_preset = str(saved_setting("v2_position_preset", "last") or "last")
         self.window.apply_position_preset(position_preset, notify=False)

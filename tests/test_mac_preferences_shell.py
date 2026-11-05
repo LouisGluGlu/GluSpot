@@ -375,6 +375,7 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertNotIn("lyric_click_point_hits_visible_row", reader_source)
 
     def test_lyric_flow_settings_defaults_are_present(self):
+        from local import settings_store
         from local.settings_store import DEFAULT_SETTINGS
 
         self.assertEqual(DEFAULT_SETTINGS["v2_lyric_flow_style"], "wave_stream")
@@ -412,15 +413,19 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertEqual(DEFAULT_SETTINGS["v2_ember_blur_panel_strength"], 18)
         self.assertEqual(DEFAULT_SETTINGS["v2_ember_lyric_offset_seconds"], 0.0)
         self.assertEqual(DEFAULT_SETTINGS["v2_no_lyrics_display_mode"], "text")
-        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_cover_count"], 5)
-        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_cover_size"], 30)
-        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_compact_cover_size"], 30)
-        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_expanded_cover_size"], 72)
-        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_spacing"], 112)
-        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_secondary_style"], "perspective_dim")
-        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_perspective_amount"], 100)
-        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_listened_seconds_total"], 0.0)
-        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_history"], [])
+        for removed_key in (
+            "v2_album_island_cover_count",
+            "v2_album_island_cover_size",
+            "v2_album_island_compact_cover_size",
+            "v2_album_island_expanded_cover_size",
+            "v2_album_island_spacing",
+            "v2_album_island_secondary_style",
+            "v2_album_island_perspective_amount",
+            "v2_album_island_listened_seconds_total",
+            "v2_album_island_history",
+        ):
+            self.assertNotIn(removed_key, DEFAULT_SETTINGS)
+            self.assertIn(removed_key, settings_store._REMOVED_VISUAL_SETTING_KEYS)
         self.assertTrue(DEFAULT_SETTINGS["v2_compact_lyric_show_cover"])
         self.assertEqual(DEFAULT_SETTINGS["v2_dual_line_secondary_source"], "translation")
         self.assertEqual(DEFAULT_SETTINGS["v2_lyric_chinese_conversion"], "off")
@@ -697,10 +702,11 @@ class MacPreferencesShellTests(unittest.TestCase):
         app_source = self._source("local/app.py")
 
         self.assertIn("load_embedded_lyric_fonts", app_source)
-        self.assertIn("v2_album_island_listened_seconds_total", app_source)
-        self.assertIn("v2_album_island_history", app_source)
-        self.assertIn("v2_album_island_compact_cover_size", app_source)
-        self.assertIn("v2_album_island_expanded_cover_size", app_source)
+        self.assertNotIn("v2_album_island_listened_seconds_total", app_source)
+        self.assertNotIn("v2_album_island_history", app_source)
+        self.assertNotIn("v2_album_island_compact_cover_size", app_source)
+        self.assertNotIn("v2_album_island_expanded_cover_size", app_source)
+        self.assertNotIn("set_album_island_", app_source)
 
     def test_music_ambience_setting_is_renamed_to_background_style(self):
         source = self._source("local/settings_window.py")
@@ -1629,14 +1635,13 @@ class MacPreferencesShellTests(unittest.TestCase):
         window = SettingsWindow(island, settings)
         try:
             self.assertEqual([window.lyric_flow_style.itemData(i) for i in range(window.lyric_flow_style.count())],
-                             ["wave_stream", "album_island"])
-            for style in ("wave_stream", "album_island"):
-                window._set_combo_data(window.lyric_flow_style, style)
-                window._set_lyric_flow_style()
-                self.assertEqual(island.lyric_flow_style, style)
-                self.assertEqual(settings.get("v2_lyric_flow_style"), style)
-                self.assertEqual(window.reset_album_record_button.isHidden(), style != "album_island")
-                window.sync_from_widget()
+                             ["wave_stream"])
+            self.assertFalse(hasattr(window, "reset_album_record_button"))
+            window._set_combo_data(window.lyric_flow_style, "wave_stream")
+            window._set_lyric_flow_style()
+            self.assertEqual(island.lyric_flow_style, "wave_stream")
+            self.assertEqual(settings.get("v2_lyric_flow_style"), "wave_stream")
+            window.sync_from_widget()
             window.music_surface_preload_count.setValue(3)
             self.assertEqual(settings.get("v2_music_surface_preload_count"), 3)
             settings.set("v2_music_surface_preload_count", 5)
