@@ -154,7 +154,7 @@ class IslandCoverInsetTests(unittest.TestCase):
                     for width, height in ((520., 136.), (380.5, 100.25)):
                         rect = QRectF(13.25, 11.5, width, height)
                         with self.subTest(style=style, mode=mode, dj=dj, rect=rect), \
-                                patch.object(visual, "_paint_scrolling_text") as text, \
+                                patch.object(visual, "_paint_island_metadata_line") as text, \
                                 patch.object(visual, "_paint_lyric_viewport") as lyrics:
                             self.paint(rect, expanded=True, style=style, mode=mode, dj=dj)
                             cover = QRectF(rect.left() + u(16), rect.top() + u(14), u(58), u(58))
@@ -213,7 +213,7 @@ class IslandCoverInsetTests(unittest.TestCase):
                             for slot in visual._album_island_slots(stage, reserve_text=True)}
                 with self.subTest(style=style, mode=mode), \
                         patch.object(visual, "_paint_album_island_slot") as slots, \
-                        patch.object(visual, "_paint_scrolling_text") as text:
+                        patch.object(visual, "_paint_island_metadata_line") as text:
                     self.paint(rect, expanded=True, style=style, mode=mode)
                     actual = {int(call.args[1]["side"]): QRectF(call.args[1]["rect"])
                               for call in slots.call_args_list}

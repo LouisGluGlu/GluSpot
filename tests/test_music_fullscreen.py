@@ -1371,29 +1371,32 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             100,
         )
 
-    def test_metadata_marquee_round_trip_starts_every_fifteen_seconds(self):
-        offset = self.window._metadata_scroll_offset
-        self.assertEqual(offset(0.0, 1.5), (0.0, False))
-        self.assertEqual(offset(140.0, 0.0), (0.0, False))
-        self.assertEqual(offset(140.0, 14.999), (0.0, False))
-        self.assertAlmostEqual(offset(140.0, 17.5)[0], 140.0)
-        self.assertAlmostEqual(offset(140.0, 18.2)[0], 140.0)
-        outbound = [offset(140.0, at)[0] for at in (15.0, 15.7, 16.5, 17.5)]
-        inbound = [offset(140.0, at)[0] for at in (18.2, 18.9, 19.8, 20.7)]
-        self.assertEqual(outbound, sorted(outbound))
-        self.assertEqual(inbound, sorted(inbound, reverse=True))
-        self.assertTrue(offset(140.0, 15.7)[1])
-        self.assertTrue(offset(140.0, 18.9)[1])
-        for at in (20.7, 22.0, 29.99):
-            self.assertEqual(offset(140.0, at), (0.0, False))
-        self.assertGreater(offset(140.0, 30.1)[0], 0.0)
-        self.assertGreater(offset(140.0, 45.1)[0], 0.0)
-        self.assertAlmostEqual(self.window._metadata_next_motion_delay(0.0), 15.0)
-        self.assertAlmostEqual(self.window._metadata_next_motion_delay(17.7), 0.5)
+    def test_metadata_marquee_pauses_scrolls_to_the_tail_and_restarts(self):
+        text_width = 280.0
+        overflow = 140.0
+        duration = max(8.0, text_width / 28.0)
+        start_hold = 0.14 * duration
+        travel = 0.72 * duration
+        offset = lambda elapsed: self.window._metadata_scroll_offset(overflow, elapsed, text_width)
+        self.assertEqual(offset(0.0), (0.0, False))
+        self.assertEqual(offset(start_hold - 0.01), (0.0, False))
+        self.assertTrue(offset(start_hold + 0.05)[1])
+        self.assertAlmostEqual(offset(start_hold + travel * 0.5)[0], overflow * 0.5, delta=0.02)
+        self.assertAlmostEqual(offset(start_hold + travel)[0], overflow, delta=0.02)
+        self.assertFalse(offset(start_hold + travel + 0.05)[1])
+        self.assertEqual(offset(duration), (0.0, False))
+        first = offset(start_hold + travel * 0.2)[0]
+        second = offset(start_hold + travel * 0.4)[0]
+        third = offset(start_hold + travel * 0.6)[0]
+        self.assertAlmostEqual(second - first, third - second, delta=0.05)
+        self.assertAlmostEqual(self.window._metadata_next_motion_delay(0.0, text_width), start_hold)
+        self.assertLessEqual(
+            self.window._metadata_next_motion_delay(start_hold + 0.2, text_width), 1.0 / 30.0 + 1e-9,
+        )
 
     def test_metadata_hover_starts_immediately_and_leaving_returns_before_new_wait(self):
         window = self.window
-        window._metadata_marquee_states["title"] = ("song", "long title", 100.0)
+        window._metadata_marquee_states["title"] = ("song", "long title", 101.5)
         window._metadata_overflows["title"] = 200.0
         window._metadata_hit_rects["title"] = QRectF(20, 20, 100, 30)
         window._update_metadata_hover(QPointF(40, 30), 102.0)
@@ -1404,8 +1407,8 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertAlmostEqual(window._metadata_marquee_pose("title", 200.0, 103.0)[0], visible)
         self.assertLess(window._metadata_marquee_pose("title", 200.0, 103.2)[0], visible)
         self.assertEqual(window._metadata_marquee_pose("title", 200.0, 103.5)[0], 0.0)
-        self.assertEqual(window._metadata_marquee_pose("title", 200.0, 118.44)[0], 0.0)
-        self.assertGreater(window._metadata_marquee_pose("title", 200.0, 119.0)[0], 0.0)
+        self.assertEqual(window._metadata_marquee_pose("title", 200.0, 104.4)[0], 0.0)
+        self.assertGreater(window._metadata_marquee_pose("title", 200.0, 105.2)[0], 0.0)
 
     def test_translation_uses_half_the_previous_font_in_both_window_modes(self):
         self.owner.timed_lyrics = [(0.0, "first line"), (4.0, "second line")]
@@ -1451,7 +1454,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             self.window._paint_scrolling_metadata(
                 painter, clip, title, font, 115.5, "track-a", field="title",
             )
-        self.assertTrue(self.window._metadata_marquee_moving)
+        overflow = self.window._metadata_overflows["title"]
+        _offset, moving, _delay = self.window._metadata_marquee_pose("title", overflow, 115.5)
+        self.assertEqual(self.window._metadata_marquee_moving, moving)
         self.assertTrue(self.window._metadata_animation_rect.contains(clip.center().toPoint()))
         self.assertEqual(self.window._metadata_marquee_states["title"][2], 100.0)
         self.assertEqual(self.window._metadata_marquee_states["artist"][2], 100.0)
@@ -1484,9 +1489,13 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(self.window._metadata_marquee_states["artist"][2], 100.0)
         with patch("local.music_surface_window.time.monotonic", return_value=115.5):
             self.window.render(image)
-        self.assertTrue(self.window._metadata_marquee_moving)
+        self.assertEqual(self.window._metadata_marquee_states["title"][2], 100.0)
+        self.assertEqual(self.window._metadata_marquee_states["artist"][2], 100.0)
+        from local.metadata_marquee import START_HOLD_FRACTION, TRAVEL_FRACTION, cycle_seconds
+        duration = cycle_seconds(self.window._metadata_text_widths["title"])
+        travel_at = 100.0 + START_HOLD_FRACTION * duration + TRAVEL_FRACTION * duration * 0.35
         self.window._fullscreen = True
-        with patch("local.music_surface_window.time.monotonic", return_value=116.0):
+        with patch("local.music_surface_window.time.monotonic", return_value=travel_at):
             self.window.render(image)
         self.assertEqual(self.window._metadata_marquee_states["title"][2], 100.0)
         self.assertEqual(self.window._metadata_marquee_states["artist"][2], 100.0)
@@ -1501,16 +1510,13 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         slot = QRectF(20.0, 10.0, 260.0, 58.0)
         image = QImage(320, 90, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
-        with (
-            patch.object(self.window, "_control_reveal_at", return_value=0.5),
-            patch.object(self.window, "_metadata_scroll_offset", wraps=self.window._metadata_scroll_offset) as scroll,
-        ):
+        with patch.object(self.window, "_control_reveal_at", return_value=0.5):
             with QPainter(image) as painter:
                 painter.setPen(color)
                 self.window._paint_scrolling_metadata(
                     painter, slot, text, font, 101.5, "track-a", field="title",
                 )
-            before = scroll.call_args.args[0]
+            before = self.window._metadata_text_widths["title"]
             self.window._metadata_text_raster(
                 text, self.window._metadata_reference_font("title"), color, 1.0,
                 "track-a", create=True,
@@ -1520,7 +1526,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                 self.window._paint_scrolling_metadata(
                     painter, slot, text, font, 101.5, "track-a", field="title",
                 )
-            self.assertAlmostEqual(scroll.call_args.args[0], before)
+            self.assertAlmostEqual(self.window._metadata_text_widths["title"], before)
 
         self.window._fullscreen = False
         with (
@@ -1586,8 +1592,8 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                 self.window._metadata_slot_widths["title"] = 800.
                 for _ in range(4):
                     self.window._prewarm_idle_metadata_raster()
-                font = self.window._surface_font(
-                    self.window.TITLE_PIXEL_SIZE * self.window._surface_scale(), QFont.Weight.Bold,
+                font = self.window._metadata_title_font(
+                    self.window.TITLE_PIXEL_SIZE * self.window._surface_scale() * self.window.TITLE_EMPHASIS_SCALE,
                 )
                 painter = Mock()
                 painter.device.return_value.devicePixelRatioF.return_value = dpr
@@ -1596,7 +1602,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                     self.window, "_metadata_text_raster", wraps=self.window._metadata_text_raster,
                 ) as raster:
                     self.window._paint_scrolling_metadata(
-                        painter, QRectF(4.0, 8.0, 800.0, 110.0), self.owner.track_title,
+                        painter, QRectF(4.0, 8.0, 4000.0, 110.0), self.owner.track_title,
                         font, 100.1, "song", field="title", animate=False,
                     )
                 painter.drawText.assert_not_called()
@@ -1648,6 +1654,8 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._metadata_animation_rect = QRect(67, 480, 390, 110)
         with (
             patch("local.music_surface_window.time.monotonic", return_value=100.1),
+            patch.object(self.window, "isVisible", return_value=True),
+            patch.object(self.window, "isMinimized", return_value=False),
             patch.object(self.window, "update") as update,
         ):
             self.window._on_animation_tick()

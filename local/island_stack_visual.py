@@ -175,6 +175,11 @@ from local.media_position_pipeline import (
 from local.music_background_renderer import NativeMusicBackgroundRenderer, SolidMusicBackgroundRenderer
 from local.audio_output_icons import paint_audio_output_icon
 from local.island_audio_device_motion import IslandDevicePayload, reliable_device_battery
+from local.metadata_marquee import (
+    FRAME_SECONDS as MARQUEE_FRAME_SECONDS,
+    marquee_pose,
+    paint_faded_text,
+)
 from local.music_lyric_motion import SPARSE_MIN_SECONDS_PER_UNIT, normalize_sparse_seconds_per_unit
 from local.music_surface_palette import (
     MusicSurfacePalette,
@@ -3899,6 +3904,7 @@ class IslandStackVisual(QWidget):
         if self._handle_tick_interaction(now):
             return
 
+        self._wake_island_metadata_marquee(now)
         self._handle_tick_frame_execution(now, visual_data_changed)
 
     def _handle_scene_suppressed_tick(self, now: float):
@@ -12031,6 +12037,8 @@ class IslandStackVisual(QWidget):
 
     def _paint_music(self, painter: QPainter, rect: QRectF, expanded: bool):
         self._music_metadata_scrolls = False
+        self._metadata_marquee_deadline = float("inf")
+        self._metadata_marquee_damage = QRectF()
         if self._immersive_bar_compact_active() and not expanded:
             self._paint_finder_bar_music(painter, rect)
             return
@@ -12467,10 +12475,10 @@ class IslandStackVisual(QWidget):
                 max(0., rect.right() - icon.right() - self._u(132) - self._u(48)), self._u(68))
             title = getattr(self, "_island_dj_title", "") or getattr(self, "track_title", "")
             artist = str(getattr(self, "_island_dj_artist", "") or getattr(self, "artist", "") or "")
-            self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(34)),
-                title, 13, self._music_meta_text_color(240), True)
-            self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24)),
-                artist, 9, self._music_meta_text_color(135), False)
+            self._paint_island_metadata_line(painter, QRectF(info.left(), info.top(), info.width(), self._u(34)),
+                title, 13, self._music_meta_text_color(240), True, "title")
+            self._paint_island_metadata_line(painter, QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24)),
+                artist, 9, self._music_meta_text_color(135), False, "artist")
             self._paint_music_standard_transport(painter, rect, rect.top() + self._u(43))
             painter.restore()
             return
@@ -14702,8 +14710,8 @@ class IslandStackVisual(QWidget):
         else:
             self.music_cover_rect = QRectF(cover)
             self._paint_interactive_music_cover(painter, cover, cover_radius)
-            self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(34)), self.track_title, 13, self._music_meta_text_color(240), True)
-            self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24)), self.artist, 9, self._music_meta_text_color(135), False)
+            self._paint_island_metadata_line(painter, QRectF(info.left(), info.top(), info.width(), self._u(34)), self.track_title, 13, self._music_meta_text_color(240), True, "title")
+            self._paint_island_metadata_line(painter, QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24)), self.artist, 9, self._music_meta_text_color(135), False, "artist")
         painter.save()
         painter.setOpacity(painter.opacity() * progress)
 
@@ -14739,8 +14747,8 @@ class IslandStackVisual(QWidget):
         info_left = cover.right() + self._u(16.0)
         info_right = controls_x - self._u(18.0)
         info = QRectF(info_left, info_panel.center().y() - self._u(28.0), max(self._u(42.0), info_right - info_left), self._u(58.0))
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(28.0)), self.track_title, 14, title_color, True)
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(31.0), info.width(), self._u(24.0)), self.artist, 10, artist_color, False)
+        self._paint_island_metadata_line(painter, QRectF(info.left(), info.top(), info.width(), self._u(28.0)), self.track_title, 14, title_color, True, "title")
+        self._paint_island_metadata_line(painter, QRectF(info.left(), info.top() + self._u(31.0), info.width(), self._u(24.0)), self.artist, 10, artist_color, False, "artist")
 
         for i, command in enumerate(commands):
             br = QRectF(controls_x + i * (button_size + gap), controls_y, button_size, button_size)
@@ -14755,8 +14763,8 @@ class IslandStackVisual(QWidget):
         self.music_button_rects = {}
 
         info = QRectF(rect.left() + margin, rect.top() + self._u(13.0), rect.width() - controls_w - margin * 2.0 - self._u(18.0), self._u(42.0))
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(24.0)), self.track_title, 12, self._music_meta_text_color(238), True)
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(24.0), info.width(), self._u(18.0)), self.artist, 8, self._music_meta_text_color(132), False)
+        self._paint_island_metadata_line(painter, QRectF(info.left(), info.top(), info.width(), self._u(24.0)), self.track_title, 12, self._music_meta_text_color(238), True, "title")
+        self._paint_island_metadata_line(painter, QRectF(info.left(), info.top() + self._u(24.0), info.width(), self._u(18.0)), self.artist, 8, self._music_meta_text_color(132), False, "artist")
 
         controls_x = rect.right() - margin - controls_w
         commands = self._supported_music_transport_commands(["music:previous", "music:toggle_play_pause", "music:next"])
@@ -16016,6 +16024,92 @@ class IslandStackVisual(QWidget):
             **timed_kwargs,
         )
         painter.restore()
+
+    def _wake_island_metadata_marquee(self, now: float) -> None:
+        """Ask for one metadata frame. A still line and a hidden island do not."""
+        if self._island_presentation_hidden():
+            return
+        deadline = getattr(self, "_metadata_marquee_deadline", None)
+        if deadline is None or deadline == float("inf") or now + 1e-3 < float(deadline):
+            return
+        damage = getattr(self, "_metadata_marquee_damage", QRectF())
+        if isinstance(damage, QRectF) and damage.isValid():
+            self.update(damage.toAlignedRect())
+        else:
+            self.update()
+        self._metadata_marquee_deadline = now + MARQUEE_FRAME_SECONDS
+
+    def _paint_island_metadata_line(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        text: str,
+        size: int,
+        color: QColor,
+        bold: bool,
+        field: str,
+    ) -> None:
+        """Title or artist on the island header, using the shared marquee."""
+        text = " ".join(str(text or "").split())
+        if not text or rect.width() <= 1.0 or rect.height() <= 1.0:
+            return
+        font = self._font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        text_width = float(QFontMetrics(font).horizontalAdvance(text))
+        view = float(rect.width())
+        identity = (
+            str(getattr(self, "media_track_id", "") or ""),
+            str(getattr(self, "track_title", "") or ""),
+            str(getattr(self, "artist", "") or ""),
+            field,
+            text,
+            int(size),
+            round(view),
+        )
+        clocks = getattr(self, "_island_metadata_clocks", None)
+        if clocks is None:
+            clocks = self._island_metadata_clocks = {}
+        samples = getattr(self, "_island_metadata_samples", None)
+        if samples is None:
+            samples = self._island_metadata_samples = {}
+        now = time.monotonic()
+        previous = clocks.get(field)
+        if previous is None or previous[0] != identity:
+            clocks[field] = (identity, now)
+            samples.pop(field, None)
+            previous = clocks[field]
+        elapsed = now - float(previous[1])
+        pose = marquee_pose(text_width, view, elapsed)
+        if pose.moving:
+            last = samples.get(field)
+            if last is not None and 0.0 <= now - float(last[0]) < MARQUEE_FRAME_SECONDS:
+                pose = last[1]
+            else:
+                samples[field] = (now, pose)
+        else:
+            samples[field] = (now, pose)
+        painter.setFont(font)
+        painter.setPen(color)
+
+        def draw(target: QPainter) -> None:
+            target.drawText(
+                QRectF(rect.left() - pose.offset, rect.top(), text_width + 4.0, rect.height()),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                text,
+            )
+
+        paint_faded_text(
+            painter, rect, draw, fade_left=pose.fade_left, fade_right=pose.fade_right,
+        )
+        if text_width <= view + 1.0:
+            return
+        if pose.moving:
+            self._music_metadata_scrolls = True
+        deadline = now + (MARQUEE_FRAME_SECONDS if pose.moving else pose.delay)
+        current = getattr(self, "_metadata_marquee_deadline", float("inf"))
+        self._metadata_marquee_deadline = min(float(current), deadline)
+        damage = getattr(self, "_metadata_marquee_damage", QRectF())
+        dirty = rect.adjusted(-2.0, -2.0, 2.0, 2.0)
+        self._metadata_marquee_damage = dirty if not isinstance(damage, QRectF) or damage.isNull() else damage.united(dirty)
 
     def _paint_scrolling_text(
         self,

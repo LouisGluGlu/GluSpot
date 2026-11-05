@@ -245,26 +245,27 @@ class MetadataAndTooltipTests(unittest.TestCase):
         self.window.close()
         self.owner.close()
 
-    def test_long_title_starts_with_right_elision_then_uses_existing_marquee(self):
+    def test_long_title_rests_with_a_right_fade_then_scrolls(self):
         text = "Human Sacrifice——Daniel Caesar"
         font = self.window._surface_font(28, QFont.Weight.Bold)
-        slot = QRectF(10, 10, 320, 40)
-        def render(now, direct=False):
-            image = QImage(340, 60, QImage.Format.Format_ARGB32_Premultiplied)
+        slot = QRectF(10, 10, 120, 40)
+        def render(now):
+            image = QImage(160, 60, QImage.Format.Format_ARGB32_Premultiplied)
             image.fill(Qt.GlobalColor.transparent)
             with QPainter(image) as painter:
                 painter.setPen(QColor("white"))
                 painter.setFont(font)
-                if direct:
-                    painter.drawText(slot, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                        QFontMetricsF(font).elidedText(text, Qt.TextElideMode.ElideRight, slot.width()))
-                else:
-                    self.window._paint_scrolling_metadata(painter, slot, text, font, now, "song", field="title")
+                self.window._paint_scrolling_metadata(painter, slot, text, font, now, "song", field="title")
             return image
         with patch.object(self.window, "_control_reveal_at", return_value=1.):
             initial = render(100.)
-            self.assertEqual(initial, render(100., direct=True))
-            self.assertNotEqual(initial, render(116.))
+            left = max(initial.pixelColor(x, 30).alpha() for x in range(12, 24))
+            self.assertGreater(left, 80)
+            self.assertLess(initial.pixelColor(129, 30).alpha(), 40)
+            from local.metadata_marquee import START_HOLD_FRACTION, TRAVEL_FRACTION, cycle_seconds
+            duration = cycle_seconds(self.window._metadata_text_widths["title"])
+            moving = render(100. + START_HOLD_FRACTION * duration + TRAVEL_FRACTION * duration * 0.4)
+            self.assertNotEqual(initial, moving)
             self.assertEqual(self.window._metadata_marquee_states["title"][2], 100.)
 
     def test_read_and_unread_lyric_rasters_have_no_chromatic_word_ink(self):

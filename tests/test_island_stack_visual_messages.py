@@ -5914,7 +5914,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._paint_cover = lambda *_args, **_kwargs: None
         visual._paint_lyric_viewport = lambda *_args, **_kwargs: None
         colors: list[QColor] = []
-        visual._paint_scrolling_text = lambda _painter, _rect, _text, _size, color, *_args, **_kwargs: colors.append(QColor(color))
+        visual._paint_island_metadata_line = lambda _painter, _rect, _text, _size, color, *_args, **_kwargs: colors.append(QColor(color))
         image = QImage(520, 220, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
@@ -5938,7 +5938,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._paint_album_island_slots = lambda *_args, **_kwargs: None
         visual._paint_album_island_listened_text = lambda *_args, **_kwargs: None
         colors: list[QColor] = []
-        visual._paint_scrolling_text = lambda _painter, _rect, _text, _size, color, *_args, **_kwargs: colors.append(QColor(color))
+        visual._paint_island_metadata_line = lambda _painter, _rect, _text, _size, color, *_args, **_kwargs: colors.append(QColor(color))
         image = QImage(520, 220, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
@@ -5967,7 +5967,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._paint_cover = lambda _painter, rect, *_args, **_kwargs: cover_rects.append(QRectF(rect))
         visual._paint_lyric_viewport = lambda _painter, rect: lyric_rects.append(QRectF(rect))
         visual._paint_music_control_button = lambda *_args, **_kwargs: None
-        visual._paint_scrolling_text = lambda _painter, rect, *_args, **_kwargs: text_rects.append(QRectF(rect))
+        visual._paint_island_metadata_line = lambda _painter, rect, *_args, **_kwargs: text_rects.append(QRectF(rect))
         image = QImage(560, 220, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)

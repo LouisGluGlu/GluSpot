@@ -53,8 +53,15 @@ class MusicMetadataControlTests(unittest.TestCase):
                 self.assertEqual(window._metadata_marquee_states["title"][2], 100.0)
                 self.assertEqual(window._metadata_marquee_states["artist"][2], 100.0)
                 window._update_control_animation_regions(102.6)
+                from local.metadata_marquee import START_HOLD_FRACTION, cycle_seconds
                 for field in ("title", "artist"):
-                    self.assertAlmostEqual(window._metadata_marquee_states[field][2], 87.6)
+                    width = window._metadata_text_widths[field]
+                    hold = START_HOLD_FRACTION * cycle_seconds(width)
+                    started = window._metadata_marquee_states[field][2]
+                    if 2.6 <= hold:
+                        self.assertAlmostEqual(started, 102.6 - hold)
+                    else:
+                        self.assertEqual(started, 100.0)
                     self.assertGreater(window._metadata_marquee_pose(
                         field, window._metadata_control_overflow(field, 1.0), 102.9,
                     )[0], 0.0)
@@ -81,14 +88,21 @@ class MusicMetadataControlTests(unittest.TestCase):
         window._update_control_animation_regions(104.2)
         self.assertEqual(window._metadata_marquee_states["title"][2], 100.0)
         window._update_control_animation_regions(104.6)
-        self.assertAlmostEqual(window._metadata_marquee_states["title"][2], 89.6)
+        from local.metadata_marquee import START_HOLD_FRACTION, cycle_seconds
+        width = window._metadata_text_widths["title"]
+        hold = START_HOLD_FRACTION * cycle_seconds(width)
+        started = window._metadata_marquee_states["title"][2]
+        if 4.6 <= hold:
+            self.assertAlmostEqual(started, 104.6 - hold)
+        else:
+            self.assertEqual(started, 100.0)
         self.assertGreater(window._metadata_marquee_pose(
             "title", window._metadata_control_overflow("title", 0.0), 104.9,
         )[0], 0.0)
         self.assertEqual(window._metadata_marquee_states["artist"][2], 100.0)
         self.assertEqual(window._metadata_scroll_after_hide, {})
         window._update_control_animation_regions(105.0)
-        self.assertAlmostEqual(window._metadata_marquee_states["title"][2], 89.6)
+        self.assertAlmostEqual(window._metadata_marquee_states["title"][2], started)
 
     def test_names_fitting_both_views_have_no_active_or_deferred_trip(self):
         self._field("title", "Short", 900.0)
@@ -147,7 +161,12 @@ class MusicMetadataControlTests(unittest.TestCase):
                 self.window._paint_scrolling_metadata(painter, QRectF(10, 10, 100, 30), text,
                                                       font, 115.2, "song", field="title")
         self.assertEqual(self.window._metadata_marquee_states["title"][2], 100.0)
-        self.assertTrue(self.window._metadata_marquee_moving)
+        from local.metadata_marquee import START_HOLD_FRACTION, TRAVEL_FRACTION, cycle_seconds
+        duration = cycle_seconds(self.window._metadata_text_widths["title"])
+        travel_at = 100.0 + START_HOLD_FRACTION * duration + 0.25 * TRAVEL_FRACTION * duration
+        self.assertTrue(self.window._metadata_marquee_pose(
+            "title", self.window._metadata_overflows["title"], travel_at,
+        )[1])
 
     def test_lyric_only_paint_keeps_metadata_hover_and_control_measurements(self):
         image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)

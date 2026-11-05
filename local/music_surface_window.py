@@ -79,6 +79,15 @@ from local.music_lyric_presentation import (
     DuetLyricPresentation,
     split_display_layers,
 )
+from local.metadata_marquee import (
+    FRAME_SECONDS as MARQUEE_FRAME_SECONDS,
+    START_HOLD_FRACTION,
+    TRAVEL_FRACTION,
+    cycle_seconds,
+    brightened_cover_accent,
+    marquee_pose,
+    paint_faded_text,
+)
 from local.music_surface_palette import (
     MusicSurfacePalette,
     artwork_surface_palette,
@@ -167,9 +176,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
     LYRIC_PIXEL_SIZE = LYRIC_PIXEL_SIZE
     TITLE_PIXEL_SIZE = 34
     ARTIST_PIXEL_SIZE = 22
-    METADATA_MARQUEE_SECONDS = 5.0
-    METADATA_MARQUEE_HOLD_SECONDS = 15.0
-    METADATA_MARQUEE_END_HOLD_SECONDS = 0.7
+    # Wide title emphasis from the J study: about 1.15×, weight 600.
+    # The slot height stays on the previous metrics so the column does not grow.
+    TITLE_EMPHASIS_SCALE = 1.15
     METADATA_RASTER_CACHE_MAX_BYTES = 64 * 1024 * 1024
     METADATA_RASTER_CACHE_MAX_ENTRIES = 96
     TRANSPORT_PANEL_HEIGHT = 60.0
@@ -517,6 +526,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._metadata_marquee_moving = False
         self._metadata_animation_rect = QRect()
         self._metadata_next_motion_at = float("inf")
+        self._metadata_text_widths: dict[str, float] = {}
+        self._metadata_marquee_samples: dict[str, float] = {}
+        self._metadata_marquee_paint_not_before = 0.0
         self._metadata_draw_pixel_sizes: dict[str, float] = {}
         self._metadata_raster_cache: OrderedDict[tuple, tuple[QImage, float, float]] = OrderedDict()
         self._metadata_raster_cache_bytes = 0
@@ -2218,10 +2230,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         ):
             self._control_prewarm_requested = True
             self._update_control_animation_regions(now, force=True)
-        if self._metadata_animation_rect.isValid() and (
-            self._metadata_marquee_moving or now >= self._metadata_next_motion_at
-        ):
-            self.update(self._metadata_animation_rect)
+        self._refresh_metadata_marquee(now)
         self._expire_lyric_browse(now)
         self._update_lyric_loading_state(now)
         self._sync_no_lyrics_content_layout(now)
@@ -5665,10 +5674,11 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             unit = window_unit
             width = cover.width()
             metadata_top = cover.bottom() + 1.6 * unit + 8.0 * surface_scale * title_gain
-            title_size = 3.1 * unit * (1.0 + 0.18 * title_gain)
-            title_font = self._surface_font(title_size, QFont.Weight.Bold)
+            layout_title_size = 3.1 * unit * (1.0 + 0.18 * title_gain)
+            title_size = layout_title_size * self.TITLE_EMPHASIS_SCALE
+            title_font = self._metadata_title_font(title_size)
             title_base_font = self._surface_font(self.TITLE_PIXEL_SIZE * surface_scale, QFont.Weight.Bold)
-            title_height = self._font_height(title_base_font) * title_size / title_base_font.pixelSize()
+            title_height = self._font_height(title_base_font) * layout_title_size / title_base_font.pixelSize()
             title_rect = QRectF(cover.left(), metadata_top, width, max(3.4 * unit, title_height + 2.0 * unit))
             gap = -2.0 + 14.0 * artist_gain - 4.0 * math.sin(math.pi * min(1.0, max(0.0, artist_gain)))
             artist_size = 1.95 * unit * (1.0 + 0.16 * artist_gain)
@@ -5682,10 +5692,11 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         width = cover.width() - 14.0
         metadata_top = cover.bottom() + max(14.0, 60.0 * surface_scale * 0.38)
         metadata_top += 8.0 * surface_scale * title_gain
-        title_size = (self.TITLE_PIXEL_SIZE + 12.0 * title_gain) * surface_scale
-        title_font = self._surface_font(title_size, QFont.Weight.Bold)
+        layout_title_size = (self.TITLE_PIXEL_SIZE + 12.0 * title_gain) * surface_scale
+        title_size = layout_title_size * self.TITLE_EMPHASIS_SCALE
+        title_font = self._metadata_title_font(title_size)
         title_base_font = self._surface_font(self.TITLE_PIXEL_SIZE * surface_scale, QFont.Weight.Bold)
-        title_height = self._font_height(title_base_font) * title_size / title_base_font.pixelSize()
+        title_height = self._font_height(title_base_font) * layout_title_size / title_base_font.pixelSize()
         title_rect = QRectF(
             content.left() + 7.0,
             metadata_top,
@@ -6806,42 +6817,58 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         ):
             self._recent_priority_paint_costs.append(elapsed_ms)
 
-    @classmethod
-    def _metadata_scroll_offset(cls, overflow: float, elapsed: float) -> tuple[float, bool]:
-        """Start one smooth round trip every 15 s, including its travel time."""
-        if overflow <= 0.0:
-            return 0.0, False
-        start_hold = cls.METADATA_MARQUEE_HOLD_SECONDS
-        end_hold = cls.METADATA_MARQUEE_END_HOLD_SECONDS
-        travel = cls.METADATA_MARQUEE_SECONDS * 0.5
-        period = max(start_hold, travel * 2.0 + end_hold)
-        if elapsed < start_hold:
-            return 0.0, False
-        phase = (elapsed - start_hold) % period
-        if phase < travel:
-            progress = phase / travel
-            return overflow * (0.5 - 0.5 * math.cos(math.pi * progress)), True
-        if phase < travel + end_hold:
-            return overflow, False
-        if phase < travel * 2.0 + end_hold - 1e-9:
-            progress = (phase - travel - end_hold) / travel
-            return overflow * (0.5 + 0.5 * math.cos(math.pi * progress)), True
-        return 0.0, False
+    def _refresh_metadata_marquee(self, now: float) -> bool:
+        """Repaint a moving line at 30 fps, a hold once, and a hidden panel never."""
+        if not self.isVisible() or self.isMinimized():
+            return False
+        rect = self._metadata_animation_rect
+        if not rect.isValid():
+            return False
+        if self._metadata_marquee_moving:
+            if now < self._metadata_marquee_paint_not_before:
+                return False
+            self._metadata_marquee_paint_not_before = now + MARQUEE_FRAME_SECONDS
+            self.update(rect)
+            return True
+        if now >= self._metadata_next_motion_at:
+            self.update(rect)
+            return True
+        return False
 
     @classmethod
-    def _metadata_next_motion_delay(cls, elapsed: float) -> float:
-        """Schedule one repaint at the end of a hold, even for paused songs."""
-        start_hold = cls.METADATA_MARQUEE_HOLD_SECONDS
-        travel = cls.METADATA_MARQUEE_SECONDS * 0.5
-        end_hold = cls.METADATA_MARQUEE_END_HOLD_SECONDS
-        period = max(start_hold, travel * 2.0 + end_hold)
-        if elapsed < start_hold:
-            return start_hold - max(0.0, elapsed)
-        phase = (elapsed - start_hold) % period
-        inbound_at = travel + end_hold
-        if phase < inbound_at:
-            return inbound_at - phase
-        return period - phase
+    def _metadata_scroll_offset(cls, overflow: float, elapsed: float, text_width: float | None = None) -> tuple[float, bool]:
+        """Pause, travel to the tail, pause, then restart. Travel is linear."""
+        width = float(overflow if text_width is None else text_width)
+        view = max(0.0, width - float(overflow))
+        pose = marquee_pose(width, view, elapsed)
+        return pose.offset, pose.moving
+
+    @classmethod
+    def _metadata_next_motion_delay(cls, elapsed: float, text_width: float = 0.0) -> float:
+        """One wake at the end of a hold; a moving line waits at most one frame."""
+        return marquee_pose(float(text_width), 0.0, float(elapsed)).delay
+
+    def _metadata_title_font(self, pixel_size: float) -> QFont:
+        font = self._surface_font(pixel_size, QFont.Weight.DemiBold)
+        font.setLetterSpacing(
+            QFont.SpacingType.AbsoluteSpacing, -0.012 * float(font.pixelSize()),
+        )
+        return font
+
+    def _metadata_artist_color(self) -> QColor:
+        """Brighten the current cover's primary, or keep the previous artist ink."""
+        fallback = QColor(255, 255, 255, 142)
+        image = QImage(getattr(self.owner, "album_art", QImage()))
+        if image.isNull():
+            return fallback
+        album = self._owner_color("album_color", QColor(27, 36, 60))
+        secondary = self._owner_color("secondary_color", QColor(9, 12, 22))
+        key = (image.cacheKey(), album.rgba(), secondary.rgba())
+        palette = self._art_palette()
+        if self._art_palette_cache_key != key:
+            return fallback
+        accent = brightened_cover_accent(palette.primary)
+        return fallback if accent is None else accent
 
     def _metadata_marquee_pose(self, field: str, overflow: float, now: float):
         if overflow <= 0.0:
@@ -6852,15 +6879,18 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             started, fraction = returning
             progress = max(0.0, min(1.0, (now - started) / 0.45))
             if progress < 1.0:
-                return overflow * fraction * (0.5 + 0.5 * math.cos(math.pi * progress)), True, 0.0
+                return overflow * fraction * (0.5 + 0.5 * math.cos(math.pi * progress)), True, MARQUEE_FRAME_SECONDS
             self._metadata_returns.pop(field, None)
+        text_width = float(self._metadata_text_widths.get(field, overflow))
+        duration = cycle_seconds(text_width)
+        start_hold = START_HOLD_FRACTION * duration
+        travel = TRAVEL_FRACTION * duration
         if field == self._metadata_hover_field:
-            cycle = self.METADATA_MARQUEE_SECONDS + self.METADATA_MARQUEE_END_HOLD_SECONDS
-            elapsed = self.METADATA_MARQUEE_HOLD_SECONDS + max(0.0, now - self._metadata_hover_started_at) % cycle
+            elapsed = start_hold + max(0.0, now - self._metadata_hover_started_at) % (duration - start_hold)
         else:
             elapsed = now - state[2]
-        offset, moving = self._metadata_scroll_offset(overflow, elapsed)
-        return offset, moving, self._metadata_next_motion_delay(elapsed)
+        pose = marquee_pose(text_width, max(0.0, text_width - float(overflow)), elapsed)
+        return pose.offset, pose.moving, pose.delay
 
     def _metadata_control_overflow(self, field: str, reveal: float) -> float:
         """Measure a settled control layout using the same exact ink as paint.
@@ -6875,13 +6905,16 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         scale = self._surface_scale()
         base_size = self.TITLE_PIXEL_SIZE if field == "title" else self.ARTIST_PIXEL_SIZE
         extra_size = 12.0 if field == "title" else 8.0
-        weight = QFont.Weight.Bold if field == "title" else QFont.Weight.Medium
-        font = self._surface_font(base_size * scale, weight)
+        if field == "title":
+            font = self._metadata_title_font(base_size * scale * self.TITLE_EMPHASIS_SCALE)
+        else:
+            font = self._surface_font(base_size * scale, QFont.Weight.Medium)
         text_width = self._metadata_text_metrics(
             state[1], font, max(1.0, float(self.devicePixelRatioF())),
         )[1]
         if reveal < 0.999:
-            text_width *= (base_size + extra_size) * scale / font.pixelSize()
+            text_width *= (base_size + extra_size) / base_size
+        self._metadata_text_widths[field] = text_width
         return max(0.0, text_width - width)
 
     def _metadata_controls_revealing(self) -> None:
@@ -6903,9 +6936,11 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             return
         self._metadata_returns.pop(field, None)
         fraction = max(0.0, min(1.0, offset / max(1.0, overflow)))
-        outbound = math.acos(1.0 - 2.0 * fraction) / math.pi * self.METADATA_MARQUEE_SECONDS * 0.5
+        text_width = float(self._metadata_text_widths.get(field, overflow))
+        duration = cycle_seconds(text_width)
+        outbound = fraction * TRAVEL_FRACTION * duration
         self._metadata_marquee_states[field] = (
-            *state[:2], now - self.METADATA_MARQUEE_HOLD_SECONDS - outbound,
+            *state[:2], now - START_HOLD_FRACTION * duration - outbound,
         )
         self._metadata_next_motion_at = min(self._metadata_next_motion_at, now)
         if self._metadata_animation_rect.isValid():
@@ -6952,7 +6987,8 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             offset, _, _ = self._metadata_marquee_pose(field, overflow, now)
             self._metadata_returns.pop(field, None)
             fraction = max(0.0, min(1.0, offset / max(1.0, overflow)))
-            outbound_elapsed = math.acos(1.0 - 2.0 * fraction) / math.pi * self.METADATA_MARQUEE_SECONDS * 0.5
+            text_width = float(self._metadata_text_widths.get(field, overflow))
+            outbound_elapsed = fraction * TRAVEL_FRACTION * cycle_seconds(text_width)
             self._metadata_hover_started_at = now - outbound_elapsed
         self._metadata_hover_field = field
         if self._metadata_animation_rect.isValid():
@@ -7026,7 +7062,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
     def _metadata_reference_font(self, field: str) -> QFont:
         scale = self._surface_scale()
         if field == "title":
-            return self._surface_font((self.TITLE_PIXEL_SIZE + 12.0 * 1.04) * scale, QFont.Weight.Bold)
+            return self._metadata_title_font(
+                (self.TITLE_PIXEL_SIZE + 12.0 * 1.04) * scale * self.TITLE_EMPHASIS_SCALE,
+            )
         return self._surface_font((self.ARTIST_PIXEL_SIZE + 8.0 * 1.04) * scale, QFont.Weight.Medium)
 
     @staticmethod
@@ -7087,8 +7125,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                 if not display_text:
                     continue
                 base_size = self.TITLE_PIXEL_SIZE if field == "title" else self.ARTIST_PIXEL_SIZE
-                weight = QFont.Weight.Bold if field == "title" else QFont.Weight.Medium
-                font = self._surface_font(base_size * scale, weight)
+                if field == "title":
+                    font = self._metadata_title_font(base_size * scale * self.TITLE_EMPHASIS_SCALE)
+                else:
+                    font = self._surface_font(base_size * scale, QFont.Weight.Medium)
                 width = self._metadata_slot_widths.get(field)
                 if width is not None:
                     elided = self._elided_metadata_text(display_text, font.toString(), width)
@@ -7117,8 +7157,12 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         drawn_size = self._metadata_draw_pixel_sizes.get(field, float(font.pixelSize()))
         if use_raster and field in self._metadata_draw_pixel_sizes:
             base_size = self.TITLE_PIXEL_SIZE if field == "title" else self.ARTIST_PIXEL_SIZE
-            weight = QFont.Weight.Bold if field == "title" else QFont.Weight.Medium
-            base_font = self._surface_font(base_size * self._surface_scale(), weight)
+            if field == "title":
+                base_font = self._metadata_title_font(
+                    base_size * self._surface_scale() * self.TITLE_EMPHASIS_SCALE,
+                )
+            else:
+                base_font = self._surface_font(base_size * self._surface_scale(), QFont.Weight.Medium)
             base_left, base_width, base_height, base_ascent = self._metadata_text_metrics(
                 display_text, base_font, dpr,
             )
@@ -7142,12 +7186,25 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                 self._metadata_returns.pop(field, None)
                 self._metadata_reveal_pending.pop(field, None)
                 self._metadata_scroll_after_hide.pop(field, None)
+                self._metadata_marquee_samples.pop(field, None)
                 if field == self._metadata_hover_field:
                     self._metadata_hover_started_at = now
             self._metadata_hit_rects[field] = QRectF(rect)
             self._metadata_slot_widths[field] = rect.width()
             self._metadata_overflows[field] = overflow
-            offset, moving, next_delay = self._metadata_marquee_pose(field, overflow, now)
+            self._metadata_text_widths[field] = text_width
+            sample = now
+            if overflow > 1.0:
+                last = self._metadata_marquee_samples.get(field)
+                if (
+                    last is not None
+                    and 0.0 <= now - last < MARQUEE_FRAME_SECONDS
+                    and self._metadata_marquee_pose(field, overflow, now)[1]
+                ):
+                    sample = last
+                else:
+                    self._metadata_marquee_samples[field] = now
+            offset, moving, next_delay = self._metadata_marquee_pose(field, overflow, sample)
             if overflow > 0.0:
                 dirty = rect.adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect()
                 self._metadata_animation_rect = self._metadata_animation_rect.united(dirty)
@@ -7158,11 +7215,6 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                         self._metadata_next_motion_at,
                         now + next_delay,
                     )
-        if not use_raster and overflow > 0.0 and offset <= 0.0:
-            # Rest at the beginning with an explicit trailing ellipsis. The
-            # existing marquee alone may translate text away from that edge.
-            display_text = self._elided_metadata_text(display_text, font.toString(), rect.width())
-            ink_left, _width, text_height, ascent = self._metadata_text_metrics(display_text, font, dpr)
         raster = None
         if use_raster:
             raster = self._metadata_text_raster(
@@ -7172,25 +7224,30 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             raster = self._metadata_text_raster(
                 display_text, font, painter.pen().color(), dpr, identity,
             )
-        painter.save()
-        painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
-        if raster is None:
-            baseline = rect.top() + (rect.height() - text_height) * 0.5 + ascent
-            painter.setFont(font)
-            painter.drawText(QPointF(rect.left() - ink_left - offset, baseline), display_text)
-        else:
+        fade_left = offset > 0.5
+        fade_right = overflow > 1.0 and offset < overflow - 0.5
+        painter.setFont(font)
+
+        def draw_metadata(target: QPainter) -> None:
+            if raster is None:
+                baseline = rect.top() + (rect.height() - text_height) * 0.5 + ascent
+                target.drawText(QPointF(rect.left() - ink_left - offset, baseline), display_text)
+                return
             vertical_scale = drawn_size / reference_font.pixelSize() if use_raster else 1.0
             horizontal_scale = text_width / max(1.0, raster[1]) if use_raster else 1.0
             padding_x = 2.0 * horizontal_scale
             padding_y = 2.0 * vertical_scale
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            painter.drawImage(QRectF(
+            target.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            target.drawImage(QRectF(
                 rect.left() - offset - padding_x,
                 rect.top() + (rect.height() - text_height) * 0.5 - padding_y,
                 raster[0].width() / dpr * horizontal_scale,
                 raster[0].height() / dpr * vertical_scale,
             ), raster[0])
-        painter.restore()
+
+        paint_faded_text(
+            painter, rect, draw_metadata, fade_left=fade_left, fade_right=fade_right,
+        )
 
     def paintEvent(self, _event):
         previous_geometry = getattr(self, "_frame_geometry_cache", None)
@@ -7412,7 +7469,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                     )
                     painter.restore()
                 if self._metadata_artist_visible:
-                    painter.setPen(QColor(255, 255, 255, 142))
+                    painter.setPen(self._metadata_artist_color())
                     painter.setFont(artist_font)
                     self._paint_scrolling_metadata(
                         painter, artist_rect, str(getattr(self.owner, "artist", "") or ""),
