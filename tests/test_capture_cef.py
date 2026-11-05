@@ -570,6 +570,40 @@ class CefRuntimeTests(CaptureAsyncTestCase):
         finally:
             await runtime.close()
 
+    async def test_busy_uia_reader_still_seeks_on_fresh_cdp(self):
+        import threading
+        from api.capture.uia import StaWorker
+
+        clock = Clock()
+        cdp = FakeCdp(clock)
+        release = threading.Event()
+        worker = StaWorker(timeout=0.05, initializer=lambda: None)
+        started = asyncio.Event()
+
+        async def occupy():
+            started.set()
+            with self.assertRaises(asyncio.TimeoutError):
+                await worker.call(lambda: release.wait(1))
+
+        task = asyncio.create_task(occupy())
+        runtime = CaptureRuntime(clock=clock, cef_session=cdp, uia_worker=worker)
+        try:
+            await started.wait()
+            await asyncio.sleep(0.02)
+            self.assertTrue(worker.busy)
+            await runtime.bind(Session(), visual().track, matches, mode='smtc')
+            self.assertFalse(runtime.seek_uses_uia_worker())
+            with self.assertLogs('GluSpot.capture.seek') as records:
+                self.assertTrue(await runtime.seek(80, 'song', lambda: matches(None)))
+            self.assertTrue(any('backend=cef' in line for line in records.output))
+            self.assertFalse(any('uia-worker-busy' in line for line in records.output))
+            self.assertEqual(len(cdp.writes), 1)
+        finally:
+            release.set()
+            task.cancel()
+            await runtime.close()
+            worker.close()
+
     async def test_requested_without_session_never_seeks_uia_after_smtc_failure(self):
         clock = Clock()
         session = Session()

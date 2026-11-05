@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, patch
 
 from PySide6.QtWidgets import QApplication
 
-from api.lyrics import LocalLyricsStore
+from api.lyrics import LocalLyricsStore, LyricsMatch
+from api.models import TimedLyricLine
 from api.online_music import OnlineSong, StreamInfo
 from api.providers import EmptyIslandDataProvider, PlaybackSourceProvider, WindowsMediaProvider, empty_visual_data
 from local.island_stack_visual import IslandStackVisual
@@ -85,6 +86,57 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
         self.assertNotEqual(self.provider.get_visual_data().track.title, "外部歌曲")
         self.assertEqual(data.track.position_source, "external-title-only")
         self.assertEqual(data.track.position_confidence, 0.0)
+
+    async def test_playback_poll_keeps_one_anchor_and_a_jump_starts_another(self):
+        session = Session("spotify.exe", title="外部歌曲", artist="外部歌手")
+        session.position = 30.0
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=session.position, start_time=0.0, end_time=200.0)
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="spotify.exe", session=session)
+        with patch("api.providers.time.monotonic", return_value=1000.0):
+            first = self.provider.get_visual_data().track
+        session.position = 30.5
+        with patch("api.providers.time.monotonic", return_value=1000.5):
+            followed = self.provider.get_visual_data().track
+        self.assertEqual(followed.position_sampled_at, first.position_sampled_at)
+        self.assertGreater(followed.position_seconds, 30.4)
+        self.assertTrue(followed.is_playing)
+        session.position = 80.0
+        with patch("api.providers.time.monotonic", return_value=1001.0):
+            jumped = self.provider.get_visual_data().track
+        self.assertNotEqual(jumped.position_sampled_at, first.position_sampled_at)
+        self.assertAlmostEqual(jumped.position_observed_seconds, 80.0)
+
+    async def test_unreadable_playback_status_does_not_force_the_pause_icon(self):
+        session = Session("spotify.exe", title="外部歌曲", artist="外部歌手")
+        session.position = 12.0
+        session.status = object()
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=session.position, start_time=0.0, end_time=200.0)
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="spotify.exe", session=session)
+        track = self.provider.get_visual_data().track
+        self.assertTrue(track.is_playing)
+        self.assertEqual(track.position_source, "capture-model")
+
+    async def test_captured_title_publishes_resolved_lyrics_without_another_refresh(self):
+        line = TimedLyricLine(1.5, "第一句")
+
+        def ensure(*_args, **_kwargs):
+            return LyricsMatch((line,), ("第一句",), "test"), False, False
+
+        self.system.lyrics_store = object()
+        self.system._ensure_lyrics_lookup_started = ensure
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="cloudmusic.exe", session=None)
+        track = self.provider.get_visual_data().track
+        self.assertEqual(track.title, "外部歌曲")
+        self.assertEqual(track.timed_lyrics[0].text, "第一句")
+        self.assertEqual(track.lyrics, ("第一句",))
 
     async def test_pinned_session_clock_follows_smtc_and_withholds_a_missing_read(self):
         session = Session("spotify.exe", title="外部歌曲", artist="外部歌手")

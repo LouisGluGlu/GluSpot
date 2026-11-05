@@ -4107,11 +4107,25 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             and self._owner_seek_marker[3] == source_app
             and sample_id != self._owner_seek_marker
         )
+        # A capture poll that only follows playback is not a user seek.
+        # Treating every new sample time as one cleared a manual lyric scroll
+        # on the next frame.
+        ordinary_capture_tick = False
+        previous_marker = self._owner_seek_marker
+        if (source == "capture-model" and playing and previous_marker is not None
+                and previous_marker[2] == source and previous_marker[3] == source_app
+                and original_sample_at > float(previous_marker[0]) > 0.0):
+            elapsed = original_sample_at - float(previous_marker[0])
+            previous_position = getattr(self._lyric_motion, "last_position", None)
+            if (0.0 < elapsed <= 2.5 and previous_position is not None
+                    and abs(float(media_position) - (float(previous_position) + elapsed)) <= 1.5):
+                ordinary_capture_tick = True
         # A paused player may publish only one event after its slider moves.
         # That fresh source event can re-anchor an already-paused view; the
         # first playing->paused sample still passes the stale-clock filter.
         explicit_seek = paused_source_seek or (
             source in {"local-seek", "capture-model"}
+            and not ordinary_capture_tick
             and (
                 self._owner_seek_marker is None
                 or self._owner_seek_marker[2] != source
@@ -11400,14 +11414,11 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         seek = getattr(provider, "seek_playback_position", None)
         if not callable(seek):
             record_seek_decision('ui', 'provider-unavailable', target=seconds)
-            self._clear_lyric_browse()
             self._hovered_lyric_index = None
             self.update()
             return
-        # Selecting a line ends the temporary clear browsing presentation
-        # immediately. The fenced asynchronous command still controls whether
-        # a seek target is accepted; the viewport follows the real clock.
-        self._clear_lyric_browse()
+        # Keep the line the user is looking at until the player confirms the
+        # jump. Clearing it first snaps the page back when the seek is refused.
         self._hovered_lyric_index = None
         self.update()
         self._seek_pending = True
@@ -11470,17 +11481,11 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             record_seek_decision('ui', 'completion-source-mismatch', target=seconds)
             return
         record_seek_decision('ui', 'succeeded' if succeeded else 'failed', target=seconds)
-        # A failed player seek must not leave the viewport permanently frozen
-        # at its manual browse anchor. Resume from the actual media clock; only
-        # a verified provider success is allowed to publish the target time.
-        self._clear_lyric_browse()
+        # Failure leaves the manual place where it is. Snapping back to the
+        # old playhead, and the tooltip on top of that snap, was the bounce.
         self._hovered_lyric_index = None
-        provider = getattr(self.owner, "data_provider", None)
-        capture_enabled = getattr(provider, "_capture_is_enabled", None)
-        if not succeeded and callable(capture_enabled) and capture_enabled():
-            from PySide6.QtGui import QCursor
-            from PySide6.QtWidgets import QToolTip
-            QToolTip.showText(QCursor.pos(), "未能确认播放器跳转，请在播放器中重试", self)
+        if succeeded:
+            self._clear_lyric_browse()
         if succeeded and self.owner is not None:
             # Provider success only confirms that the command was accepted.
             # Keep following the real clock, but remember the target long

@@ -140,6 +140,14 @@ class CaptureRuntime:
         source = self._cef_source
         return source is not None and source.fresh
 
+    def seek_uses_uia_worker(self) -> bool:
+        """Whether this seek can touch the shared STA worker.
+
+        A fresh NetEase CDP observation seeks on that channel alone. The
+        worker may still be inside a slow or timed-out position read.
+        """
+        return not (self._cef_route_requested and self._cef_seek_enabled and self._cef_fresh())
+
     def _publish_cef(self, sample):
         if sample is not None:
             self._position_route = 'cef'
@@ -278,8 +286,14 @@ class CaptureRuntime:
                 position = min(track.duration_seconds, position)
         with self._lock:
             self._last_projection = (identity, position)
+        playing = snapshot.is_playing
+        latest = getattr(self.cef_session, 'latest', None) if self.cef_session is not None else None
+        if isinstance(latest, dict) and latest.get('playing') is True:
+            playing = True
+        elif isinstance(latest, dict) and latest.get('playing') is False:
+            playing = False
         return replace(data, track=replace(
-            track, position_seconds=position, is_playing=snapshot.is_playing,
+            track, position_seconds=position, is_playing=playing,
             position_source='capture-model', position_confidence=0.95,
             position_sampled_at=sampled_at, position_observed_seconds=observed_seconds,
             capture_epoch_id=epoch, is_first_sample=first_sample))
@@ -292,7 +306,11 @@ class CaptureRuntime:
             record_seek_decision('runtime', 'binding-unavailable' if self._closed or source is None or identity is None
                                  else 'track-mismatch', target=target)
             return False
-        if self._seek_task is not None or (self._uia_worker is not None and self._uia_worker.busy):
+        # A position read occupies the one STA worker until the native call
+        # returns, including after its own timeout. That read must not reject
+        # a NetEase seek that CDP can perform without UIA.
+        if self._seek_task is not None or (self.seek_uses_uia_worker()
+                                           and self._uia_worker is not None and self._uia_worker.busy):
             record_seek_decision('runtime', 'busy' if self._seek_task is not None else 'uia-worker-busy', target=target)
             return False
         task = asyncio.current_task()

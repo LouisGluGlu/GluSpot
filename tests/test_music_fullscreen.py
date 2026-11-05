@@ -5842,7 +5842,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertIsNone(self.window._browse_return_from)
         self.assertEqual(self.owner.last_media_refresh_at, 0.0)
 
-    def test_failed_lyric_seek_resumes_real_clock_follow_without_faking_position(self):
+    def test_failed_lyric_seek_keeps_the_manual_place_without_faking_position(self):
         self.owner.media_track_id = "song"
         self.owner.timed_lyrics = [(0.0, "first"), (9.0, "second")]
         self.owner.seek_playback_position = lambda seconds: False
@@ -5851,12 +5851,12 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._browse_until = 123.0
         self.window._browse_return_from = 2.0
         self.window._seek_to_lyric(1)
-        self.assertIsNone(self.window._browse_index)
-        self.assertEqual(self.window._browse_until, 0.0)
-        self.assertIsNone(self.window._browse_return_from)
+        self.assertEqual(self.window._browse_index, 1.0)
+        self.assertEqual(self.window._browse_until, 123.0)
+        self.assertEqual(self.window._browse_return_from, 2.0)
         self.assertFalse(self.window._seek_pending)
 
-    def test_lyric_selection_ends_clear_browse_before_asynchronous_seek_reply(self):
+    def test_lyric_selection_keeps_browse_until_the_seek_is_confirmed(self):
         self.owner.media_track_id = "song"
         self.owner.timed_lyrics = [(float(index * 3), f"line {index}") for index in range(7)]
         self.owner.media_position_seconds = 6.4
@@ -5873,24 +5873,48 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         with patch("local.music_surface_window.time.monotonic", return_value=100.1):
             self.window.render(output)
             self.window._seek_to_lyric(4)
-        self.assertIsNone(self.window._browse_index)
-        self.assertIsNone(self.window._browse_return_from)
-        self.assertEqual(self.window._browse_until, 0.0)
+        self.assertIsNotNone(self.window._browse_index)
+        self.assertNotEqual(self.window._browse_until, 0.0)
         self.assertTrue(self.window._seek_pending)
         self.assertEqual(len(callbacks), 1)
         self.assertEqual(callbacks[0][0], "LyricSeek")
         with patch("local.music_surface_window.time.monotonic", return_value=100.2):
             self.window.render(output)
-        self.assertFalse(self.window._lyric_blur_follow_state.get("browse_clear", False))
-        self.assertEqual(self.window._lyric_blur_follow_state["focus"], 2)
+        self.assertTrue(self.window._lyric_blur_follow_state.get("browse_clear", False))
+        self.assertIsNotNone(self.window._browse_index)
         self.assertEqual(self.owner.media_position_seconds, 6.4)
         callbacks[0][1]()
         self.assertFalse(self.window._seek_pending)
+        self.assertIsNotNone(self.window._browse_index)
         self.assertIsNone(self.window._pending_backward_seek)
         self.assertEqual(self.owner.last_media_refresh_at, 90.0)
         self.assertEqual(self.owner.media_position_seconds, 6.4)
 
-    def test_lyric_click_without_seek_capability_still_releases_browse(self):
+    def test_capture_clock_tick_does_not_cancel_a_manual_lyric_scroll(self):
+        self.owner.media_track_id = "song"
+        self.owner.media_source_app = "cloudmusic"
+        self.owner.timed_lyrics = [(float(index * 3), f"line {index}") for index in range(8)]
+        self.owner.media_is_playing = True
+        self.owner.media_position_source = "capture-model"
+        self.owner.media_position_seconds = 6.0
+        self.owner.media_position_sampled_at = 10.0
+        self.owner.media_position_sync_at = 10.0
+        self.owner._estimated_media_position = lambda _now: self.owner.media_position_seconds
+        self.window._lyric_frame(self.owner.timed_lyrics, 10.0)
+        self.window._browse_index = 4.0
+        self.window._browse_until = 20.0
+        self.window._browse_track_key = "song"
+        self.owner.media_position_seconds = 6.5
+        self.owner.media_position_sampled_at = 10.5
+        self.window._lyric_frame(self.owner.timed_lyrics, 10.5)
+        self.assertEqual(self.window._browse_index, 4.0)
+        self.assertEqual(self.window._browse_until, 20.0)
+        self.owner.media_position_seconds = 24.0
+        self.owner.media_position_sampled_at = 11.2
+        self.window._lyric_frame(self.owner.timed_lyrics, 11.2)
+        self.assertIsNone(self.window._browse_index)
+
+    def test_lyric_click_without_seek_capability_keeps_the_manual_place(self):
         self.owner.media_track_id = "song"
         self.owner.timed_lyrics = [(0.0, "first"), (9.0, "second")]
         self.owner.data_provider = object()
@@ -5898,8 +5922,8 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._browse_index = 1.0
         self.window._browse_until = 123.0
         self.window._seek_to_lyric(1)
-        self.assertIsNone(self.window._browse_index)
-        self.assertEqual(self.window._browse_until, 0.0)
+        self.assertEqual(self.window._browse_index, 1.0)
+        self.assertEqual(self.window._browse_until, 123.0)
         self.assertFalse(self.window._seek_pending)
 
     def test_track_or_timeline_change_cancels_browse_return(self):

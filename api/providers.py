@@ -911,7 +911,7 @@ class PlaybackSourceProvider:
                     ))
             if pin is not None:
                 data = self._apply_external_playback_clock(data, pin)
-            return data
+            return self._attach_captured_lyrics(data)
         return empty_visual_data("程序内播放", "登录后选择歌单", "GluSpot")
 
     @staticmethod
@@ -986,38 +986,49 @@ class PlaybackSourceProvider:
         return (title, artist)
 
     def _retain_clock_anchor(self, marker, track_key, raw, duration, playing, sampled_at, now):
-        """Keep one playhead anchor. A new song or a real move starts a new one.
+        """Keep one playhead anchor while the song is only moving with time.
 
-        A repeated read of the same timeline position is not a new sample.
-        Publishing it with a fresh timestamp made the lyric clock seek back
-        to that frozen second on every poll.
+        A new timestamp on every poll made the expanded page treat ordinary
+        progress as a seek, so a manual lyric scroll snapped back. A frozen
+        reader and a reader that advances about one poll interval both stay
+        on the original anchor. A real jump starts a new one.
         """
         previous = getattr(self, "_external_clock_cache", None)
         anchor = float(sampled_at)
+        stored_raw = float(raw)
         if (
             previous is not None
             and previous[0] == marker
             and previous[1] == track_key
             and bool(playing)
             and previous[4] is True
-            and abs(float(raw) - float(previous[2])) <= 0.25
         ):
-            anchor = float(previous[5])
+            previous_raw = float(previous[2])
+            previous_anchor = float(previous[5])
+            elapsed = float(now) - previous_anchor
+            if elapsed >= -0.05:
+                follows = abs(float(raw) - (previous_raw + max(0.0, elapsed))) <= 1.25
+                frozen = abs(float(raw) - previous_raw) <= 0.25
+                if follows or frozen:
+                    anchor = previous_anchor
+                    stored_raw = previous_raw
         self._external_clock_cache = (
-            marker, track_key, float(raw), float(duration), bool(playing), anchor, float(now),
+            marker, track_key, stored_raw, float(duration), bool(playing), anchor, float(now),
         )
-        return anchor
+        return anchor, stored_raw
 
     def _project_clock(self, marker, track_key, raw, duration, playing, sampled_at, now):
-        anchor = self._retain_clock_anchor(marker, track_key, raw, duration, playing, sampled_at, now)
+        anchor, stored_raw = self._retain_clock_anchor(
+            marker, track_key, raw, duration, playing, sampled_at, now)
         age = now - anchor
         if age < -0.05:
             anchor = float(sampled_at)
             age = 0.0
-        position = float(raw) + age if playing else float(raw)
+            stored_raw = float(raw)
+        position = stored_raw + age if playing else stored_raw
         if duration > 0.0:
             position = min(float(duration), max(0.0, position))
-        return (position, float(duration), bool(playing), anchor, float(raw))
+        return (position, float(duration), bool(playing), anchor, stored_raw)
 
     def _cached_smtc_clock(self, session, track_key, now):
         cached = getattr(self, "_external_clock_cache", None)
@@ -1060,6 +1071,9 @@ class PlaybackSourceProvider:
                     self._external_clock_cache = None
                 return
             raw, duration, playing, sampled_at = sample
+            if playing is None:
+                cached = getattr(self, "_external_clock_cache", None)
+                playing = bool(cached[4]) if cached is not None else False
             self._project_clock(id(session), track_key, raw, duration, playing, sampled_at, time.monotonic())
 
         try:
@@ -1086,7 +1100,7 @@ class PlaybackSourceProvider:
         playing = self._clock_is_playing(playback)
         if duration > 0.0:
             position = min(duration, position)
-        return (position, duration, bool(playing), now)
+        return (position, duration, playing, now)
 
     def _cdp_playback_clock(self, pin, track, now):
         """Reuse an already-ready NetEase progress sample. Never opens a channel."""
@@ -1111,14 +1125,16 @@ class PlaybackSourceProvider:
             return None
         playing = latest.get("playing")
         if playing is not True and playing is not False:
-            playing = False
-        if playing and (received <= 0.0 or now - received > 2.5):
+            playing = None
+        if playing is not False and (received <= 0.0 or now - received > 2.5):
             return None
         native = str(latest.get("trackId") or "").strip()
         title, artist = self._external_track_key(pin, track)
         track_key = (native, title, artist) if native else (title, artist)
+        if playing is None:
+            playing = bool(getattr(track, "is_playing", False))
         return self._project_clock(
-            ("cdp", id(cdp)), track_key, position, duration, bool(playing),
+            ("cdp", id(cdp)), track_key, position, duration, playing,
             received if received > 0.0 else now, now,
         )
 
@@ -1145,6 +1161,8 @@ class PlaybackSourceProvider:
                     self._external_clock_cache = None
                 return None
             raw, duration, playing, sampled_at = sample
+            if playing is None:
+                playing = bool(getattr(track, "is_playing", False))
             return self._project_clock(id(session), track_key, raw, duration, playing, sampled_at, now)
         cached = self._cached_smtc_clock(session, track_key, now)
         self._schedule_smtc_clock_read(session, track_key)
@@ -1196,6 +1214,44 @@ class PlaybackSourceProvider:
         if not math.isfinite(position) or not math.isfinite(duration) or position < 0.0 or duration < 0.0:
             return False
         return duration > 0.5 or position > 0.05
+
+    def _attach_captured_lyrics(self, data):
+        """Publish a finished lyric lookup without waiting for the next media read.
+
+        System capture can keep showing the loading sentinel while the UIA
+        worker or a session refresh is still busy. The lookup itself only
+        needs the title and artist, and the store is already single-flight.
+        """
+        track = getattr(data, "track", None)
+        ensure = getattr(self.system, "_ensure_lyrics_lookup_started", None)
+        if track is None or getattr(self.system, "lyrics_store", None) is None or not callable(ensure):
+            return data
+        if getattr(track, "timed_lyrics", ()):
+            return data
+        title = str(getattr(track, "title", "") or "").strip()
+        if title in {"", "暂无媒体", "暂无播放", "媒体初始化中", "未在播放", "程序内播放"}:
+            return data
+        lyrics = tuple(getattr(track, "lyrics", ()) or ())
+        loading = not lyrics or lyrics in {("暂无歌词",), ("查找歌词中",), ("寻找歌词中",), ("加载歌词中",)}
+        if not loading and not (len(lyrics) == 1 and str(lyrics[0]).strip() in {"暂无歌词", "查找歌词中", "寻找歌词中", "加载歌词中"}):
+            return data
+        try:
+            match, pending, _started = ensure(
+                title, str(getattr(track, "artist", "") or ""), "",
+                float(getattr(track, "duration_seconds", 0.0) or 0.0),
+            )
+        except Exception:
+            return data
+        timed = tuple(getattr(match, "timed_lyrics", ()) or ())
+        lines = tuple(getattr(match, "lyrics", ()) or ()) or tuple(line.text for line in timed)
+        if timed or (lines and lines not in {("暂无歌词",), ("查找歌词中",)}):
+            return replace(data, track=replace(
+                track, lyrics=lines or ("暂无歌词",), timed_lyrics=timed,
+                lyrics_source=str(getattr(match, "source", "") or getattr(track, "lyrics_source", "") or ""),
+            ))
+        if pending and lyrics != ("查找歌词中",):
+            return replace(data, track=replace(track, lyrics=("查找歌词中",), timed_lyrics=()))
+        return data
 
     def get_audio_frame(self):
         # Owned music is analyzed from its own decoded PCM, never from external capture.
@@ -3623,12 +3679,28 @@ class WindowsMediaProvider:
             self.lyrics_store.enrich_in_background(title, artist, album_title, duration_seconds, True)
         return lyrics_match, lyrics_lookup_pending, lookup_started
 
+    def _wait_for_uia_worker(self, worker, timeout=0.8) -> bool:
+        """Let one in-flight position read finish instead of failing the click."""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while getattr(worker, "busy", False) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return not bool(getattr(worker, "busy", False))
+
     def seek_playback_position(self, position_seconds: float, expected_track_id: str | None = None) -> bool:
         executor = getattr(self, "_capture_executor", None)
         worker = getattr(self, "_capture_uia_worker", None)
+        runtime = getattr(self, "_capture_runtime", None)
+        uses_uia = getattr(runtime, "seek_uses_uia_worker", None)
+        needs_uia = runtime is None or not callable(uses_uia) or bool(uses_uia())
+        if needs_uia and worker is not None and worker.busy:
+            # The shared worker is usually inside a position read. Wait for
+            # that read, then seek. A fresh CDP seek does not take this slot.
+            on_owner = threading.current_thread() is getattr(self, "_thread", None)
+            if on_owner or not self._wait_for_uia_worker(worker):
+                record_seek_decision('provider', 'uia-worker-busy', target=position_seconds)
+                return False
         reason = ('previous-request-uncertain' if executor is not None and executor.uncertain else
-                  'busy' if executor is not None and executor.busy else
-                  'uia-worker-busy' if worker is not None and worker.busy else '')
+                  'busy' if executor is not None and executor.busy else '')
         if reason:
             # A flag/profile toggle cannot cancel a previous native write.
             # This gate also protects a return to the legacy SMTC route.

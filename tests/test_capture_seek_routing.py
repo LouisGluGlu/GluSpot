@@ -3,6 +3,7 @@ import asyncio
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
@@ -89,6 +90,47 @@ class CaptureSeekRoutingTests(CaptureAsyncTestCase):
             self.assertFalse(provider.seek_playback_position(42, 'song'))
         self.assertIn('reason=owning-thread', records.output[0])
         runtime.seek.assert_not_called()
+
+    async def test_fresh_cdp_seek_does_not_stop_for_a_busy_uia_reader(self):
+        provider = self.provider()
+        provider._capture_uia_worker = SimpleNamespace(busy=True)
+        runtime = SimpleNamespace(
+            seek=AsyncMock(return_value=True),
+            seek_uses_uia_worker=lambda: False,
+            cef_session=SimpleNamespace(port=9222),
+        )
+        provider._capture_runtime = runtime
+        provider._capture_executor = SimpleNamespace(busy=False, uncertain=False)
+        with self.assertLogs('GluSpot.capture.seek') as records:
+            self.assertTrue(await asyncio.to_thread(provider.seek_playback_position, 85.96, 'song'))
+        self.assertFalse(any('uia-worker-busy' in line for line in records.output))
+        runtime.seek.assert_awaited()
+
+    async def test_busy_uia_reader_is_retried_instead_of_failing_immediately(self):
+        provider = self.provider()
+        state = {'busy': True}
+
+        class Worker:
+            @property
+            def busy(self):
+                return state['busy']
+
+        provider._capture_uia_worker = Worker()
+        runtime = SimpleNamespace(
+            seek=AsyncMock(return_value=True),
+            seek_uses_uia_worker=lambda: True,
+            cef_session=None,
+        )
+        provider._capture_runtime = runtime
+        provider._capture_executor = SimpleNamespace(busy=False, uncertain=False)
+
+        def release():
+            time.sleep(0.12)
+            state['busy'] = False
+
+        threading.Thread(target=release, daemon=True).start()
+        self.assertTrue(await asyncio.to_thread(provider.seek_playback_position, 40, 'song'))
+        runtime.seek.assert_awaited()
 
     async def test_guard_checks_track_after_awaiting_selected_session(self):
         provider = self.provider()
