@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QTransform
 
 from api.online_music import LoginSnapshot
 from local.music_tasks import MusicTasks
+from local.startup_timing import log_startup_phase
 from local.playback_entry_window import ChoicePlacement, LOGIN_SOURCE_IDS, PlaybackEntryWindow
 from local.music_navigation_transition import MusicNavigationTransition
 from local.runtime_platform import normalize_playback_selection, owned_playback_only, system_media_unavailable_reason
@@ -158,6 +159,7 @@ class PlaybackEntryController(QObject):
 
     def _start_route(self, *, first_run):
         self._route_generation += 1
+        self._log_platform_account_status = True
         owned = bool(self.settings.get(OWNED_KEY, True))
         system = bool(self.settings.get(SYSTEM_KEY, True))
         if first_run:
@@ -178,8 +180,12 @@ class PlaybackEntryController(QObject):
                 return None
             # DPAPI/disk work remains off the GUI thread. This checks persisted
             # account records without waiting for a live internet validation.
-            return tuple(source.source_id for source in self.service.list_sources()
-                         if source.source_id in LOGIN_SOURCE_IDS and self.service.has_login_record(source.source_id))
+            started = time.perf_counter()
+            try:
+                return tuple(source.source_id for source in self.service.list_sources()
+                             if source.source_id in LOGIN_SOURCE_IDS and self.service.has_login_record(source.source_id))
+            finally:
+                log_startup_phase("platform_login_status", started)
         if not self.tasks.submit(("accounts", generation), accounts):
             self._accounts_ready = True
         self._probe_timer.start()
@@ -258,18 +264,26 @@ class PlaybackEntryController(QObject):
         generation = self._generation
         self.window.set_login_snapshot(LoginSnapshot("", source_id, "loading", message="正在读取账号…"))
         def account():
-            if self._closed or generation != self._generation:
-                return None
-            # A card verified in this session is already the provider's source
-            # of truth. Do not repeat the live login-status request on every
-            # return from the library; logged-out/startup records still validate.
-            restore = getattr(self.service, "restore_account", None)
-            cached = restore(source_id) if callable(restore) else self.service.account_status(source_id)
-            if cached.logged_in or self._closed or generation != self._generation:
-                return cached
-            if cached.state == "cached":
-                return cached
-            return self.service.account_status(source_id, refresh=True)
+            started = time.perf_counter()
+            log_this = bool(getattr(self, "_log_platform_account_status", False))
+            if log_this:
+                self._log_platform_account_status = False
+            try:
+                if self._closed or generation != self._generation:
+                    return None
+                # A card verified in this session is already the provider's source
+                # of truth. Do not repeat the live login-status request on every
+                # return from the library; logged-out/startup records still validate.
+                restore = getattr(self.service, "restore_account", None)
+                cached = restore(source_id) if callable(restore) else self.service.account_status(source_id)
+                if cached.logged_in or self._closed or generation != self._generation:
+                    return cached
+                if cached.state == "cached":
+                    return cached
+                return self.service.account_status(source_id, refresh=True)
+            finally:
+                if log_this:
+                    log_startup_phase("platform_account_status", started)
         if not self.tasks.submit(("account", generation, source_id), account):
             self.window.set_login_snapshot(LoginSnapshot("", source_id, "error", message="服务繁忙，请稍后重试"))
 

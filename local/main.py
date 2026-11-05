@@ -2,10 +2,21 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+
+
+def _load_app():
+    """Import the UI after argument checks, and time that import only."""
+    from local.startup_timing import log_startup_phase
+    started = time.perf_counter()
+    from local.app import main as run_app
+    log_startup_phase("import_ui", started)
+    return run_app
+
 
 def main(argv: list[str] | None = None):
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -34,12 +45,11 @@ def main(argv: list[str] | None = None):
             handoff, token = parse_handoff_request(arguments)
         except ValueError:
             return 2
-        from local.app import main as run_app
+        run_app = _load_app()
         if token is not None:
             return run_app(installer_handoff=handoff, installer_sync=token)
         return run_app(installer_handoff=handoff)
-    from local.app import main as run_app
-    return run_app()
+    return _load_app()()
 
 
 if __name__ == "__main__":

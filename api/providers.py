@@ -3555,6 +3555,18 @@ class WindowsMediaProvider:
             return None
 
     async def _get_session(self):
+        # Time the first session read only. Later refreshes keep the same path.
+        if getattr(self, "_startup_media_session_logged", False):
+            return await self._open_media_session()
+        self._startup_media_session_logged = True
+        started = time.perf_counter()
+        try:
+            return await self._open_media_session()
+        finally:
+            from local.startup_timing import log_startup_phase
+            log_startup_phase("windows_media_session", started)
+
+    async def _open_media_session(self):
         pinned = getattr(self, "_interruption_session", None)
         if pinned is not None:
             # A pin names one retained native instance. Never rerun scoring or
