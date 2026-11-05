@@ -948,34 +948,76 @@ class PlaybackSourceProvider:
             source, float(elapsed_ms), int(bool(ok)), int(bool(blocked)),
         )
 
-    def _remember_smtc_clock(self, session, clock):
-        marker = id(session) if session is not None else 0
-        if clock is None:
-            self._external_clock_cache = None
-            return
-        position, duration, playing, sampled_at = clock
-        self._external_clock_cache = (marker, position, duration, bool(playing), float(sampled_at))
+    def _external_track_key(self, pin, track):
+        """Identity of the song whose playhead this clock is allowed to project."""
+        title = str(getattr(track, "title", "") or "").strip() if track is not None else ""
+        artist = str(getattr(track, "artist", "") or "").strip() if track is not None else ""
+        if title in {"", "暂无媒体", "暂无播放", "媒体初始化中", "未在播放"}:
+            key = tuple(getattr(pin, "media_key", ()) or ())
+            if key:
+                title = str(key[0]).strip() or title
+                if len(key) > 1:
+                    artist = str(key[1]).strip() or artist
+        return (title, artist)
 
-    def _cached_smtc_clock(self, session, now):
+    def _retain_clock_anchor(self, marker, track_key, raw, duration, playing, sampled_at, now):
+        """Keep one playhead anchor. A new song or a real move starts a new one.
+
+        A repeated read of the same timeline position is not a new sample.
+        Publishing it with a fresh timestamp made the lyric clock seek back
+        to that frozen second on every poll.
+        """
+        previous = getattr(self, "_external_clock_cache", None)
+        anchor = float(sampled_at)
+        if (
+            previous is not None
+            and previous[0] == marker
+            and previous[1] == track_key
+            and bool(playing)
+            and previous[4] is True
+            and abs(float(raw) - float(previous[2])) <= 0.25
+        ):
+            anchor = float(previous[5])
+        self._external_clock_cache = (
+            marker, track_key, float(raw), float(duration), bool(playing), anchor, float(now),
+        )
+        return anchor
+
+    def _project_clock(self, marker, track_key, raw, duration, playing, sampled_at, now):
+        anchor = self._retain_clock_anchor(marker, track_key, raw, duration, playing, sampled_at, now)
+        age = now - anchor
+        if age < -0.05:
+            anchor = float(sampled_at)
+            age = 0.0
+        position = float(raw) + age if playing else float(raw)
+        if duration > 0.0:
+            position = min(float(duration), max(0.0, position))
+        return (position, float(duration), bool(playing), anchor, float(raw))
+
+    def _cached_smtc_clock(self, session, track_key, now):
         cached = getattr(self, "_external_clock_cache", None)
-        if cached is None or session is None or cached[0] != id(session):
+        if cached is None or session is None or cached[0] != id(session) or cached[1] != track_key:
             return None
-        _marker, position, duration, playing, sampled_at = cached
-        age = now - sampled_at
-        if age < -0.05 or age > 2.5:
+        _marker, _key, raw, duration, playing, anchor, confirmed_at = cached
+        if now - confirmed_at > 2.5 or now - confirmed_at < -0.05:
             return None
-        if playing:
-            position += age
-            if duration > 0.0:
-                position = min(duration, position)
-        return (position, duration, playing, sampled_at)
+        age = now - anchor
+        if age < -0.05:
+            return None
+        position = raw + age if playing else raw
+        if duration > 0.0:
+            position = min(duration, max(0.0, position))
+        return (position, duration, playing, anchor, raw)
 
-    def _schedule_smtc_clock_read(self, session):
+    def _schedule_smtc_clock_read(self, session, track_key):
         """One timeline read on the media loop at a time, at most twice a second."""
         loop = getattr(self.system, "_loop", None)
         if loop is None or not loop.is_running() or session is None:
             return
         now = time.monotonic()
+        cached = getattr(self, "_external_clock_cache", None)
+        if cached is None or cached[0] != id(session) or cached[1] != track_key:
+            self._external_clock_read_at = 0.0
         task = getattr(self, "_external_clock_task", None)
         if task is not None and not task.done():
             return
@@ -985,9 +1027,15 @@ class PlaybackSourceProvider:
 
         async def job():
             started = time.perf_counter()
-            clock = self._smtc_playback_clock(session, time.monotonic())
-            self._record_clock_read("smtc", (time.perf_counter() - started) * 1000.0, clock is not None, False)
-            self._remember_smtc_clock(session, clock)
+            sample = self._smtc_playback_clock(session, time.monotonic())
+            self._record_clock_read("smtc", (time.perf_counter() - started) * 1000.0, sample is not None, False)
+            if sample is None:
+                current = getattr(self, "_external_clock_cache", None)
+                if current is not None and current[0] == id(session) and current[1] == track_key:
+                    self._external_clock_cache = None
+                return
+            raw, duration, playing, sampled_at = sample
+            self._project_clock(id(session), track_key, raw, duration, playing, sampled_at, time.monotonic())
 
         try:
             self._external_clock_task = asyncio.run_coroutine_threadsafe(job(), loop)
@@ -1015,7 +1063,7 @@ class PlaybackSourceProvider:
             position = min(duration, position)
         return (position, duration, bool(playing), now)
 
-    def _cdp_playback_clock(self, pin, now):
+    def _cdp_playback_clock(self, pin, track, now):
         """Reuse an already-ready NetEase progress sample. Never opens a channel."""
         from api.capture.interruption import netease_match
         if netease_match(str(getattr(pin, "app_id", "") or "")) is None:
@@ -1041,11 +1089,13 @@ class PlaybackSourceProvider:
             playing = False
         if playing and (received <= 0.0 or now - received > 2.5):
             return None
-        if playing and received > 0.0:
-            position += max(0.0, now - received)
-        if duration > 0.0:
-            position = min(duration, position)
-        return (position, duration, bool(playing), now)
+        native = str(latest.get("trackId") or "").strip()
+        title, artist = self._external_track_key(pin, track)
+        track_key = (native, title, artist) if native else (title, artist)
+        return self._project_clock(
+            ("cdp", id(cdp)), track_key, position, duration, bool(playing),
+            received if received > 0.0 else now, now,
+        )
 
     def _read_external_playback_clock(self, pin, now, track):
         """CDP is an in-memory sample. SMTC is read on the media loop, then projected.
@@ -1053,20 +1103,26 @@ class PlaybackSourceProvider:
         A background snapshot that already has a real timeline is kept. Reading
         the session again on the UI thread was the visible hitch.
         """
-        cdp = self._cdp_playback_clock(pin, now)
+        cdp = self._cdp_playback_clock(pin, track, now)
         if cdp is not None:
             return cdp
         if self._visual_progress_usable(track):
             return "keep"
         session = getattr(pin, "session", None)
+        track_key = self._external_track_key(pin, track)
         if self._provider_loop_is_caller():
             started = time.perf_counter()
-            clock = self._smtc_playback_clock(session, now)
-            self._record_clock_read("smtc", (time.perf_counter() - started) * 1000.0, clock is not None, True)
-            self._remember_smtc_clock(session, clock)
-            return clock
-        cached = self._cached_smtc_clock(session, now)
-        self._schedule_smtc_clock_read(session)
+            sample = self._smtc_playback_clock(session, now)
+            self._record_clock_read("smtc", (time.perf_counter() - started) * 1000.0, sample is not None, True)
+            if sample is None:
+                current = getattr(self, "_external_clock_cache", None)
+                if current is not None and current[0] == id(session) and current[1] == track_key:
+                    self._external_clock_cache = None
+                return None
+            raw, duration, playing, sampled_at = sample
+            return self._project_clock(id(session), track_key, raw, duration, playing, sampled_at, now)
+        cached = self._cached_smtc_clock(session, track_key, now)
+        self._schedule_smtc_clock_read(session, track_key)
         return cached
 
     def _apply_external_playback_clock(self, data, pin):
@@ -1088,7 +1144,7 @@ class PlaybackSourceProvider:
                 position_sampled_at=0.0,
                 position_observed_seconds=None,
             ))
-        position, duration, playing, sampled_at = clock
+        position, duration, playing, sampled_at, raw = clock
         if duration <= 0.0:
             duration = max(0.0, float(getattr(track, "duration_seconds", 0.0) or 0.0))
         return replace(data, track=replace(
@@ -1099,7 +1155,7 @@ class PlaybackSourceProvider:
             position_source="capture-model",
             position_confidence=0.95,
             position_sampled_at=sampled_at,
-            position_observed_seconds=position,
+            position_observed_seconds=raw,
         ))
 
     @staticmethod

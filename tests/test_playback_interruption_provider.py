@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 from api.lyrics import LocalLyricsStore
 from api.online_music import OnlineSong, StreamInfo
 from api.providers import EmptyIslandDataProvider, PlaybackSourceProvider, WindowsMediaProvider, empty_visual_data
+from local.island_stack_visual import IslandStackVisual
 from local.media_position_pipeline import media_position_update_plan
 from local.music_library_search import LibraryProgress
 from local.owned_music_player import OwnedMusicPlayer
@@ -181,6 +182,49 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
         self.assertEqual(reads, [])
         self.assertEqual(again["track"].position_source, "capture-model")
         self.assertGreater(again["track"].position_seconds, 36.0)
+
+    async def test_track_change_resets_the_clock_and_lyrics_keep_advancing(self):
+        state = {"title": "歌曲甲", "position": 30.0, "now": 1000.0}
+
+        def visual():
+            base = empty_visual_data()
+            return replace(base, track=replace(
+                base.track, title=state["title"], artist="歌手", position_source="none",
+                timed_lyrics=((0.0, "第一句"), (3.0, "第二句")), lyrics=("第一句", "第二句"),
+            ))
+
+        session = Session("spotify.exe", title="歌曲甲", artist="歌手")
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=state["position"], start_time=0.0, end_time=200.0)
+        self.system.get_visual_data = visual
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("歌曲甲", "歌手", ""), app_id="spotify.exe", session=session)
+        with patch("api.providers.time.monotonic", lambda: state["now"]):
+            opening = self.provider.get_visual_data().track
+            self.assertAlmostEqual(opening.position_seconds, 30.0, delta=0.05)
+            state["title"] = "歌曲乙"
+            state["position"] = 1.0
+            state["now"] = 1001.0
+            reset = self.provider.get_visual_data().track
+            self.assertLess(reset.position_seconds, 2.0)
+            self.assertAlmostEqual(reset.position_observed_seconds, 1.0)
+            anchor = reset.position_sampled_at
+            state["now"] = 1004.2
+            advanced = self.provider.get_visual_data().track
+        self.assertEqual(advanced.position_sampled_at, anchor)
+        self.assertGreater(advanced.position_seconds, 3.0)
+        self.assertAlmostEqual(advanced.position_observed_seconds, 1.0)
+
+        def lyric_index(track):
+            island = IslandStackVisual(EmptyIslandDataProvider())
+            try:
+                island._apply_visual_data(replace(empty_visual_data(), track=track))
+                return island.lyric_index
+            finally:
+                island.timer.stop()
+
+        self.assertEqual(lyric_index(reset), 0)
+        self.assertEqual(lyric_index(advanced), 1)
 
     async def test_netease_pin_uses_ready_cdp_progress_without_opening_a_channel(self):
         session = Session("cloudmusic.exe", title="云端歌曲", artist="歌手")
