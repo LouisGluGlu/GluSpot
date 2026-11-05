@@ -33,7 +33,7 @@ LEFT_FADE_FRACTION = 0.06
 RIGHT_FADE_FRACTION = 0.08
 FRAME_SECONDS = 1.0 / 30.0
 OVERFLOW_EPSILON = 1.0
-# The expanded island title uses the same pause/travel/fade shape, twice as brisk.
+# Island and wide-panel titles share this pace: same shape as K, twice as brisk.
 ISLAND_TITLE_SPEED_SCALE = 2.0
 
 

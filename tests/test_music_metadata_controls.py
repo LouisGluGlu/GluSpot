@@ -56,7 +56,7 @@ class MusicMetadataControlTests(unittest.TestCase):
                 from local.metadata_marquee import START_HOLD_FRACTION, cycle_seconds
                 for field in ("title", "artist"):
                     width = window._metadata_text_widths[field]
-                    hold = START_HOLD_FRACTION * cycle_seconds(width)
+                    hold = START_HOLD_FRACTION * cycle_seconds(width, window._metadata_speed_scale(field))
                     started = window._metadata_marquee_states[field][2]
                     if 2.6 <= hold:
                         self.assertAlmostEqual(started, 102.6 - hold)
@@ -90,7 +90,7 @@ class MusicMetadataControlTests(unittest.TestCase):
         window._update_control_animation_regions(104.6)
         from local.metadata_marquee import START_HOLD_FRACTION, cycle_seconds
         width = window._metadata_text_widths["title"]
-        hold = START_HOLD_FRACTION * cycle_seconds(width)
+        hold = START_HOLD_FRACTION * cycle_seconds(width, window._metadata_speed_scale("title"))
         started = window._metadata_marquee_states["title"][2]
         if 4.6 <= hold:
             self.assertAlmostEqual(started, 104.6 - hold)
@@ -162,7 +162,9 @@ class MusicMetadataControlTests(unittest.TestCase):
                                                       font, 115.2, "song", field="title")
         self.assertEqual(self.window._metadata_marquee_states["title"][2], 100.0)
         from local.metadata_marquee import START_HOLD_FRACTION, TRAVEL_FRACTION, cycle_seconds
-        duration = cycle_seconds(self.window._metadata_text_widths["title"])
+        duration = cycle_seconds(
+            self.window._metadata_text_widths["title"], self.window._metadata_speed_scale("title"),
+        )
         travel_at = 100.0 + START_HOLD_FRACTION * duration + 0.25 * TRAVEL_FRACTION * duration
         self.assertTrue(self.window._metadata_marquee_pose(
             "title", self.window._metadata_overflows["title"], travel_at,

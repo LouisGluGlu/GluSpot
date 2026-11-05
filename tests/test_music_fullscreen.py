@@ -1407,7 +1407,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertAlmostEqual(window._metadata_marquee_pose("title", 200.0, 103.0)[0], visible)
         self.assertLess(window._metadata_marquee_pose("title", 200.0, 103.2)[0], visible)
         self.assertEqual(window._metadata_marquee_pose("title", 200.0, 103.5)[0], 0.0)
-        self.assertEqual(window._metadata_marquee_pose("title", 200.0, 104.4)[0], 0.0)
+        self.assertEqual(window._metadata_marquee_pose("title", 200.0, 103.9)[0], 0.0)
         self.assertGreater(window._metadata_marquee_pose("title", 200.0, 105.2)[0], 0.0)
 
     def test_translation_uses_half_the_previous_font_in_both_window_modes(self):
@@ -1492,7 +1492,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(self.window._metadata_marquee_states["title"][2], 100.0)
         self.assertEqual(self.window._metadata_marquee_states["artist"][2], 100.0)
         from local.metadata_marquee import START_HOLD_FRACTION, TRAVEL_FRACTION, cycle_seconds
-        duration = cycle_seconds(self.window._metadata_text_widths["title"])
+        duration = cycle_seconds(
+            self.window._metadata_text_widths["title"], self.window._metadata_speed_scale("title"),
+        )
         travel_at = 100.0 + START_HOLD_FRACTION * duration + TRAVEL_FRACTION * duration * 0.35
         self.window._fullscreen = True
         with patch("local.music_surface_window.time.monotonic", return_value=travel_at):

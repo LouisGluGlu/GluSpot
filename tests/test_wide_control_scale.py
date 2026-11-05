@@ -73,7 +73,7 @@ class WideControlScaleTests(unittest.TestCase):
                     self.assertAlmostEqual(
                         title_font.pixelSize(), 3.1 * self.window.TITLE_EMPHASIS_SCALE * unit, delta=1.5,
                     )
-                    self.assertEqual(title_font.weight(), QFont.Weight.DemiBold)
+                    self.assertEqual(title_font.weight(), QFont.Weight.Bold)
                 self.assertAlmostEqual(transport.left(), 10.6 * unit, delta=0.6)
                 self.assertAlmostEqual(transport.width(), 30.2 * unit, delta=0.6)
                 self.assertAlmostEqual(transport.top(), 56.0 * unit, delta=0.6)

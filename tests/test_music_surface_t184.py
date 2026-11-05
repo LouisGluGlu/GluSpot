@@ -263,7 +263,9 @@ class MetadataAndTooltipTests(unittest.TestCase):
             self.assertGreater(left, 80)
             self.assertLess(initial.pixelColor(129, 30).alpha(), 40)
             from local.metadata_marquee import START_HOLD_FRACTION, TRAVEL_FRACTION, cycle_seconds
-            duration = cycle_seconds(self.window._metadata_text_widths["title"])
+            duration = cycle_seconds(
+                self.window._metadata_text_widths["title"], self.window._metadata_speed_scale("title"),
+            )
             moving = render(100. + START_HOLD_FRACTION * duration + TRAVEL_FRACTION * duration * 0.4)
             self.assertNotEqual(initial, moving)
             self.assertEqual(self.window._metadata_marquee_states["title"][2], 100.)

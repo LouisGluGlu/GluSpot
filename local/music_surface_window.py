@@ -81,6 +81,7 @@ from local.music_lyric_presentation import (
 )
 from local.metadata_marquee import (
     FRAME_SECONDS as MARQUEE_FRAME_SECONDS,
+    ISLAND_TITLE_SPEED_SCALE,
     START_HOLD_FRACTION,
     TRAVEL_FRACTION,
     cycle_seconds,
@@ -6848,8 +6849,12 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         """One wake at the end of a hold; a moving line waits at most one frame."""
         return marquee_pose(float(text_width), 0.0, float(elapsed)).delay
 
+    def _metadata_speed_scale(self, field: str) -> float:
+        """Wide-panel titles use the same pace as the expanded island title."""
+        return ISLAND_TITLE_SPEED_SCALE if field == "title" else 1.0
+
     def _metadata_title_font(self, pixel_size: float) -> QFont:
-        font = self._surface_font(pixel_size, QFont.Weight.DemiBold)
+        font = self._surface_font(pixel_size, QFont.Weight.Bold)
         font.setLetterSpacing(
             QFont.SpacingType.AbsoluteSpacing, -0.012 * float(font.pixelSize()),
         )
@@ -6882,14 +6887,14 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                 return overflow * fraction * (0.5 + 0.5 * math.cos(math.pi * progress)), True, MARQUEE_FRAME_SECONDS
             self._metadata_returns.pop(field, None)
         text_width = float(self._metadata_text_widths.get(field, overflow))
-        duration = cycle_seconds(text_width)
+        scale = self._metadata_speed_scale(field)
+        duration = cycle_seconds(text_width, scale)
         start_hold = START_HOLD_FRACTION * duration
-        travel = TRAVEL_FRACTION * duration
         if field == self._metadata_hover_field:
             elapsed = start_hold + max(0.0, now - self._metadata_hover_started_at) % (duration - start_hold)
         else:
             elapsed = now - state[2]
-        pose = marquee_pose(text_width, max(0.0, text_width - float(overflow)), elapsed)
+        pose = marquee_pose(text_width, max(0.0, text_width - float(overflow)), elapsed, scale)
         return pose.offset, pose.moving, pose.delay
 
     def _metadata_control_overflow(self, field: str, reveal: float) -> float:
@@ -6937,7 +6942,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._metadata_returns.pop(field, None)
         fraction = max(0.0, min(1.0, offset / max(1.0, overflow)))
         text_width = float(self._metadata_text_widths.get(field, overflow))
-        duration = cycle_seconds(text_width)
+        duration = cycle_seconds(text_width, self._metadata_speed_scale(field))
         outbound = fraction * TRAVEL_FRACTION * duration
         self._metadata_marquee_states[field] = (
             *state[:2], now - START_HOLD_FRACTION * duration - outbound,
@@ -6988,7 +6993,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self._metadata_returns.pop(field, None)
             fraction = max(0.0, min(1.0, offset / max(1.0, overflow)))
             text_width = float(self._metadata_text_widths.get(field, overflow))
-            outbound_elapsed = fraction * TRAVEL_FRACTION * cycle_seconds(text_width)
+            outbound_elapsed = fraction * TRAVEL_FRACTION * cycle_seconds(
+                text_width, self._metadata_speed_scale(field),
+            )
             self._metadata_hover_started_at = now - outbound_elapsed
         self._metadata_hover_field = field
         if self._metadata_animation_rect.isValid():

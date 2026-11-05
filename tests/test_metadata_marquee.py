@@ -108,7 +108,7 @@ class MetadataMarqueeTests(unittest.TestCase):
         title_font, title_rect, artist_font, _artist_rect = self.window._metadata_layout(
             cover, content, self.window._surface_scale(), 1.0,
         )
-        self.assertEqual(title_font.weight(), QFont.Weight.DemiBold)
+        self.assertEqual(title_font.weight(), QFont.Weight.Bold)
         self.assertLess(title_font.letterSpacing(), 0.0)
         self.assertAlmostEqual(title_font.pixelSize(), 3.1 * 1.15 * unit, delta=1.5)
         self.assertEqual(artist_font.weight(), QFont.Weight.Medium)
@@ -117,6 +117,39 @@ class MetadataMarqueeTests(unittest.TestCase):
         title_height = self.window._font_height(base) * layout_size / base.pixelSize()
         self.assertAlmostEqual(title_rect.height(), max(3.4 * unit, title_height + 2.0 * unit), delta=0.8)
         self.assertAlmostEqual(title_rect.left(), cover.left(), delta=0.6)
+
+    def test_wide_title_scrolls_at_the_same_pace_as_the_island_title(self):
+        font = self.window._metadata_title_font(28.0)
+        self.assertEqual(font.weight(), QFont.Weight.Bold)
+        text = "As I Used To Be (From F1 The Album)"
+        slot = QRectF(10, 8, 120, 36)
+        image = QImage(160, 56, QImage.Format.Format_ARGB32_Premultiplied)
+
+        def render(now):
+            image.fill(QColor(0, 0, 0, 0))
+            with QPainter(image) as painter, patch.object(self.window, "_control_reveal_at", return_value=1.0):
+                painter.setPen(QColor("white"))
+                self.window._paint_scrolling_metadata(painter, slot, text, font, now, "song", field="title")
+            return image.copy()
+
+        resting = render(20.0)
+        self.assertGreater(self.window._metadata_overflows["title"], 1.0)
+        self.assertEqual(self.window._metadata_marquee_pose("title", self.window._metadata_overflows["title"], 20.0)[0], 0.0)
+        self.assertGreater(max(resting.pixelColor(x, 24).alpha() for x in range(14, 28)), 80)
+        width = self.window._metadata_text_widths["title"]
+        view = width - self.window._metadata_overflows["title"]
+        self.assertEqual(self.window._metadata_speed_scale("title"), ISLAND_TITLE_SPEED_SCALE)
+        elapsed = 0.14 * cycle_seconds(width, ISLAND_TITLE_SPEED_SCALE) + 0.25
+        self.assertEqual(marquee_pose(width, view, elapsed).offset, 0.0)
+        self.assertGreater(marquee_pose(width, view, elapsed, ISLAND_TITLE_SPEED_SCALE).offset, 0.0)
+        moving = render(20.0 + elapsed)
+        self.assertNotEqual(resting, moving)
+        self.assertGreater(
+            self.window._metadata_marquee_pose(
+                "title", self.window._metadata_overflows["title"], 20.0 + elapsed,
+            )[0],
+            0.0,
+        )
 
     def test_hidden_panel_does_not_refresh_and_motion_stays_at_thirty_fps(self):
         self.window._metadata_marquee_moving = True
