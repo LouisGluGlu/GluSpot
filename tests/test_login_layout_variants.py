@@ -166,7 +166,7 @@ class LoginLayoutVariantTests(unittest.TestCase):
             self.window.set_login_variant(variant)
             self.assertIs(self.window._account, account)
             self.assertEqual(self.window._account_image.cacheKey(), key)
-            self.assertEqual(self.window.enter_button.text(), "进入音乐库")
+            self.assertEqual(self.window.enter_button.text(), "使用此平台")
         old_backdrop = self.window._background_frame.cacheKey()
         image.fill(QColor("#c5a6aa"))
         self.window.set_account_artwork(image)

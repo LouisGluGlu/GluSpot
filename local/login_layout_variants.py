@@ -47,14 +47,15 @@ class LoginVariantLayout:
             top = pane.top() + max(24., (pane.height() - side - 150) / 2)
             avatar = QRectF(pane.center().x() - side / 2, top, side, side)
             name = QRectF(pane.left() + 20, avatar.bottom() + 18, pane.width() - 40, 32)
-            action = QRectF(pane.center().x() - 78, name.bottom() + 50, 156, 44)
+            row_width = min(pane.width() - 32., 292.)
+            action = QRectF(pane.center().x() - row_width / 2, name.bottom() + 50, row_width, 38)
             return avatar, name, action
         side = min(112., pane.height() * .40, pane.width() * .23)
         left = pane.left() + (36 if pane.width() >= 500 else 24)
         avatar = QRectF(left, pane.center().y() - side / 2, side, side)
         text_x = avatar.right() + (32 if pane.width() >= 500 else 20)
         name = QRectF(text_x, pane.center().y() - 62, pane.right() - text_x - 20, 32)
-        action = QRectF(text_x, name.bottom() + 48, min(156., name.width()), 44)
+        action = QRectF(text_x, name.bottom() + 48, min(300., name.width()), 38)
         return avatar, name, action
 
 
