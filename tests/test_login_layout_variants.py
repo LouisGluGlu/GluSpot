@@ -247,8 +247,8 @@ class LoginLayoutVariantTests(unittest.TestCase):
             rebuild.assert_not_called()
             signed_out_dirty.assert_not_called()
         self.assertEqual(self.window._background_frame.cacheKey(), backdrop)
-        self.assertLessEqual(button.status_rect().width(), 16)
-        self.assertLessEqual(button.status_rect().height(), 16)
+        self.assertLessEqual(button.status_rect().width(), 12)
+        self.assertLessEqual(button.status_rect().height(), 12)
 
     def test_pulse_stops_without_visible_green_dots_or_when_leaving_sources(self):
         self.prepare("sidebar")

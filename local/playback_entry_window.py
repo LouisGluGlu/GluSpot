@@ -310,19 +310,13 @@ class MusicSourceButton(QAbstractButton):
         return QRectF(x, (self.height() - side) / 2, side, side)
 
     def _status_dot_rect(self) -> QRectF:
-        """10 px lamp whose center sits just outside the icon's bottom-right corner."""
+        """Keep the lamp on the icon's bottom-right, including the icon-only rail."""
         if not self.source.login_supported:
             return QRectF()
         icon = self._icon_rect()
-        size = 10.0
-        # The colored disc is 10 px. A 2 px ring is painted outside it, and the
-        # center hangs 3 px past the icon so the lamp reads as a badge.
-        overhang = 3.0
-        ring = 2.0
-        x = icon.right() + overhang - size / 2
-        y = icon.bottom() + overhang - size / 2
-        x = min(max(ring, x), max(ring, self.width() - size - ring))
-        y = min(max(ring, y), max(ring, self.height() - size - ring))
+        size = 8.0
+        x = min(self.width() - size, max(0.0, icon.right() - size + 2))
+        y = min(self.height() - size, max(0.0, icon.bottom() - size + 2))
         return QRectF(round(x), round(y), size, size)
 
     def status_rect(self) -> QRect:
@@ -343,11 +337,11 @@ class MusicSourceButton(QAbstractButton):
         else:
             color = QColor("#7b7b82")
         painter.setPen(Qt.PenStyle.NoPen)
-        # Opaque row-dark ring, then the colored disc, so the lamp sits on the icon.
-        painter.setBrush(QColor(26, 28, 34))
-        painter.drawEllipse(dot.adjusted(-2, -2, 2, 2))
         painter.setBrush(color)
         painter.drawEllipse(dot)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(29, 29, 32, 230), 1.2))
+        painter.drawEllipse(dot.adjusted(.6, .6, -.6, -.6))
         painter.restore()
 
     def paintEvent(self, event):
