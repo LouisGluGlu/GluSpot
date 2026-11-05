@@ -1068,6 +1068,23 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         center = rect.top() + rect.height() * .495
         return QRectF(rect.left(), center - self._u(44), rect.width(), self._u(104)).intersected(rect)
 
+    def _displayed_ripple_samples(self, state):
+        """Absolute crest samples, scaled only while a song display is active."""
+        if state._ripple_history:
+            samples = state._ripple_history[-1][1]
+        else:
+            samples = tuple(state.ripple_displacement(index / 48) for index in range(49))
+        display = getattr(self.host, "_song_wave_display", None)
+        if display is None or not getattr(display, "active", False):
+            return samples, 1.0
+        try:
+            gain = float(display.displacement_gain(getattr(state, "_ripple_amplitude", 0.0)))
+        except (TypeError, ValueError):
+            return samples, 1.0
+        if not math.isfinite(gain) or gain == 1.0:
+            return samples, 1.0
+        return tuple(sample * gain for sample in samples), gain
+
     def _sea_level_surface(self, context: MusicBackgroundRenderContext, rect: QRectF, expanded: bool) -> list[QPointF]:
         """The moving water line shared by the sea body and its highlight.
 
@@ -1079,16 +1096,17 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         if expanded and state is not None and getattr(self.host, "sea_shape_mode", None) not in {"spectrum", "wave"}:
             # The island ripple is a smooth water surface, independent of the
             # optional spectrum preview. No repeated spring-chain filtering.
-            cache_key = (state.ripple_updated_at, rect.x(), rect.y(), rect.width(), rect.height(), self._u(1))
+            samples, gain = self._displayed_ripple_samples(state)
+            unit = self._u(1)
+            cache_key = (state.ripple_updated_at, rect.x(), rect.y(), rect.width(), rect.height(), unit, gain)
             cached = getattr(state, "_ripple_surface_cache", None)
             if cached is None or cached[0] != cache_key:
                 # The audio tick already sampled these exact 49 positions
                 # for crest history. Reuse the current pose rather than
                 # evaluating all three sine components again during paint.
-                samples = (state._ripple_history[-1][1] if state._ripple_history else
-                           tuple(state.ripple_displacement(index / 48) for index in range(49)))
+                # An active per-song display only scales that pose for pixels.
                 left, step = rect.left(), rect.width() / 48
-                center, unit = rect.top() + rect.height() * .495, cache_key[-1]
+                center = rect.top() + rect.height() * .495
                 points = tuple(QPointF(left + step * index, center - unit * samples[index])
                                for index in range(49))
                 state._ripple_surface_cache = (cache_key, points)
@@ -1288,7 +1306,7 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
                     # only needs this pose's crest, glow and moving reflection.
                     # Reuse the audio tick's numeric samples, avoiding another
                     # round of trigonometry or per-point Qt geometry calls.
-                    samples = state._ripple_history[-1][1]
+                    samples, _gain = self._displayed_ripple_samples(state)
                     center = rect.top() + rect.height() * .495
                     unit = self._u(1.)
                     top = center - unit * max(samples) - 2. * unit

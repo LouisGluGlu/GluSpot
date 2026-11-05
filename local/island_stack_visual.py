@@ -3945,6 +3945,7 @@ class IslandStackVisual(QWidget):
                         bands=getattr(self, "_sea_frame_bands", ()),
                         vocal=getattr(self, "_sea_vocal_sample", 0.0),
                         is_playing=bool(getattr(self, "media_is_playing", False)))
+            IslandStackVisual._observe_song_wave_display(self, now)
         previous_at = getattr(self, "_wave_values_updated_at", None)
         advance = self._audio_reactive_runtime_for_current_settings().advance_wave_values(
             self.wave_values,
@@ -3960,6 +3961,24 @@ class IslandStackVisual(QWidget):
         if not getattr(self, "_music_wave_first_updated_at", 0.0):
             self._music_wave_first_updated_at = advance.updated_at
         self._invalidate_music_reactive_snapshot()
+
+    def _observe_song_wave_display(self, now: float) -> None:
+        """Learn this track's loudness range without changing the absolute ripple."""
+        from local.song_wave_display import SongWaveDisplay, song_wave_loudness
+        display = getattr(self, "_song_wave_display", None)
+        if display is None:
+            display = self._song_wave_display = SongWaveDisplay()
+        playing = bool(getattr(self, "media_is_playing", False))
+        display.observe(
+            str(getattr(self, "media_track_id", "") or ""),
+            song_wave_loudness(
+                getattr(self, "_sea_peak_sample", None),
+                getattr(self, "_sea_vocal_sample", 0.0),
+                playing=playing,
+            ),
+            now,
+            playing=playing,
+        )
 
     def _music_wave_update_plan(self, now: float):
         input_snapshot = self._music_wave_input_snapshot(now)
@@ -14029,6 +14048,9 @@ class IslandStackVisual(QWidget):
 
     def _paint_sea_level_bars(self, painter: QPainter, rect: QRectF):
         levels = getattr(getattr(self, "_island_bar_state", None), "levels", (0.0,) * 4)
+        display = getattr(self, "_song_wave_display", None)
+        if display is not None:
+            levels = display.bar_levels(levels)
         width = rect.width() / 6.0
         step = (rect.width() - width) / 3.0
         painter.save()
