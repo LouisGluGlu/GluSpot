@@ -116,6 +116,42 @@ class SourceAccountPageTests(unittest.TestCase):
         self.window.deleteLater()
         self.app.processEvents()
 
+    def test_qr_group_aligns_with_the_code_and_uses_the_flat_glass_button(self):
+        from local.playback_entry_window import SourceFlatButton
+        self.window.select_source("kugou")
+        self.window._expansion.stop()
+        self.window._expanded = 1.0
+        self.window.set_login_snapshot(SimpleNamespace(
+            source_id="kugou", state="waiting", message="等待扫码"))
+        for width, height, stacked in ((1000, 700, False), (440, 480, True)):
+            with self.subTest(size=(width, height)):
+                self.window.resize(width, height)
+                self.window._layout_children()
+                pane = self.window._source_pane_rect()
+                qr, detail = self.window._login_content_rects()
+                title, helper, message, action = self.window._login_detail_geometry()
+                button = self.window.refresh_button
+                self.assertIsInstance(button, SourceFlatButton)
+                self.assertTrue(button.primary)
+                self.assertEqual(button.height(), 38)
+                self.assertEqual(button.text(), "刷新二维码")
+                self.assertTrue(pane.contains(qr))
+                self.assertTrue(pane.contains(action))
+                self.assertFalse(message.intersects(action))
+                if stacked:
+                    self.assertGreater(title.top(), qr.bottom())
+                    self.assertAlmostEqual(qr.center().x(), pane.center().x(), delta=1)
+                    self.assertAlmostEqual(button.geometry().center().x(), pane.center().x(), delta=2)
+                else:
+                    self.assertAlmostEqual(title.top(), qr.top(), delta=1)
+                    self.assertAlmostEqual(action.bottom(), qr.bottom(), delta=1)
+                    self.assertAlmostEqual(action.left(), title.left(), delta=1)
+                    self.assertAlmostEqual(button.geometry().bottom(), round(qr.bottom()), delta=1)
+                    self.assertAlmostEqual(button.geometry().left(), round(title.left()), delta=1)
+                    group_mid = (qr.left() + detail.right()) / 2
+                    self.assertAlmostEqual(group_mid, pane.center().x(), delta=1)
+                    self.assertAlmostEqual((qr.top() + qr.bottom()) / 2, pane.center().y(), delta=1)
+
     def test_status_lamp_sits_on_the_icon_corner_in_both_rails(self):
         for width in (960, 440):
             with self.subTest(width=width):

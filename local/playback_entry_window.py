@@ -652,7 +652,10 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
             button.setProperty("glassRefractive", True)
             button.setFont(_entry_font(15))
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setStyleSheet("QPushButton { color: #f4f5f7; background: transparent; border: none; border-radius: 22px; padding: 6px 8px; } QPushButton:disabled { color: #9296a1; }")
+            button.setStyleSheet("QPushButton { color: #f4f5f7; background: transparent; border: none; border-radius: 19px; padding: 0 16px; } QPushButton:disabled { color: #9296a1; }")
+            # A stylesheet can turn the platform fill back on. Keep only the flat glass.
+            button.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+            button.setAutoFillBackground(False)
         self.continue_button.setFont(_entry_font(21, heavy=True))
         self.continue_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.continue_button.setStyleSheet("QPushButton { color: #050505; background: #ffffff; border: none; border-radius: 21px; padding: 0; } QPushButton:pressed { background: #dedee0; } QPushButton:focus { border: 2px solid #92949a; }")

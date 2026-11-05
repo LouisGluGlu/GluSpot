@@ -16,28 +16,45 @@ class LoginVariantLayout:
     rail: QRectF | None = None
 
     def login_content(self) -> tuple[QRectF, QRectF]:
+        """QR plus the text column, centered in the pane.
+
+        Wide panes keep the text column as tall as the QR. Narrow panes stack
+        the QR above the text.
+        """
         pane = self.pane
         if self.centered:
-            side = min(156., max(104., pane.height() - 202.))
-            qr = QRectF(pane.center().x() - side / 2, pane.top() + 18, side, side)
-            return qr, QRectF(pane.left() + 20, qr.bottom() + 12, pane.width() - 40,
-                             pane.bottom() - qr.bottom() - 28)
-        side = min(180., pane.height() - 40, pane.width() * .34)
-        gap = 28 if pane.width() > 480 else 18
-        detail_width = min(280., pane.width() - side - gap - 40)
-        left = pane.center().x() - (side + gap + detail_width) / 2
-        qr = QRectF(left, pane.center().y() - side / 2, side, side)
-        return qr, QRectF(qr.right() + gap, pane.top() + 24, detail_width, pane.height() - 48)
+            side = min(156., max(104., pane.width() - 48.), pane.height() * .42)
+            text_height = 30. + 6. + 24. + 4. + 22.
+            button = 38.
+            group = side + 16. + text_height + 16. + button
+            top = pane.top() + max(8., (pane.height() - group) / 2.)
+            qr = QRectF(pane.center().x() - side / 2., top, side, side)
+            detail = QRectF(pane.left() + 20., qr.bottom() + 16., pane.width() - 40., text_height)
+            return qr, detail
+        # 136 px keeps the three-line block above a 38 px button with a gap.
+        side = min(176., max(144., pane.height() - 48.), pane.width() * .36)
+        side = min(side, max(96., pane.height() - 16.))
+        gap = 36. if pane.width() > 420. else 28.
+        detail_width = min(248., max(120., pane.width() - side - gap - 32.))
+        if side + gap + detail_width > pane.width() - 16.:
+            side = max(96., pane.width() - 16. - gap - detail_width)
+        group_width = side + gap + detail_width
+        left = pane.left() + max(8., (pane.width() - group_width) / 2.)
+        top = pane.top() + max(8., (pane.height() - side) / 2.)
+        qr = QRectF(left, top, side, side)
+        return qr, QRectF(qr.right() + gap, top, detail_width, side)
 
     def login_detail(self) -> tuple[QRectF, QRectF, QRectF, QRectF]:
-        _qr, detail = self.login_content()
-        title = QRectF(detail.left(), detail.top(), detail.width(), 26)
-        helper = QRectF(detail.left(), title.bottom() + 4, detail.width(), 34)
-        message = QRectF(detail.left(), helper.bottom() + 6, detail.width(),
-                         max(28., min(46., detail.height() - 122)))
+        qr, detail = self.login_content()
+        title = QRectF(detail.left(), detail.top(), detail.width(), 30.)
+        helper = QRectF(detail.left(), title.bottom() + 6., detail.width(), 24.)
+        message = QRectF(detail.left(), helper.bottom() + 4., detail.width(), 22.)
         action_width = min(156., detail.width())
-        action = QRectF(detail.center().x() - action_width / 2 if self.centered else detail.left(),
-                        max(message.bottom() + 8, detail.bottom() - 44), action_width, 44)
+        if self.centered:
+            action = QRectF(detail.center().x() - action_width / 2., detail.bottom() + 16., action_width, 38.)
+        else:
+            # Bottom of the pill meets the QR bottom; left edge meets the text.
+            action = QRectF(detail.left(), qr.bottom() - 38., action_width, 38.)
         return title, helper, message, action
 
     def account_content(self) -> tuple[QRectF, QRectF, QRectF]:
