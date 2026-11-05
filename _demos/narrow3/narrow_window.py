@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, QVariantAnimation, QEasingCurve
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRegion, QTextLayout, QTransform
 from PySide6.QtWidgets import QApplication, QAbstractButton
 
@@ -22,7 +22,7 @@ from api.providers import WindowsMediaProvider
 from local.audio_output_icons import paint_audio_output_status
 from local.music_source_icons import paint_music_source_icon
 from local.music_surface_window import MusicSurfaceWindow, MUSIC_WINDOW_ASPECT_RATIO, constrained_window_size
-from local.music_surface_layout import normalize_content_layout
+from local.music_surface_layout import normalize_content_layout, wide_narrow_easing
 from local.music_lyric_reading import LyricReadingRenderer
 from local.lyric_unit_timing import timed_unit_reading_front
 from local.music_lyric_presentation import (
@@ -297,7 +297,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.toggle_wide(False)
         self._width_chrome_animation = QVariantAnimation(self)
         self._width_chrome_animation.setDuration(1000)
-        self._width_chrome_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._width_chrome_animation.setEasingCurve(wide_narrow_easing())
         self._width_chrome_animation.valueChanged.connect(self._advance_width_chrome)
         self._width_chrome_animation.finished.connect(self._complete_width_chrome)
         if not live:
@@ -1021,6 +1021,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self._width_chrome_progress = 0.
             self._width_chrome_active = True
             self._width_chrome_animation.setDuration(round(self._width_transition.duration * 1000.))
+            self._width_chrome_animation.setEasingCurve(wide_narrow_easing())
             self._record_width_transition()
             self._width_chrome_animation.setStartValue(0.)
             self._width_chrome_animation.setEndValue(1.)

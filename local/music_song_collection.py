@@ -450,10 +450,13 @@ class MusicSongCollectionMixin:
         image = self._surface_glass_backdrop()
         hover_segments = tuple((self._glass_feedback.hover.get(key, 0.), segment.translated(offset))
                                for key, segment in self._song_collection_rects(rect, now).items())
-        self._clear_control_renderer.paint(painter, face, scene=image, scene_bounds=QRectF(self.rect()),
-            ink=self._scene_control_ink(), now=now, role="collection", state=motion,
-            hover_segments=hover_segments,
-            kind="capsule", level=self._surface_glass_level())
+        # Wide layout G draws one shared plate behind the heart, playlist and DJ.
+        # Narrow keeps this capsule. The DJ status lamp stays on the waveform icon.
+        if self._content_layout_is_narrow():
+            self._clear_control_renderer.paint(painter, face, scene=image, scene_bounds=QRectF(self.rect()),
+                ink=self._scene_control_ink(), now=now, role="collection", state=motion,
+                hover_segments=hover_segments,
+                kind="capsule", level=self._surface_glass_level())
         for key, target in self._song_collection_rects(rect, now).items():
             painter.save()
             target.translate(offset)

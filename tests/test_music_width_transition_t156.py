@@ -20,35 +20,35 @@ class WidthTransitionStateTests(unittest.TestCase):
         transition = WidthTransition(True)
         transition.request(False)
         self.assertEqual(transition.state, 'SPLITTING')
-        self.assertEqual(transition.duration, 1.)
+        self.assertEqual(transition.duration, .42)
         transition.request(True)
         self.assertEqual(transition.state, 'SPLITTING')
-        self.assertEqual(transition.duration, 1.)
+        self.assertEqual(transition.duration, .42)
         transition.complete()
         self.assertEqual(transition.state, 'MERGING')
-        self.assertEqual(transition.duration, 1.)
+        self.assertEqual(transition.duration, .42)
         transition.complete()
         self.assertEqual(transition.state, 'NARROW')
 
-    def test_fast_jump_has_400ms_floor_and_duration_does_not_change(self):
+    def test_fast_jump_uses_220ms_and_duration_does_not_change(self):
         transition = WidthTransition(True)
         transition.request_mark(10., 0.)
         transition.request_mark(50., .01)
-        self.assertEqual(transition.duration, .4)
+        self.assertEqual(transition.duration, .22)
         transition.request_mark(18., .02)
         self.assertEqual(transition.state, 'SPLITTING')
-        self.assertEqual(transition.duration, .4)
+        self.assertEqual(transition.duration, .22)
         transition.complete()
-        self.assertEqual(transition.duration, .4)
+        self.assertEqual(transition.duration, .22)
 
-    def test_duration_follows_speed_formula_and_clamps_to_400ms(self):
+    def test_duration_uses_220_320_420ms(self):
         for speed in (0., 15., 60., 112.5, 300., 1000.):
             with self.subTest(speed=speed):
                 transition = WidthTransition(True)
                 self.assertEqual(transition.duration, 1.)
                 transition.drag_speed = speed
                 transition.request(False)
-                expected = max(.4, min(1., 1. / (1. + .8 * speed / 60.)))
+                expected = .32 if speed >= 60. else .42
                 self.assertAlmostEqual(transition.duration, expected)
 
     def test_queued_reverse_uses_new_speed_only_after_current_handoff(self):
@@ -57,10 +57,10 @@ class WidthTransitionStateTests(unittest.TestCase):
         transition.drag_speed = 60.
         transition.request(True)
         self.assertEqual(transition.state, 'SPLITTING')
-        self.assertEqual(transition.duration, 1.)
+        self.assertEqual(transition.duration, .42)
         transition.complete()
         self.assertEqual(transition.state, 'MERGING')
-        self.assertAlmostEqual(transition.duration, 1. / 1.8)
+        self.assertAlmostEqual(transition.duration, .32)
         transition.complete()
         self.assertEqual(transition.state, 'NARROW')
 
@@ -108,14 +108,14 @@ class WidthTransitionWindowTests(unittest.TestCase):
         self.window.LYRIC_PIXEL_SIZE += 6
         self.assertGreater(self.window._width_breakpoint_width(), old)
 
-    def test_below25_does_not_animate_and_fast_crossing_is400ms(self):
+    def test_below25_does_not_animate_and_fast_crossing_is220ms(self):
         marks = self.begin()
         self.window.resize(round(marks.minimum), round(marks.height))
         self.assertFalse(self.window._width_chrome_active)
         self.window.resize(round(marks.maximum), round(marks.height))
         self.assertEqual(self.window._width_transition.state, 'SPLITTING')
-        self.assertEqual(self.window._width_chrome_animation.duration(), 400)
-        self.assertEqual(self.window._width_chrome_animation.easingCurve().type(), QEasingCurve.Type.InOutCubic)
+        self.assertEqual(self.window._width_chrome_animation.duration(), 220)
+        self.assertEqual(self.window._width_chrome_animation.easingCurve().type(), QEasingCurve.Type.BezierSpline)
 
     def test_release_exactly_at25_preserves_split_intent(self):
         import math

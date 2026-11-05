@@ -55,35 +55,38 @@ class WideControlScaleTests(unittest.TestCase):
             title_font, title, artist_font, artist = self.window._metadata_layout(
                 cover, _content, self.window._surface_scale(), 1.0)
             transport = self.window._wide_transport_rect(surface)
+            metrics = self.window._wide_layout_g(surface)
             top = self.window._window_control_base_rect(surface)
             collection = self.window._song_collection_geometry(surface, shifted=False)
             buttons = self.window._song_collection_rects(surface)
-            icon = min(transport.height(), max(24.0, transport.width() * 5.2 / 30.2))
-            # 440px is already the stacked lyric layout. Wide cover, transport
-            # and chrome still follow u; the title sits beside that small cover.
+            # 440px is already the stacked lyric layout. The wide column still
+            # follows layout G; the visible title sits beside that small cover.
             wide_pose = not self.window._content_layout_is_narrow()
             with self.subTest(size=size):
                 self.assertAlmostEqual(self.window._control_unit(), unit)
-                self.assertAlmostEqual(cover.left(), 6.8 * unit, delta=0.6)
-                self.assertAlmostEqual(cover.top(), 6.8 * unit, delta=0.6)
-                self.assertAlmostEqual(cover.width(), 37.8 * unit, delta=0.6)
+                self.assertAlmostEqual(cover.left(), metrics.cover.left(), delta=0.6)
+                self.assertAlmostEqual(cover.top(), metrics.cover.top(), delta=0.6)
+                self.assertAlmostEqual(cover.width(), metrics.cover.width(), delta=0.6)
                 self.assertAlmostEqual(cover.width(), cover.height(), delta=0.2)
                 if wide_pose:
-                    self.assertAlmostEqual(title.top(), 46.2 * unit, delta=2.0)
+                    self.assertAlmostEqual(title.top(), metrics.title.top(), delta=1.5)
                     self.assertAlmostEqual(
                         title_font.pixelSize(), 3.1 * self.window.TITLE_EMPHASIS_SCALE * unit, delta=1.5,
                     )
-                    self.assertEqual(title_font.weight(), QFont.Weight.DemiBold)
-                self.assertAlmostEqual(transport.left(), 10.6 * unit, delta=0.6)
-                self.assertAlmostEqual(transport.width(), 30.2 * unit, delta=0.6)
-                self.assertAlmostEqual(transport.top(), 56.0 * unit, delta=0.6)
-                self.assertGreaterEqual(icon, 24.0)
-                self.assertLessEqual(icon, max(32.0, 5.2 * unit) + 0.5)
+                    self.assertEqual(title_font.weight(), QFont.Weight.Bold)
+                self.assertAlmostEqual(transport.left(), metrics.card.left(), delta=0.6)
+                self.assertAlmostEqual(transport.width(), metrics.card.width(), delta=0.6)
+                self.assertAlmostEqual(transport.top(), metrics.card.top(), delta=0.6)
+                self.assertGreaterEqual(metrics.play_side, 28.0)
+                self.assertGreaterEqual(metrics.skip_side, 22.0)
                 self.assertGreaterEqual(top.width(), 34.0)
                 self.assertAlmostEqual(top.width(), max(34.0, 5.6 * unit), delta=0.6)
                 self.assertAlmostEqual(self.window.width() - top.right(), 2.4 * unit, delta=0.6)
                 self.assertGreaterEqual(collection.height(), 32.0)
                 self.assertAlmostEqual(self.window.width() - collection.right(), 2.4 * unit, delta=1.5)
-                self.assertEqual(artist.height() > 1.0, size[0] >= 500)
+                if wide_pose:
+                    self.assertGreater(artist.height(), 1.0)
+                else:
+                    self.assertEqual(artist.height() > 1.0, size[0] >= 500)
                 self.assertEqual("playlist_add" in buttons, size[0] >= 440)
                 self.assertIn("favorite", buttons)

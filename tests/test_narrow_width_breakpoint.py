@@ -90,7 +90,7 @@ class NarrowWidthBreakpointTests(unittest.TestCase):
         entry, exit_width = self.crossover()
         self.window.resize(entry, 640)
         self.window._width_chrome_animation.stop()
-        self.assertEqual(self.window._width_chrome_animation.duration(), 1000)
+        self.assertEqual(self.window._width_chrome_animation.duration(), 420)
 
         def at(progress):
             self.window._advance_width_chrome(progress)

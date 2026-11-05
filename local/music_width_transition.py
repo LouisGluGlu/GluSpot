@@ -22,6 +22,21 @@ class WidthMarks:
         return 25. + 25. * (width - self.breakpoint) / max(1., self.maximum - self.breakpoint)
 
 
+# Narrow↔wide handoff from the layout-G study: 220 ms snap, 320 ms brisk, 420 ms settle.
+HANDOFF_FAST_SECONDS = 0.22
+HANDOFF_BRISK_SECONDS = 0.32
+HANDOFF_SETTLE_SECONDS = 0.42
+
+
+def handoff_seconds(fast_jump, drag_speed):
+    """Pick one of the three study durations. The curve is cubic-bezier(0.28, 0, 0.72, 1)."""
+    if fast_jump:
+        return HANDOFF_FAST_SECONDS
+    if float(drag_speed) >= 60.0:
+        return HANDOFF_BRISK_SECONDS
+    return HANDOFF_SETTLE_SECONDS
+
+
 class WidthTransition:
     """Intent queues while the current split/merge finishes at its chosen speed."""
     def __init__(self, narrow=True):
@@ -65,7 +80,7 @@ class WidthTransition:
         if self.active or self.narrow == self.want_narrow:
             return False
         self.state = "MERGING" if narrow else "SPLITTING"
-        self.duration = .4 if self._fast_jump else max(.4, min(1., 1. / (1. + .8 * self.drag_speed / 60.)))
+        self.duration = handoff_seconds(self._fast_jump, self.drag_speed)
         self._fast_jump = False
         return True
 

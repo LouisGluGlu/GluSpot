@@ -101,14 +101,14 @@ class MetadataMarqueeTests(unittest.TestCase):
         self.assertGreater(accent.blue(), accent.red())
         self.assertNotEqual(accent, QColor(255, 255, 255, 142))
 
-    def test_wide_title_is_larger_and_semibold_without_growing_the_slot(self):
+    def test_wide_title_is_larger_and_bold_without_growing_the_slot(self):
         self.window.resize(1000, 700)
         content, cover, _lyric = self.window._wide_content_column_geometry()
         unit = self.window._control_unit()
         title_font, title_rect, artist_font, _artist_rect = self.window._metadata_layout(
             cover, content, self.window._surface_scale(), 1.0,
         )
-        self.assertEqual(title_font.weight(), QFont.Weight.DemiBold)
+        self.assertEqual(title_font.weight(), QFont.Weight.Bold)
         self.assertLess(title_font.letterSpacing(), 0.0)
         self.assertAlmostEqual(title_font.pixelSize(), 3.1 * 1.15 * unit, delta=1.5)
         self.assertEqual(artist_font.weight(), QFont.Weight.Medium)

@@ -24,6 +24,13 @@ def normalize_content_layout(value):
     return value if isinstance(value, str) and value in CONTENT_LAYOUTS else "lyrics"
 
 
+def wide_narrow_easing():
+    """cubic-bezier(0.28, 0, 0.72, 1). QVariantAnimation stays on Qt's 60 Hz clock."""
+    curve = QEasingCurve(QEasingCurve.Type.BezierSpline)
+    curve.addCubicBezierSegment(QPointF(0.28, 0.0), QPointF(0.72, 1.0), QPointF(1.0, 1.0))
+    return curve
+
+
 def paint_content_layout_glyph(painter, rect, layout, ink):
     """The user's four supplied silhouettes, scaled from one 100-unit grid."""
     painter.save()
@@ -86,7 +93,7 @@ class MusicContentLayoutMixin:
         self._width_layout_fraction = None
         self._width_layout_animation = QVariantAnimation(self)
         self._width_layout_animation.setDuration(1000)
-        self._width_layout_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._width_layout_animation.setEasingCurve(wide_narrow_easing())
         self._width_layout_animation.valueChanged.connect(self._advance_width_layout)
         self._width_layout_animation.finished.connect(self._width_layout_completed)
         self._width_transition = None
@@ -268,6 +275,7 @@ class MusicContentLayoutMixin:
         if not transition.active or animation.state() == QVariantAnimation.State.Running:
             return
         animation.setDuration(round(transition.duration * 1000.))
+        animation.setEasingCurve(wide_narrow_easing())
         animation.setStartValue(fraction)
         animation.setEndValue(float(transition.narrow))
         animation.start()
@@ -367,15 +375,17 @@ class MusicContentLayoutMixin:
         # responsive composition. Both visible columns share the width budget.
         gap = 100. * scale
         if not measure_fit:
+            # Layout G places the cover. The reading lane keeps the previous
+            # 6.8u + 37.8u anchor so width handoff and reused lyric shapes
+            # stay on the same column.
+            cover = QRectF(self._wide_layout_g(surface).cover)
             unit = self._control_unit(surface)
-            side = max(1., 37.8 * unit)
-            # Same width share as before: the gap yields so the lyric lane
-            # keeps at least about 45% of the content width.
+            lane_right = (6.8 + 37.8) * unit
             gap = min(gap, max(0., content.width() * .10))
-            cover = QRectF(6.8 * unit, 6.8 * unit, side, side)
+            left = max(lane_right, cover.right()) + gap
         else:
             cover = QRectF(content.left(), content.top(), side, side)
-        left = cover.right() + gap
+            left = cover.right() + gap
         # Follow/wrapping use the full reading lane. Bottom chrome feathers
         # lyric ink separately; its visibility must never move the anchor.
         column = QRectF(left, content.top(), max(0., content.right() - left), content.height())

@@ -169,16 +169,19 @@ class ResponsiveLyricEdgeTests(unittest.TestCase):
             widths.append((cover.width(), lyric.width(), title_font.pixelSize(),
                            artist_font.pixelSize(), self.window._media_control_panel_rect.width()))
         self.assertAlmostEqual(widths[0][0], widths[1][0], delta=1.)
-        self.assertGreater(widths[1][0], widths[2][0])
+        # Layout G caps the cover by 0.44×height, so these three widths share it.
+        self.assertAlmostEqual(widths[1][0], widths[2][0], delta=1.)
         self.assertGreater(widths[0][1], widths[1][1])
         self.assertGreater(widths[1][1], widths[2][1])
-        for slot in (2, 3, 4):
+        for slot in (2, 3):
             self.assertAlmostEqual(widths[0][slot], widths[1][slot], delta=1.)
             if slot == 2:
                 # The 1.15 title emphasis rounds to the same pixel at these two units.
                 self.assertGreaterEqual(widths[1][slot], widths[2][slot])
             else:
                 self.assertGreater(widths[1][slot], widths[2][slot])
+        self.assertAlmostEqual(widths[0][4], widths[1][4], delta=1.)
+        self.assertAlmostEqual(widths[1][4], widths[2][4], delta=1.)
 
 
 if __name__ == "__main__":

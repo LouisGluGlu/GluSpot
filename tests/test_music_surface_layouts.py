@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 from api.online_music import OnlineSong
+from local.music_lyric_motion import LogicalLineSpringChain
 from local.music_surface_layout import CONTENT_LAYOUTS, normalize_content_layout, paint_content_layout_glyph
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_music_surface_transition import _TransitionOwner
@@ -97,7 +98,7 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
                     clip = self.window._lyric_clip_rect
                     self.assertGreater(clip.bottom(), boundary)
                     self.assertGreater(column.bottom(), boundary)
-                    expected_center = surface.top() + surface.height() * .43
+                    expected_center = self.window._wide_layout_g(surface).axis
                     self.assertAlmostEqual(self.window._lyric_hit_rects[active].center().y(), expected_center)
                     self.assertEqual(self.window._lyric_ink_clip_rect.top(), surface.top())
                     self.assertEqual(self.window._lyric_ink_clip_rect.bottom(), surface.bottom())
@@ -159,6 +160,9 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
         self.prepare_bottom_clearance_song()
         self.render()
         column = self.window._content_column_geometry()[2]
+        # The wide anchor has already moved these springs. Reuse shaping is a
+        # new coordinate space and should not inherit that roll.
+        self.window._logical_line_spring = LogicalLineSpringChain()
         clips = []
         original = self.window._draw_future_wrapped_layout
         def observe(painter, *args, **kwargs):
