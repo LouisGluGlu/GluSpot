@@ -14,6 +14,8 @@ from PySide6.QtWidgets import QApplication
 from api.lyrics import LocalLyricsStore
 from api.online_music import OnlineSong, StreamInfo
 from api.providers import EmptyIslandDataProvider, PlaybackSourceProvider, WindowsMediaProvider, empty_visual_data
+from local.media_position_pipeline import media_position_update_plan
+from local.music_library_search import LibraryProgress
 from local.owned_music_player import OwnedMusicPlayer
 from tests.capture_async import CaptureAsyncTestCase
 from tests.test_media_interruption import Manager, Session
@@ -79,6 +81,74 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
         self.assertTrue(data.track.is_playing)
         self.provider._interruption_pin = None
         self.assertNotEqual(self.provider.get_visual_data().track.title, "外部歌曲")
+        self.assertEqual(data.track.position_source, "external-title-only")
+        self.assertEqual(data.track.position_confidence, 0.0)
+
+    async def test_pinned_session_clock_follows_smtc_and_withholds_a_missing_read(self):
+        session = Session("spotify.exe", title="外部歌曲", artist="外部歌手")
+        session.position = 36.0
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=session.position, start_time=0.0, end_time=200.0)
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="spotify.exe", session=session)
+        first = self.provider.get_visual_data().track
+        self.assertEqual(first.position_source, "capture-model")
+        self.assertAlmostEqual(first.position_seconds, 36.0)
+        self.assertAlmostEqual(first.duration_seconds, 200.0)
+        self.assertTrue(first.is_playing)
+        self.assertEqual(first.position_observed_seconds, first.position_seconds)
+        session.position = 48.5
+        session.playing = False
+        second = self.provider.get_visual_data().track
+        self.assertAlmostEqual(second.position_seconds, 48.5)
+        self.assertFalse(second.is_playing)
+        session.get_timeline_properties = lambda: (_ for _ in ()).throw(RuntimeError("timeline"))
+        withheld = self.provider.get_visual_data().track
+        self.assertEqual(withheld.title, "外部歌曲")
+        self.assertEqual(withheld.position_source, "external-title-only")
+        self.assertEqual(withheld.position_seconds, 0.0)
+        self.assertEqual(withheld.duration_seconds, 0.0)
+        self.assertEqual(withheld.position_confidence, 0.0)
+        self.assertFalse(LibraryProgress.progress_available(withheld))
+        frozen = media_position_update_plan(
+            track_changed=False, incoming_is_playing=True, incoming_position_seconds=0.0,
+            incoming_position_source="external-title-only", incoming_position_confidence=0.0,
+            incoming_position_interactive=False, incoming_source_foreground=False,
+            previous_position_seconds=48.5, previous_sync_at=0.0,
+            previous_raw_position_seconds=48.5, previous_raw_position_source="capture-model", now=2.0)
+        self.assertEqual(frozen.reason, "external_title_only")
+        self.assertAlmostEqual(frozen.position_seconds, 48.5)
+
+    async def test_netease_pin_uses_ready_cdp_progress_without_opening_a_channel(self):
+        session = Session("cloudmusic.exe", title="云端歌曲", artist="歌手")
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=9.0, start_time=0.0, end_time=180.0)
+        now = __import__("time").monotonic()
+        cdp = SimpleNamespace(
+            ready=True,
+            latest={"position": 42.0, "duration": 180.0, "playing": True, "received_at": now},
+            start=AsyncMock(side_effect=AssertionError("cdp must stay closed")),
+        )
+        self.system._netease_cdp_session = cdp
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("云端歌曲", "歌手", ""), app_id="cloudmusic.exe", session=session)
+        track = self.provider.get_visual_data().track
+        self.assertEqual(track.position_source, "capture-model")
+        self.assertAlmostEqual(track.position_seconds, 42.0, delta=0.05)
+        self.assertAlmostEqual(track.duration_seconds, 180.0)
+        self.assertTrue(track.is_playing)
+        cdp.start.assert_not_called()
+        cdp.latest = {"position": 42.0, "duration": 180.0, "playing": True, "received_at": now - 10.0}
+        fallback = self.provider.get_visual_data().track
+        self.assertAlmostEqual(fallback.position_seconds, 9.0)
+        cdp.ready = False
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=0.0, start_time=0.0, end_time=0.0)
+        missing = self.provider.get_visual_data().track
+        self.assertEqual(missing.position_source, "external-title-only")
+        self.assertEqual(missing.position_seconds, 0.0)
 
     async def enable(self, sessions):
         self.system._manager.sessions = sessions

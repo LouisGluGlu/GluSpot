@@ -159,8 +159,16 @@ class LibraryProgress(QAbstractButton):
         self.setToolTip("收起搜索" if expanded else "歌曲进度")
         track = getattr(self.parentWidget(), "_now_playing", None)
         position, duration = self._times(track)
-        self.setAccessibleDescription(f"{int(position)//60}:{int(position)%60:02} / {int(duration)//60}:{int(duration)%60:02}")
+        if self.progress_available(track):
+            self.setAccessibleDescription(f"{int(position)//60}:{int(position)%60:02} / {int(duration)//60}:{int(duration)%60:02}")
+        else:
+            self.setAccessibleDescription("进度不可用")
         self.update()
+
+    @staticmethod
+    def progress_available(track) -> bool:
+        """A missing external clock must not paint 0:00 or an empty bar."""
+        return str(getattr(track, "position_source", "") or "") != "external-title-only"
 
     @staticmethod
     def _times(track):
@@ -192,7 +200,8 @@ class LibraryProgress(QAbstractButton):
     def paintEvent(self, event):
         track = getattr(self.parentWidget(), "_now_playing", None)
         position, duration = self._times(track)
-        fraction = position / duration if duration else 0.
+        known = self.progress_available(track)
+        fraction = position / duration if known and duration else 0.
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             extent = self.search._extent
@@ -205,14 +214,15 @@ class LibraryProgress(QAbstractButton):
                                   hovered=self.underMouse(), pressed=self.isDown(),
                                   material_level=widget_glass_level(self))
                 painter.setOpacity(1.)
-            pen = QPen(QColor(255, 255, 255, 52), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            painter.drawPath(self._track_path())
-            if fraction > 0.:
-                pen.setColor(QColor("#e9edf5"))
+            if known:
+                pen = QPen(QColor(255, 255, 255, 52), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
                 painter.setPen(pen)
-                painter.drawPath(self._track_path(fraction))
-            if extent < 1. and self.width() >= 120:
+                painter.drawPath(self._track_path())
+                if fraction > 0.:
+                    pen.setColor(QColor("#e9edf5"))
+                    painter.setPen(pen)
+                    painter.drawPath(self._track_path(fraction))
+            if known and extent < 1. and self.width() >= 120:
                 ink = QColor("#b4bac7")
                 ink.setAlphaF(1 - extent)
                 painter.setPen(ink)

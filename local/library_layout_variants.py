@@ -470,7 +470,10 @@ class LibraryVariantPresentation:
         self.sync_status_pulse()
 
     def _progress(self, p, rect, *, times=True):
-        position, duration = LibraryProgress._times(self.owner._now_playing)
+        track = self.owner._now_playing
+        if not LibraryProgress.progress_available(track):
+            return
+        position, duration = LibraryProgress._times(track)
         fraction = position / duration if duration else 0.
         p.setPen(QPen(QColor(255, 255, 255, 40), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawLine(rect.topLeft(), rect.topRight())

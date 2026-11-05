@@ -83,9 +83,9 @@ def media_position_update_plan(
         )
     )
 
-    if source == "capture-unavailable":
+    if source in {"capture-unavailable", "external-title-only"}:
         position = raw_position if track_changed else previous_position
-        reason = "capture_unavailable_frozen"
+        reason = "capture_unavailable_frozen" if source == "capture-unavailable" else "external_title_only"
     elif source == "capture-model":
         # The opt-in model already interpolates and filters drift. Keep 300 ms
         # of lyric hysteresis without delaying real seeks or pause boundaries.

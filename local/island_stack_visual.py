@@ -1250,9 +1250,13 @@ class IslandStackVisual(QWidget):
             return False
         return bool(self._apply_visual_data(visual_data))
 
+    def _external_progress_withheld(self) -> bool:
+        """Song identity only: no clock was read, so nothing may advance from zero."""
+        return str(getattr(self, "media_position_source", "") or "") == "external-title-only"
+
     def _estimated_media_position(self, now: float) -> float:
         base = max(0.0, float(getattr(self, "media_position_seconds", 0.0)))
-        if getattr(self, "media_position_source", "") == "capture-unavailable":
+        if getattr(self, "media_position_source", "") in {"capture-unavailable", "external-title-only"}:
             return base
         sync_at = float(getattr(self, "media_position_sync_at", now))
         duration = max(0.0, float(getattr(self, "media_duration_seconds", 0.0)))
@@ -1304,7 +1308,7 @@ class IslandStackVisual(QWidget):
         progress continue to use _estimated_media_position without output delay.
         """
         position = self._estimated_media_position(now)
-        if getattr(self, "media_position_source", "") == "capture-unavailable":
+        if getattr(self, "media_position_source", "") in {"capture-unavailable", "external-title-only"}:
             return position
         sync_at = getattr(self, "media_position_sync_at", None)
         if sync_at is None:
@@ -1372,7 +1376,7 @@ class IslandStackVisual(QWidget):
         return media_position_looks_like_seek_to_start(raw_position, previous_position, previous_raw_position)
 
     def _sync_timed_lyrics(self, now: float, allow_backward: bool = False) -> bool:
-        if not self.timed_lyrics:
+        if self._external_progress_withheld() or not self.timed_lyrics:
             return False
         offset = self._effective_lyric_offset_seconds()
         previous_offset = getattr(self, "_island_last_sync_offset", offset)
@@ -2109,11 +2113,11 @@ class IslandStackVisual(QWidget):
         )
 
     def _handle_music_lyric_tick(self, now: float, speed: float) -> bool:
-        music_lyric_plan = self._music_lyric_tick_plan(now, speed)
+        music_lyric_plan = None if self._external_progress_withheld() else self._music_lyric_tick_plan(now, speed)
         changed = False
-        if music_lyric_plan.sync_timed_lyrics:
+        if music_lyric_plan is not None and music_lyric_plan.sync_timed_lyrics:
             changed = bool(self._sync_timed_lyrics(now))
-        elif music_lyric_plan.fallback_advance.should_advance:
+        elif music_lyric_plan is not None and music_lyric_plan.fallback_advance.should_advance:
             self.prev_lyric_index = music_lyric_plan.fallback_advance.previous_index
             self.lyric_index = music_lyric_plan.fallback_advance.next_index
             self.lyric_changed_at = music_lyric_plan.fallback_advance.changed_at
@@ -9077,6 +9081,8 @@ class IslandStackVisual(QWidget):
         return any(marker in marker_text for marker in markers)
 
     def _compact_music_text(self) -> str:
+        if self._external_progress_withheld():
+            return str(getattr(self, "track_title", "") or "").strip() or "正在播放"
         if self._empty_music_text_active():
             return str(getattr(self, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip() or "暂无歌词"
         missing = self._island_lyric_miss_text()
@@ -10448,6 +10454,9 @@ class IslandStackVisual(QWidget):
         return index % len(lyrics) if lyrics else 0
 
     def _current_lyric_display_lines(self) -> list[str]:
+        if self._external_progress_withheld():
+            title = str(getattr(self, "track_title", "") or "").strip()
+            return [title or "正在播放"]
         if not self.lyrics:
             return []
         missing = self._island_lyric_miss_text()

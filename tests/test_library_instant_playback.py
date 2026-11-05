@@ -48,6 +48,48 @@ class InstantPlaybackTests(unittest.TestCase):
         self.assertFalse(self.player.track.is_playing)
         self.assertFalse(self.window.isVisible())
 
+    def test_reopen_album_restores_its_song_when_another_session_is_showing(self):
+        self.open()
+        row = self.window.collections[0]
+        self.controller.play_collection(row, "default", QRect())
+        self.player.play_queue((self.song,))
+        self.player.track = replace(self.player.track, position_seconds=41, is_playing=False)
+        self.assertTrue(self.controller.return_from_music_surface())
+        self.island.current_visual_data = SimpleNamespace(
+            track=replace(self.player.track, track_id="external", title="External", position_seconds=3))
+        resumed = []
+
+        def send(command):
+            resumed.append(command)
+            self.player.track = replace(self.player.track, is_playing=True)
+            return True
+
+        self.player.send_playback_command = send
+        before = tuple(self.player.calls)
+        self.controller.play_collection(row, "default", QRect())
+        self.assertEqual(tuple(self.player.calls), before)
+        self.assertEqual(resumed, ["toggle_play_pause"])
+        self.assertEqual(self.player.track.position_seconds, 41)
+        self.assertEqual(self.player.track.track_id, "owned:netease:" + self.song.song_id)
+        self.assertTrue(self.player.track.is_playing)
+        self.assertIn(("visual", self.player.track.track_id), self.island.calls)
+        self.assertFalse(self.window.isVisible())
+
+    def test_clicking_a_song_starts_that_song_instead_of_reopening_the_album(self):
+        self.open()
+        album = next(row for row in self.window.collections if row.kind == "playlist")
+        self.controller.play_collection(album, "default", QRect())
+        self.player.play_queue((self.song,))
+        self.player.track = replace(self.player.track, position_seconds=41, is_playing=True)
+        self.controller.return_from_music_surface()
+        chosen = OnlineSong("netease", "picked", "Picked")
+        song = controller_tests.LibraryCollection(
+            "song:netease:picked", "song", chosen.title, "", song=chosen)
+        self.window.set_collections((song,))
+        self.controller.play_collection(song, "default", QRect())
+        self.assertEqual(self.player.calls[-1], ("queue", (chosen,)))
+        self.assertEqual(self.player.track.track_id, "owned:netease:picked")
+
     def test_replaced_queue_invalidates_same_collection_identity(self):
         self.open()
         row = self.window.collections[0]

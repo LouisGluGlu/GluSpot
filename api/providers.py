@@ -884,8 +884,146 @@ class PlaybackSourceProvider:
                         is_playing=True,
                         source_app_id=str(getattr(pin, "app_id", "") or data.track.source_app_id),
                     ))
+            if pin is not None:
+                data = self._apply_external_playback_clock(data, pin)
             return data
         return empty_visual_data("程序内播放", "登录后选择歌单", "GluSpot")
+
+    @staticmethod
+    def _clock_seconds(value):
+        """Seconds from a SMTC TimeSpan, without turning a missing read into a playhead."""
+        if value is None:
+            return 0.0
+        total = getattr(value, "total_seconds", None)
+        try:
+            if callable(total):
+                number = float(total())
+            else:
+                ticks = getattr(value, "duration", None)
+                if ticks is not None and not callable(ticks):
+                    number = float(ticks) / 10_000_000.0
+                else:
+                    number = float(value)
+                    if type(value) is int:
+                        number /= 10_000_000.0
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(number) or number < 0:
+            return None
+        return number
+
+    @staticmethod
+    def _clock_is_playing(playback):
+        try:
+            status = getattr(playback, "playback_status", None)
+        except Exception:
+            return None
+        value = getattr(status, "value", status)
+        if isinstance(value, bool):
+            return None
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return number == 4
+
+    def _smtc_playback_clock(self, session, now):
+        if session is None or not callable(getattr(session, "get_timeline_properties", None)):
+            return None
+        try:
+            timeline = session.get_timeline_properties()
+            playback = session.get_playback_info() if callable(getattr(session, "get_playback_info", None)) else None
+        except Exception:
+            return None
+        position = self._clock_seconds(getattr(timeline, "position", None))
+        start = self._clock_seconds(getattr(timeline, "start_time", None))
+        end = self._clock_seconds(getattr(timeline, "end_time", None))
+        if position is None or start is None or end is None:
+            return None
+        duration = max(0.0, end - start)
+        if duration <= 0.0 and position <= 0.0:
+            return None
+        playing = self._clock_is_playing(playback)
+        if duration > 0.0:
+            position = min(duration, position)
+        return (position, duration, bool(playing), now)
+
+    def _cdp_playback_clock(self, pin, now):
+        """Reuse an already-ready NetEase progress sample. Never opens a channel."""
+        from api.capture.interruption import netease_match
+        if netease_match(str(getattr(pin, "app_id", "") or "")) is None:
+            return None
+        cdp = getattr(self.system, "_netease_cdp_session", None)
+        if cdp is None or not getattr(cdp, "ready", False):
+            return None
+        latest = getattr(cdp, "latest", None)
+        if not isinstance(latest, dict):
+            return None
+        try:
+            position = float(latest["position"])
+            duration = float(latest.get("duration") or 0.0)
+            received = float(latest.get("received_at") or 0.0)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if (not math.isfinite(position) or position < 0.0
+                or not math.isfinite(duration) or duration < 0.0
+                or (duration <= 0.0 and position <= 0.0)):
+            return None
+        playing = latest.get("playing")
+        if playing is not True and playing is not False:
+            playing = False
+        if playing and (received <= 0.0 or now - received > 2.5):
+            return None
+        if playing and received > 0.0:
+            position += max(0.0, now - received)
+        if duration > 0.0:
+            position = min(duration, position)
+        return (position, duration, bool(playing), now)
+
+    def _apply_external_playback_clock(self, data, pin):
+        """Follow the captured session clock, or withhold progress when it cannot be read."""
+        now = time.monotonic()
+        clock = self._cdp_playback_clock(pin, now) or self._smtc_playback_clock(getattr(pin, "session", None), now)
+        track = data.track
+        if clock is None:
+            if self._visual_progress_usable(track):
+                return data
+            return replace(data, track=replace(
+                track,
+                position_source="external-title-only",
+                position_confidence=0.0,
+                position_seconds=0.0,
+                duration_seconds=0.0,
+                position_sampled_at=0.0,
+                position_observed_seconds=None,
+            ))
+        position, duration, playing, sampled_at = clock
+        if duration <= 0.0:
+            duration = max(0.0, float(getattr(track, "duration_seconds", 0.0) or 0.0))
+        return replace(data, track=replace(
+            track,
+            position_seconds=position,
+            duration_seconds=duration,
+            is_playing=playing,
+            position_source="capture-model",
+            position_confidence=0.95,
+            position_sampled_at=sampled_at,
+            position_observed_seconds=position,
+        ))
+
+    @staticmethod
+    def _visual_progress_usable(track) -> bool:
+        source = str(getattr(track, "position_source", "") or "")
+        if source in {"", "none", "capture-unavailable", "external-title-only"}:
+            return False
+        try:
+            position = float(track.position_seconds)
+            duration = float(track.duration_seconds)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(position) or not math.isfinite(duration) or position < 0.0 or duration < 0.0:
+            return False
+        return duration > 0.5 or position > 0.05
 
     def get_audio_frame(self):
         # Owned music is analyzed from its own decoded PCM, never from external capture.
@@ -3564,7 +3702,13 @@ class WindowsMediaProvider:
                 sessions = list(self._manager.get_sessions() or [])
                 app_id = str(pinned.source_app_user_model_id)
                 matches = [s for s in sessions if str(s.source_app_user_model_id).casefold() == app_id.casefold()]
-                return pinned if len(matches) == 1 and same_session(matches[0], pinned) else None
+                if len(matches) != 1:
+                    return None
+                # A refreshed wrapper of the one pinned app is still that session.
+                # Two live sessions stay unresolved. The retained object is
+                # returned when native equality holds, so callers can keep it.
+                current = matches[0]
+                return pinned if same_session(current, pinned) else current
             except Exception:
                 return None
         if not _ensure_winsdk_loaded():
