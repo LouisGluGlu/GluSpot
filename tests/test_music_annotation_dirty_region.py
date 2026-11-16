@@ -16,7 +16,6 @@ class _AnnotationOwner(QWidget):
         self._music_windowed_preference = False
         self.music_intro_cleanup_enabled = False
         self.enable_dual_line_lyrics = True
-        self.music_surface_reading_strategy = "gold"
         self.track_title = "Annotation dirty region"
         self.artist = "Test singer"
         self.media_track_id = "annotation-dirty-region"

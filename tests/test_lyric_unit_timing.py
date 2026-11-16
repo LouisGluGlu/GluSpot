@@ -75,16 +75,26 @@ class TimedUnitReadingTests(unittest.TestCase):
 
     def test_explicit_slow_characters_group_only_the_trailing_three(self):
         units = (
+            Unit(9.6, 9.8, "我"),
+            Unit(9.8, 10.0, "们"),
             Unit(10.0, 10.4, "谁"),
             Unit(10.4, 10.8, "人"),
             Unit(10.8, 12.1, "都"),
             Unit(12.1, 13.5, "可"),
             Unit(13.5, 15.0, "以"),
         )
-        groups = explicit_slow_unit_groups("谁人都可以", units)
+        groups = explicit_slow_unit_groups("我们谁人都可以", units)
         self.assertEqual(len(groups), 1)
-        self.assertEqual((groups[0].start_offset, groups[0].end_offset), (2, 5))
+        self.assertEqual((groups[0].start_offset, groups[0].end_offset), (4, 7))
         self.assertEqual((groups[0].start_seconds, groups[0].end_seconds), (10.8, 15.0))
+
+    def test_held_note_is_long_for_its_line_not_just_over_the_floor(self):
+        # Every word of a slow line is long: twice the median is never reached.
+        slow = (Unit(0.0, 1.3, "谁"), Unit(1.3, 2.7, "都"), Unit(2.7, 4.2, "以"))
+        self.assertEqual(explicit_slow_unit_groups("谁都以", slow), ())
+        # 1.2 s is the floor even on a fast line.
+        fast = (Unit(0.0, 0.2, "一"), Unit(0.2, 0.4, "二"), Unit(0.4, 0.6, "三"), Unit(0.6, 1.7, "四"))
+        self.assertEqual(explicit_slow_unit_groups("一二三四", fast), ())
 
     def test_real_slow_latin_word_expands_one_timed_unit_into_a_five_letter_wave(self):
         units = (Unit(45.0, 50.0, "shine"),)
@@ -104,7 +114,7 @@ class TimedUnitReadingTests(unittest.TestCase):
         spaced = (Unit(45.0, 50.0, "shine "), Unit(50.0, 51.0, "on"))
         self.assertEqual(
             [(group.start_offset, group.end_offset) for group in explicit_slow_unit_groups("shine on", spaced)],
-            [(0, 5), (6, 8)],
+            [(0, 5)],
         )
         self.assertAlmostEqual(
             timed_highlight_wave_progress(explicit_slow_unit_groups("shine on", spaced)[0], 49.0),
@@ -125,27 +135,29 @@ class TimedUnitReadingTests(unittest.TestCase):
         self.assertEqual(groups[1].unit_ends, (4.5,) * len("goin'"))
         self.assertAlmostEqual(timed_highlight_wave_progress(groups[0], 1.5), 0.5)
 
-    def test_slow_contractions_use_fixed_eight_tenths_and_require_explicit_end(self):
+    def test_slow_contractions_use_the_held_floor_and_require_explicit_end(self):
         text = "I'm goin’"
-        units = (Unit(0.0, 0.799, "I'm "), Unit(0.799, None, "goin’"))
+        units = (Unit(0.0, 1.199, "I'm "), Unit(1.199, None, "goin’"))
         self.assertEqual(explicit_slow_unit_groups(text, units), ())
-        groups = explicit_slow_unit_groups(text, (Unit(0.0, 0.8, "I'm "), Unit(0.8, 1.6, "goin’")))
-        self.assertEqual([(group.start_offset, group.end_offset) for group in groups], [(0, 3), (4, 9)])
+        groups = explicit_slow_unit_groups(text, (Unit(0.0, 1.2, "I'm "), Unit(1.2, 2.4, "goin’")))
+        # Held neighbours split only by a space glow as one group.
+        self.assertEqual([(group.start_offset, group.end_offset) for group in groups], [(0, 9)])
 
     def test_old_threshold_argument_cannot_change_fixed_real_unit_highlight(self):
-        units = (Unit(0.0, 0.8, "shine"),)
+        units = (Unit(0.0, 1.2, "shine"),)
         for value in (0.1, 3.0, None, float("nan")):
             with self.subTest(value=value):
                 self.assertTrue(explicit_slow_unit_groups("shine", units, min_duration=value))
 
     def test_wave_respects_unequal_real_character_durations(self):
         units = (
-            Unit(10.0, 11.1, "都"), Unit(11.1, 13.2, "可"), Unit(13.2, 14.3, "以"),
+            Unit(9.2, 9.4, "我"), Unit(9.4, 9.6, "们"), Unit(9.6, 9.8, "一"), Unit(9.8, 10.0, "起"),
+            Unit(10.0, 11.2, "都"), Unit(11.2, 13.3, "可"), Unit(13.3, 14.5, "以"),
         )
-        group = explicit_slow_unit_groups("都可以", units)[0]
-        self.assertAlmostEqual(timed_highlight_wave_progress(group, 11.1), 1 / 3)
-        self.assertAlmostEqual(timed_highlight_wave_progress(group, 12.15), 0.5)
-        self.assertAlmostEqual(timed_highlight_wave_progress(group, 13.2), 2 / 3)
+        group = explicit_slow_unit_groups("我们一起都可以", units)[0]
+        self.assertAlmostEqual(timed_highlight_wave_progress(group, 11.2), 1 / 3)
+        self.assertAlmostEqual(timed_highlight_wave_progress(group, 12.25), 0.5)
+        self.assertAlmostEqual(timed_highlight_wave_progress(group, 13.3), 2 / 3)
 
     def test_unknown_final_end_can_read_but_never_claims_explicit_long_highlight(self):
         units = (Unit(1.0, None, "一"), Unit(2.0, None, "二"))

@@ -569,6 +569,7 @@ class AudioReactiveRuntime:
         now: float,
         reactive_enabled: bool | None = None,
         live_frame_reader: Callable[[], object | None] | None = None,
+        refresh_live_frame: bool = False,
         live_audio_probe: Callable[[], bool] | None = None,
         audio_frames: Sequence[object] | None = None,
         audio_started_at: object = None,
@@ -583,16 +584,19 @@ class AudioReactiveRuntime:
             cached_bands=self._input_cached_bands,
             sampled_at=self._input_sampled_at,
         )
+        # Sea spectrum/vocal features need the latest capture even while the
+        # shared three-band sample stays cached. Keep provider reads here and
+        # reuse this frame when the bands also need sampling.
+        live_frame = None
+        if (request_plan.request_live_frame or (enabled and refresh_live_frame)) and live_frame_reader is not None:
+            try:
+                live_frame = live_frame_reader()
+            except Exception:
+                live_frame = None
         if request_plan.cached_bands is not None:
             bands = request_plan.cached_bands
             band_source = request_plan.source
         else:
-            live_frame = None
-            if request_plan.request_live_frame and live_frame_reader is not None:
-                try:
-                    live_frame = live_frame_reader()
-                except Exception:
-                    live_frame = None
             sample_plan = audio_band_sample_plan(
                 now=now_value,
                 reactive_enabled=request_plan.reactive_enabled,

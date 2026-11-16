@@ -14,7 +14,7 @@ class BrandingTests(unittest.TestCase):
         from local.branding import APP_ICON_PATH, APP_NAME, APP_VERSION, TRAY_ICON_PATH
 
         self.assertEqual(APP_NAME, "GluSpot")
-        self.assertEqual(APP_VERSION, "6.418")
+        self.assertEqual(APP_VERSION, "6.50")
         self.assertEqual(APP_ICON_PATH.name, "gluspot-glu.ico")
         self.assertEqual(TRAY_ICON_PATH, APP_ICON_PATH)
         self.assertTrue(APP_ICON_PATH.exists())
@@ -55,7 +55,7 @@ class BrandingTests(unittest.TestCase):
         self.assertIn('"gluspot-glu.ico"', (root / "GluSpot.spec").read_text(encoding="utf-8"))
 
     def test_windows_build_and_documented_version_match_runtime_branding(self):
-        from local.branding import APP_VERSION
+        from local.branding import APP_FILE_VERSION, APP_VERSION
 
         root = Path(__file__).resolve().parents[1]
         spec = (root / "GluSpot.spec").read_text(encoding="utf-8")
@@ -63,11 +63,14 @@ class BrandingTests(unittest.TestCase):
         build = (root / "build-exe.bat").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
         self.assertEqual(re.search(r'APP_VERSION = "([^"]+)"', spec).group(1), APP_VERSION)
-        expected_tuple = tuple(int(part) for part in APP_VERSION.split(".")) + (0, 0)
+        expected_tuple = tuple(int(part) for part in APP_FILE_VERSION.split("."))
+        # Part-by-part comparison must place this release after 6.417.
+        self.assertGreater(expected_tuple, (6, 417, 0, 0))
+        self.assertEqual(float(APP_VERSION), expected_tuple[0] + expected_tuple[1] / 1000)
         self.assertEqual(tuple(int(part.strip()) for part in re.search(r"filevers=\(([^)]+)\)", version).group(1).split(",")), expected_tuple)
         self.assertEqual(tuple(int(part.strip()) for part in re.search(r"prodvers=\(([^)]+)\)", version).group(1).split(",")), expected_tuple)
-        self.assertIn(f"StringStruct('FileVersion', '{APP_VERSION}.0.0')", version)
-        self.assertIn(f"StringStruct('ProductVersion', '{APP_VERSION}.0.0')", version)
+        self.assertIn(f"StringStruct('FileVersion', '{APP_FILE_VERSION}')", version)
+        self.assertIn(f"StringStruct('ProductVersion', '{APP_VERSION}')", version)
         self.assertIn(f"echo GluSpot {APP_VERSION} build is ready:", build)
         self.assertIn(f"release\\GluSpot-{APP_VERSION}\\GluSpot.exe", build)
         self.assertIn(f"Current test-build version: `{APP_VERSION}`.", readme)

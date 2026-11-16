@@ -24,6 +24,13 @@ credentials/
 id_rsa
 id_ed25519
 
+# Local glass reference material and verification evidence.
+.refactor/glass/
+
+# Apple Music companion build output. The WebView profile never belongs here.
+native/apple_music_companion/bin/
+native/apple_music_companion/obj/
+
 # Directory-local runtime state, optional private QA screenshots and databases.
 /GluSpot/
 /DynamicIsland/

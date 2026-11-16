@@ -83,7 +83,19 @@ def media_position_update_plan(
         )
     )
 
-    if not bool(track_changed) and bool(incoming_is_playing) and frontstage:
+    if source in {"capture-unavailable", "external-title-only"}:
+        position = raw_position if track_changed else previous_position
+        reason = "capture_unavailable_frozen" if source == "capture-unavailable" else "external_title_only"
+    elif source == "capture-model":
+        # The opt-in model already interpolates and filters drift. Keep 300 ms
+        # of lyric hysteresis without delaying real seeks or pause boundaries.
+        if (not bool(track_changed) and bool(incoming_is_playing)
+                and 0.0 < previous_position - raw_position <= 0.3):
+            position = previous_position
+            reason = "capture_lyric_hysteresis"
+        else:
+            reason = "capture_model"
+    elif not bool(track_changed) and bool(incoming_is_playing) and frontstage:
         if raw_position > 0.0 or looks_like_seek_to_start(raw_position, previous_position, previous_raw):
             position = raw_position
             reason = "frontstage_raw"

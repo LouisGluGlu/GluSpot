@@ -1,25 +1,27 @@
 """Existing frameless music pages share the player's ordinary resize bounds."""
 from PySide6.QtCore import QPoint, QRect, Qt
+from local.music_resize_hit_test import NativeMusicResizeMixin, resize_cursor, resize_edges
 
 
-class MusicPageResizeMixin:
+class MusicPageResizeMixin(NativeMusicResizeMixin):
     """Native edge resize with a bounded fallback for unsupported platforms."""
 
     def _page_resize_enabled(self):
         return getattr(self, "page", "sources") == "sources"
 
+    def _native_resize_enabled(self):
+        return self._page_resize_enabled() and super()._native_resize_enabled()
+
     def _page_resize_edges(self, position):
         if not self._page_resize_enabled():
             return Qt.Edge(0)
+        names = resize_edges(position.x(), position.y(), self.width(), self.height(),
+                             dpr=self.devicePixelRatioF())
         edges = Qt.Edge(0)
-        if position.x() <= 8:
-            edges |= Qt.Edge.LeftEdge
-        elif position.x() >= self.width() - 9:
-            edges |= Qt.Edge.RightEdge
-        if position.y() <= 8:
-            edges |= Qt.Edge.TopEdge
-        elif position.y() >= self.height() - 9:
-            edges |= Qt.Edge.BottomEdge
+        for name, edge in (("left", Qt.Edge.LeftEdge), ("right", Qt.Edge.RightEdge),
+                           ("top", Qt.Edge.TopEdge), ("bottom", Qt.Edge.BottomEdge)):
+            if name in names:
+                edges |= edge
         return edges
 
     def _begin_page_resize(self, event):
@@ -53,15 +55,10 @@ class MusicPageResizeMixin:
             return True
         if event.buttons() == Qt.MouseButton.NoButton:
             edges = self._page_resize_edges(event.position())
-            horizontal = bool(edges & (Qt.Edge.LeftEdge | Qt.Edge.RightEdge))
-            vertical = bool(edges & (Qt.Edge.TopEdge | Qt.Edge.BottomEdge))
-            if horizontal and vertical:
-                forward = bool(edges & Qt.Edge.LeftEdge) == bool(edges & Qt.Edge.TopEdge)
-                cursor = Qt.CursorShape.SizeFDiagCursor if forward else Qt.CursorShape.SizeBDiagCursor
-            else:
-                cursor = (Qt.CursorShape.SizeHorCursor if horizontal else
-                          Qt.CursorShape.SizeVerCursor if vertical else Qt.CursorShape.ArrowCursor)
-            self.setCursor(cursor)
+            names = {name for name, edge in (("left", Qt.Edge.LeftEdge), ("right", Qt.Edge.RightEdge),
+                                            ("top", Qt.Edge.TopEdge), ("bottom", Qt.Edge.BottomEdge))
+                     if edges & edge}
+            self.setCursor(resize_cursor(names))
         return False
 
     def _end_page_resize(self):

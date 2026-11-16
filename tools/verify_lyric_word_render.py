@@ -60,7 +60,6 @@ class _Owner(QWidget):
         self._music_windowed_preference = True
         self.music_intro_cleanup_enabled = True
         self.enable_dual_line_lyrics = True
-        self.music_surface_reading_strategy = "gold"
         self.track_title, self.artist, self.album_title = title, artist, "Offline render evidence"
         self.media_track_id = match.source
         self.media_is_playing = True
@@ -169,9 +168,9 @@ def _island(owner, style):
     visual.lyric_flow_style = style
     visual._u = float
     visual.font_shrink_scale = 1.
+    visual.scroll_phase = 0.
     visual.high_quality_font_rendering = False
     visual.music_ambience_style = "sea_level"
-    visual.music_surface_reading_strategy = owner.music_surface_reading_strategy
     visual.location_mode = "free"
     visual.top_notch_height_mode = "standard"
     visual.lyric_font_size = 18
@@ -255,17 +254,13 @@ def main():
             matches = _generic_matches(store)
             if args.real_dir:
                 matches.extend(_real_matches(store, args.real_dir.resolve()))
-            cases = [(match, title, artist, provenance, strategy)
-                     for match, title, artist, provenance in matches
-                     for strategy in ("gold", "low_perception")]
-            for dataset_index, (match, title, artist, provenance, strategy) in enumerate(cases):
+            for dataset_index, (match, title, artist, provenance) in enumerate(matches):
                 source_before = _digest(match)
-                record = {"source": match.source, "input": provenance, "strategy": strategy,
+                record = {"source": match.source, "input": provenance, "strategy": "low_perception",
                           "quality": asdict(lyric_timing_quality(match.timed_lyrics)),
                           "source_rows": _row_summary(match.timed_lyrics), "surfaces": [], "islands": []}
                 datasets.append(record)
                 owner = _Owner(match, title, artist)
-                owner.music_surface_reading_strategy = strategy
                 surface = MusicSurfaceWindow(owner)
                 surface.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
                 for timer in surface.findChildren(QTimer):
@@ -355,16 +350,15 @@ def main():
                                             check("cold emphasis retains the shared partial word front",
                                                   call.get("real_progresses") is not None
                                                   and any(0. < front < 1. for front in call["real_progresses"]))
-                                if strategy == "low_perception":
-                                    check("low perception never uses the retired half-second block wipe",
-                                          not any(call["method"] == "_draw_low_perception_block_wipe" for call in paint_trace))
-                                    if match.source == "fixture:line-many-words" and label == "estimated-middle":
-                                        check("low-perception multiword midpoint reaches partial actual ink fronts",
-                                              any(call["method"] == "_paint_lifted_run" and 0. < call["progress"] < 1.
-                                                  for call in paint_trace))
-                                        check("low-perception multiword midpoint maps timed units into actual wrapped painter",
-                                              any(call["method"] == "_paint_wrapped_lifted_lyric" and call.get("real_progresses") is not None
-                                                  for call in paint_trace))
+                                check("low perception never uses the retired half-second block wipe",
+                                      not any(call["method"] == "_draw_low_perception_block_wipe" for call in paint_trace))
+                                if match.source == "fixture:line-many-words" and label == "estimated-middle":
+                                    check("low-perception multiword midpoint reaches partial actual ink fronts",
+                                          any(call["method"] == "_paint_lifted_run" and 0. < call["progress"] < 1.
+                                              for call in paint_trace))
+                                    check("low-perception multiword midpoint maps timed units into actual wrapped painter",
+                                          any(call["method"] == "_paint_wrapped_lifted_lyric" and call.get("real_progresses") is not None
+                                              for call in paint_trace))
                             _paused_image, paused_trace, _paused_paint = render(500.)
                             check("pause retains actual renderer clock/front after wall time advances",
                                   bool(trace) and paused_trace == trace)

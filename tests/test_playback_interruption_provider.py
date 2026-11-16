@@ -1,0 +1,905 @@
+"""Exercise real provider arbitration with fake native sessions and decoders."""
+import tests.isolate_appdata  # noqa: F401  # before product imports capture %APPDATA%
+
+import asyncio
+from dataclasses import replace
+import gc
+import logging
+import time
+from pathlib import Path
+from types import SimpleNamespace
+import tempfile
+import threading
+from unittest.mock import AsyncMock, patch
+
+from PySide6.QtWidgets import QApplication
+
+from api.lyrics import LocalLyricsStore, LyricsMatch
+from api.models import TimedLyricLine
+from api.online_music import OnlineSong, StreamInfo
+from api.providers import EmptyIslandDataProvider, PlaybackSourceProvider, WindowsMediaProvider, empty_visual_data
+from local.island_stack_visual import IslandStackVisual
+from local.media_position_pipeline import media_position_update_plan
+from local.music_library_search import LibraryProgress
+from local.owned_music_player import OwnedMusicPlayer
+from tests.capture_async import CaptureAsyncTestCase
+from tests.test_media_interruption import Manager, Session
+from tests.test_owned_playback import Tasks, ThreadRecordingPlayer
+
+
+class InterruptionProviderTests(CaptureAsyncTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.tasks = Tasks()
+        self.decoder = ThreadRecordingPlayer()
+        self.owned = OwnedMusicPlayer(SimpleNamespace(stream_url=lambda *_: None),
+            LocalLyricsStore(root=Path(self.temp.name)), player=self.decoder, audio=object(),
+            dj_player=ThreadRecordingPlayer(), dj_audio=object(), tasks=self.tasks,
+            artwork_tasks=Tasks(), prefetch_tasks=Tasks(), stream_cache=None)
+        self.settings = {'v2_owned_playback_enabled': True, 'v2_system_capture_enabled': False}
+        self.system = object.__new__(WindowsMediaProvider)
+        self.system._loop = asyncio.get_running_loop()
+        self.system._manager = Manager([])
+        self.system._music_cache_lock = threading.RLock()
+        self.system._music_cache_epoch = 0
+        self.system._refresh_future = None
+        self.system._last_data = None
+        self.system._netease_cdp_session = None
+        self.system._audio_route_controller = None
+        self.system.audio_analyzer = None
+        self.system._render_peak_meter = None
+        self.saved = []
+        self.system.settings_setter = lambda *args: self.saved.append(args)
+        self.provider = PlaybackSourceProvider(self.system, self.owned,
+            lambda key, default=None: self.settings.get(key, default))
+        self.signals = 0
+        def changed():
+            self.signals += 1
+        self.provider.sourceChanged.connect(changed)
+        self.song = OnlineSong('netease', 'one', 'Owned song', duration_seconds=120)
+
+    async def asyncTearDown(self):
+        self.provider.set_playback_interruption_enabled(False)
+        await self.provider._close_interruption(self.provider._interruption_generation)
+        self.provider._owned_audio_bridge.close()
+        self.owned.close()
+        await self.flush()
+        self.temp.cleanup()
+        gc.collect()
+
+    async def flush(self):
+        # Explicit loop turns, no wall-clock sleeps or real player/network.
+        for _ in range(24):
+            await asyncio.sleep(0)
+
+    async def test_pinned_external_title_shows_when_capture_is_still_empty(self):
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="cloudmusic.exe")
+        data = self.provider.get_visual_data()
+        self.assertEqual(data.track.title, "外部歌曲")
+        self.assertEqual(data.track.artist, "外部歌手")
+        self.assertTrue(data.track.is_playing)
+        self.provider._interruption_pin = None
+        self.assertNotEqual(self.provider.get_visual_data().track.title, "外部歌曲")
+        self.assertEqual(data.track.position_source, "external-title-only")
+        self.assertEqual(data.track.position_confidence, 0.0)
+
+    async def test_playback_poll_keeps_one_anchor_and_a_jump_starts_another(self):
+        session = Session("spotify.exe", title="外部歌曲", artist="外部歌手")
+        session.position = 30.0
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=session.position, start_time=0.0, end_time=200.0)
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="spotify.exe", session=session)
+        with patch("api.providers.time.monotonic", return_value=1000.0):
+            first = self.provider.get_visual_data().track
+        session.position = 30.5
+        with patch("api.providers.time.monotonic", return_value=1000.5):
+            followed = self.provider.get_visual_data().track
+        self.assertEqual(followed.position_sampled_at, first.position_sampled_at)
+        self.assertGreater(followed.position_seconds, 30.4)
+        self.assertTrue(followed.is_playing)
+        session.position = 80.0
+        with patch("api.providers.time.monotonic", return_value=1001.0):
+            jumped = self.provider.get_visual_data().track
+        self.assertNotEqual(jumped.position_sampled_at, first.position_sampled_at)
+        self.assertAlmostEqual(jumped.position_observed_seconds, 80.0)
+
+    async def test_unreadable_playback_status_does_not_force_the_pause_icon(self):
+        session = Session("spotify.exe", title="外部歌曲", artist="外部歌手")
+        session.position = 12.0
+        session.status = object()
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=session.position, start_time=0.0, end_time=200.0)
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="spotify.exe", session=session)
+        track = self.provider.get_visual_data().track
+        self.assertTrue(track.is_playing)
+        self.assertEqual(track.position_source, "capture-model")
+
+    async def test_captured_title_publishes_resolved_lyrics_without_another_refresh(self):
+        line = TimedLyricLine(1.5, "第一句")
+
+        def ensure(*_args, **_kwargs):
+            return LyricsMatch((line,), ("第一句",), "test"), False, False
+
+        self.system.lyrics_store = object()
+        self.system._ensure_lyrics_lookup_started = ensure
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="cloudmusic.exe", session=None)
+        track = self.provider.get_visual_data().track
+        self.assertEqual(track.title, "外部歌曲")
+        self.assertEqual(track.timed_lyrics[0].text, "第一句")
+        self.assertEqual(track.lyrics, ("第一句",))
+
+    async def test_pinned_session_clock_follows_smtc_and_withholds_a_missing_read(self):
+        session = Session("spotify.exe", title="外部歌曲", artist="外部歌手")
+        session.position = 36.0
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=session.position, start_time=0.0, end_time=200.0)
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="spotify.exe", session=session)
+        first = self.provider.get_visual_data().track
+        self.assertEqual(first.position_source, "capture-model")
+        self.assertAlmostEqual(first.position_seconds, 36.0)
+        self.assertAlmostEqual(first.duration_seconds, 200.0)
+        self.assertTrue(first.is_playing)
+        self.assertEqual(first.position_observed_seconds, first.position_seconds)
+        session.position = 48.5
+        session.playing = False
+        second = self.provider.get_visual_data().track
+        self.assertAlmostEqual(second.position_seconds, 48.5)
+        self.assertFalse(second.is_playing)
+        session.get_timeline_properties = lambda: (_ for _ in ()).throw(RuntimeError("timeline"))
+        withheld = self.provider.get_visual_data().track
+        self.assertEqual(withheld.title, "外部歌曲")
+        self.assertEqual(withheld.position_source, "external-title-only")
+        self.assertEqual(withheld.position_seconds, 0.0)
+        self.assertEqual(withheld.duration_seconds, 0.0)
+        self.assertEqual(withheld.position_confidence, 0.0)
+        self.assertFalse(LibraryProgress.progress_available(withheld))
+        frozen = media_position_update_plan(
+            track_changed=False, incoming_is_playing=True, incoming_position_seconds=0.0,
+            incoming_position_source="external-title-only", incoming_position_confidence=0.0,
+            incoming_position_interactive=False, incoming_source_foreground=False,
+            previous_position_seconds=48.5, previous_sync_at=0.0,
+            previous_raw_position_seconds=48.5, previous_raw_position_source="capture-model", now=2.0)
+        self.assertEqual(frozen.reason, "external_title_only")
+        self.assertAlmostEqual(frozen.position_seconds, 48.5)
+
+    async def test_ui_thread_projects_cached_smtc_without_blocking_on_the_read(self):
+        import time
+        session = Session("spotify.exe", title="外部歌曲", artist="外部歌手")
+        session.position = 36.0
+
+        def slow_timeline():
+            time.sleep(0.2)
+            return SimpleNamespace(position=session.position, start_time=0.0, end_time=200.0)
+
+        session.get_timeline_properties = slow_timeline
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="spotify.exe", session=session)
+        lines = []
+
+        class Collect(logging.Handler):
+            def emit(self, record):
+                lines.append(record.getMessage())
+
+        handler = Collect()
+        logger = logging.getLogger("GluSpot.capture.clock")
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        holder = {}
+
+        def ui_call():
+            mark = time.perf_counter()
+            holder["track"] = self.provider.get_visual_data().track
+            holder["elapsed"] = time.perf_counter() - mark
+            holder["thread"] = threading.get_ident()
+
+        try:
+            worker = threading.Thread(target=ui_call)
+            worker.start()
+            worker.join(1.0)
+            self.assertFalse(worker.is_alive())
+            self.assertLess(holder["elapsed"], 0.1)
+            self.assertEqual(holder["track"].position_source, "external-title-only")
+            self.assertNotEqual(holder["thread"], threading.get_ident())
+            await asyncio.wait_for(asyncio.wrap_future(self.provider._external_clock_task), 1.0)
+        finally:
+            logger.removeHandler(handler)
+        self.assertTrue(any(line.startswith("source=smtc ") and "blocked=0" in line and "ok=1" in line for line in lines))
+        elapsed = next(float(part.split("=", 1)[1]) for line in lines if line.startswith("source=smtc ") for part in line.split() if part.startswith("elapsed_ms="))
+        self.assertGreater(elapsed, 100.0)
+        self.assertEqual(self.provider._external_clock_timings[-1][4], threading.get_ident())
+        reads = []
+        session.get_timeline_properties = lambda: reads.append(1) or SimpleNamespace(
+            position=40.0, start_time=0.0, end_time=200.0)
+        again = {}
+
+        def second_call():
+            again["track"] = self.provider.get_visual_data().track
+
+        follow = threading.Thread(target=second_call)
+        follow.start()
+        follow.join(1.0)
+        self.assertFalse(follow.is_alive())
+        self.assertEqual(reads, [])
+        self.assertEqual(again["track"].position_source, "capture-model")
+        self.assertGreater(again["track"].position_seconds, 36.0)
+
+    async def test_track_change_resets_the_clock_and_lyrics_keep_advancing(self):
+        state = {"title": "歌曲甲", "position": 30.0, "now": 1000.0}
+
+        def visual():
+            base = empty_visual_data()
+            return replace(base, track=replace(
+                base.track, title=state["title"], artist="歌手", position_source="none",
+                timed_lyrics=((0.0, "第一句"), (3.0, "第二句")), lyrics=("第一句", "第二句"),
+            ))
+
+        session = Session("spotify.exe", title="歌曲甲", artist="歌手")
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=state["position"], start_time=0.0, end_time=200.0)
+        self.system.get_visual_data = visual
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("歌曲甲", "歌手", ""), app_id="spotify.exe", session=session)
+        with patch("api.providers.time.monotonic", lambda: state["now"]):
+            opening = self.provider.get_visual_data().track
+            self.assertAlmostEqual(opening.position_seconds, 30.0, delta=0.05)
+            state["title"] = "歌曲乙"
+            state["position"] = 1.0
+            state["now"] = 1001.0
+            reset = self.provider.get_visual_data().track
+            self.assertLess(reset.position_seconds, 2.0)
+            self.assertAlmostEqual(reset.position_observed_seconds, 1.0)
+            anchor = reset.position_sampled_at
+            state["now"] = 1004.2
+            advanced = self.provider.get_visual_data().track
+        self.assertEqual(advanced.position_sampled_at, anchor)
+        self.assertGreater(advanced.position_seconds, 3.0)
+        self.assertAlmostEqual(advanced.position_observed_seconds, 1.0)
+
+        def lyric_index(track):
+            island = IslandStackVisual(EmptyIslandDataProvider())
+            try:
+                island._apply_visual_data(replace(empty_visual_data(), track=track))
+                return island.lyric_index
+            finally:
+                island.timer.stop()
+
+        self.assertEqual(lyric_index(reset), 0)
+        self.assertEqual(lyric_index(advanced), 1)
+
+    async def test_netease_pin_uses_ready_cdp_progress_without_opening_a_channel(self):
+        session = Session("cloudmusic.exe", title="云端歌曲", artist="歌手")
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=9.0, start_time=0.0, end_time=180.0)
+        now = __import__("time").monotonic()
+        cdp = SimpleNamespace(
+            ready=True,
+            latest={"position": 42.0, "duration": 180.0, "playing": True, "received_at": now},
+            start=AsyncMock(side_effect=AssertionError("cdp must stay closed")),
+        )
+        self.system._netease_cdp_session = cdp
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("云端歌曲", "歌手", ""), app_id="cloudmusic.exe", session=session)
+        track = self.provider.get_visual_data().track
+        self.assertEqual(track.position_source, "capture-model")
+        self.assertAlmostEqual(track.position_seconds, 42.0, delta=0.05)
+        self.assertAlmostEqual(track.duration_seconds, 180.0)
+        self.assertTrue(track.is_playing)
+        cdp.start.assert_not_called()
+        cdp.latest = {"position": 42.0, "duration": 180.0, "playing": True, "received_at": now - 10.0}
+        fallback = self.provider.get_visual_data().track
+        self.assertAlmostEqual(fallback.position_seconds, 9.0)
+        cdp.ready = False
+        session.get_timeline_properties = lambda: SimpleNamespace(
+            position=0.0, start_time=0.0, end_time=0.0)
+        missing = self.provider.get_visual_data().track
+        self.assertEqual(missing.position_source, "external-title-only")
+        self.assertEqual(missing.position_seconds, 0.0)
+
+    async def enable(self, sessions):
+        self.system._manager.sessions = sessions
+        self.assertTrue(self.provider.set_playback_interruption_enabled(True))
+        await self.flush()
+        self.assertIsNotNone(self.provider._interruption_observer)
+
+    async def start_owned(self):
+        self.assertTrue(self.owned.play_queue((self.song,)))
+        token = next(t for t, _ in reversed(self.tasks.jobs) if t[0] == 'stream')
+        self.tasks.completed.emit(token, StreamInfo('netease', 'one', 'https://example.test/one', True), None)
+        await self.flush()
+
+    async def collect(self):
+        await self.provider._interruption_observer.collect_once()
+        await self.flush()
+
+    def owned_pauses(self):
+        return sum(name == 'pause' for name, _ in self.decoder.calls)
+
+    async def test_fresh_wrappers_do_not_drop_the_external_pause(self):
+        native = Session('cloudmusic.exe')
+
+        class Wrap:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        class Refreshing:
+            def get_sessions(self):
+                return [Wrap(native)]
+
+            def add_sessions_changed(self, callback):
+                return callback
+
+            def remove_sessions_changed(self, token):
+                return None
+
+        self.system._manager = Refreshing()
+        with _capture_interruption_log() as lines:
+            self.assertTrue(self.provider.set_playback_interruption_enabled(True))
+            await self.flush()
+            for _ in range(3):
+                await self.provider._interruption_observer.collect_once()
+            await self.start_owned()
+        self.assertEqual(native.pauses, 1)
+        self.assertEqual(self.owned_pauses(), 0)
+        self.assertFalse(any('revalidate-stale' in line or 'reason=removed' in line for line in lines))
+        self.assertEqual(sum('reason=baseline' in line for line in lines), 1)
+
+    async def test_in_app_play_does_not_pause_the_captured_session(self):
+        music = Session('cloudmusic.exe', playing=False)
+        music.try_toggle_play_pause_async = AsyncMock(side_effect=AssertionError('toggle would pause the capture'))
+        await self.enable([music])
+        await self.start_owned()
+        await self.collect()
+        music.playing = True
+        music.pauses = 0
+        await self.collect()
+        self.assertIs(self.provider._interruption_pin.session, music)
+        self.assertEqual(self.owned_pauses(), 1)
+        paused_before = music.pauses
+        self.assertTrue(self.provider.send_playback_command('toggle_play_pause'))
+        await self.flush()
+        self.assertEqual(music.pauses, paused_before)
+        self.assertEqual(self.owned_pauses(), 1)
+        self.assertGreater(self.provider._interruption_cooldown_until, time.monotonic())
+
+    async def test_stale_cdp_supplement_cannot_pause_after_in_app_play(self):
+        music = Session('cloudmusic.exe', playing=False)
+        await self.enable([music])
+        await self.start_owned()
+        await self.collect()
+        music.playing = True
+        await self.collect()
+        pin = self.provider._interruption_pin
+        self.assertIs(pin.session, music)
+        old_intent = self.provider._interruption_intent
+        cdp = SimpleNamespace(ready=True, generation=3, latest={'trackId': 'native'},
+            pause=AsyncMock(return_value=True), pause_diagnostic='paused')
+        self.system._netease_cdp_session = cdp
+        self.system._last_data = empty_visual_data()
+        self.system._last_data = replace(self.system._last_data, track=replace(
+            self.system._last_data.track, title=music.title, artist=music.artist,
+            source_app_id='cloudmusic.exe', track_id='captured'))
+        self.system._capture_runtime = SimpleNamespace(
+            source=SimpleNamespace(session=music),
+            _cef_source=SimpleNamespace(session=cdp, native_track_id='native', generation=3, fresh=True),
+            identity=('cloudmusic.exe', 'captured'))
+        self.assertTrue(self.provider.send_playback_command('toggle_play_pause'))
+        self.assertNotEqual(self.provider._interruption_intent, old_intent)
+        observer = self.provider._interruption_observer
+        sent = await self.provider._send_netease_cdp_pause(
+            pin, self.provider._interruption_generation, old_intent,
+            lambda: False, observer, 'cloudmusic', supplement=True)
+        self.assertFalse(sent)
+        cdp.pause.assert_not_called()
+
+    async def test_own_app_session_is_not_an_earlier_external(self):
+        own = Session(r'C:\Program\GluSpot.exe', title='Library song', artist='GluSpot')
+        music = Session('cloudmusic.exe')
+        await self.enable([own, music])
+        await self.start_owned()
+        self.assertEqual(own.pauses, 0)
+        self.assertEqual(music.pauses, 1)
+        apps = [str(item.app_id).casefold() for item in self.provider._interruption_observer.snapshots()]
+        self.assertFalse(any(app.endswith('gluspot.exe') or app == 'gluspot' for app in apps))
+
+    async def test_library_start_pauses_browser_music_but_never_video_or_unknown(self):
+        music = Session('chrome.exe')
+        video = Session('edge.exe', media_type=2)
+        unknown = Session('unknown.exe', media_type=None, title='', artist='')
+        await self.enable([music, video, unknown])
+        await self.start_owned()
+        self.assertEqual((music.pauses, video.pauses, unknown.pauses), (1, 0, 0))
+        self.assertEqual(self.owned_pauses(), 0)
+        self.assertTrue(self.provider._owned_active())
+        self.assertEqual(self.saved, [])
+
+    async def test_later_browser_music_pauses_library_and_pins_without_settings_writes(self):
+        music = Session(playing=False)
+        await self.enable([music])
+        await self.start_owned()
+        await self.collect()  # A non-playing observation after owned's start.
+        queue, position = self.owned.queue, self.owned.track.position_seconds
+        music.playing = True
+        await self.collect()
+        self.assertEqual(self.owned_pauses(), 1)
+        self.assertFalse(self.owned.interruption_playing())
+        self.assertIs(self.provider._interruption_pin.session, music)
+        self.assertIs(await self.system._get_session(), music)
+        self.assertFalse(self.provider._owned_active())
+        self.assertTrue(self.provider._system_enabled())
+        self.assertFalse(self.provider._owned_output_mode())
+        self.assertIsNone(self.provider.get_owned_playback_mode())
+        self.assertEqual(self.provider.get_owned_playback_queue(), (None, -1, ()))
+        self.assertEqual((self.owned.queue, self.owned.track.position_seconds), (queue, position))
+        self.assertEqual(self.saved, [])
+        self.assertFalse(self.settings['v2_system_capture_enabled'])
+
+    async def test_video_unknown_and_reserved_game_never_interrupt_library(self):
+        video = Session('video.exe', playing=False, media_type=2)
+        unknown = Session('unknown.exe', playing=False, media_type=None, title='', artist='')
+        await self.enable([video, unknown])
+        await self.start_owned()
+        await self.collect()
+        video.playing = unknown.playing = True
+        await self.collect()
+        self.assertEqual(self.owned_pauses(), 0)
+        self.assertEqual((video.pauses, unknown.pauses), (0, 0))
+        self.assertIsNone(self.provider._interruption_pin)
+
+    async def test_toggle_on_with_both_playing_pauses_external_when_order_is_unknown(self):
+        await self.start_owned()
+        music = Session()
+        video = Session('video.exe', media_type=2)
+        await self.enable([music, video])
+        self.assertEqual((music.pauses, video.pauses, self.owned_pauses()), (1, 0, 0))
+        self.assertTrue(self.owned.interruption_playing())
+        self.assertIsNone(self.provider._interruption_pin)
+
+    async def test_enabled_focus_pauses_library_only_when_external_start_is_later(self):
+        await self.start_owned()
+        music = Session()
+        await self.enable([music])
+        self.assertEqual(music.pauses, 1)
+        music.playing = True
+        music.pauses = 0
+        self.owned._playback_running_since = 10.0
+        observer = self.provider._interruption_observer
+        snap = observer.snapshots()[0]
+        observer._bindings[snap.binding_id].observation = replace(snap, playing=True, started_at=30.0)
+        self.provider._interruption_cooldown_until = 0
+        await self.provider._arbitrate_enabled_focus(self.provider._interruption_generation)
+        self.assertEqual((music.pauses, self.owned_pauses()), (0, 1))
+        self.assertIs(self.provider._interruption_pin.session, music)
+
+    async def test_off_does_no_monitor_reads_native_calls_or_new_owned_reads(self):
+        music = Session()
+        self.system._manager.sessions = [music]
+        with patch('api.capture.interruption.SmtcInterruptionObserver', side_effect=AssertionError('OFF monitor')):
+            with patch.object(self.owned, 'interruption_playing', side_effect=AssertionError('OFF owned read')):
+                self.assertTrue(self.provider.set_playback_interruption_enabled(False))
+                await self.start_owned()
+                self.owned.send_playback_command('toggle_play_pause')
+                self.owned.send_playback_command('toggle_play_pause')
+                await self.flush()
+        self.assertEqual((music.reads, music.pauses), (0, 0))
+        self.assertEqual(music.events, {})
+        self.assertIsNone(self.provider._interruption_observer)
+        self.assertEqual(self.saved, [])
+
+    async def test_pause_ack_repetition_and_metadata_do_not_ping_pong(self):
+        music = Session()
+        await self.enable([music])
+        await self.start_owned()
+        self.assertEqual(music.pauses, 1)
+        for _ in range(3):
+            music.title = 'Updated title'
+            await self.collect()
+            self.owned.changed.emit()
+        self.assertEqual((music.pauses, self.owned_pauses()), (1, 0))
+        self.assertTrue(self.owned.interruption_playing())
+
+    async def test_real_resume_after_own_pause_retained_through_cooldown(self):
+        music = Session()
+        await self.enable([music])
+        await self.start_owned()
+        self.assertIs(self.provider._interruption_observer.snapshots()[0].playing, False)
+        music.playing = True
+        await self.collect()
+        self.assertEqual(self.owned_pauses(), 0)
+        self.assertIsNotNone(self.provider._interruption_candidate)
+        # Advance the policy deadline without sleeping a real second.
+        self.provider._interruption_cooldown_until = 0
+        task = self.provider._interruption_yield_task
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await self.provider._yield_to_external()
+        self.assertEqual(self.owned_pauses(), 1)
+        self.assertEqual(music.pauses, 1)
+
+    async def test_disable_invalidates_queued_pause_and_releases_temporary_route(self):
+        music = Session(playing=False)
+        await self.enable([music])
+        await self.start_owned()
+        await self.collect()
+        music.playing = True
+        await self.provider._interruption_observer.collect_once()
+        self.provider.set_playback_interruption_enabled(False)
+        await self.flush()
+        self.assertEqual(self.owned_pauses(), 0)
+        self.assertIsNone(self.provider._interruption_pin)
+        reads = music.reads
+        await self.flush()
+        self.assertEqual(music.reads, reads)
+        self.assertEqual(music.pauses, 0)
+
+    async def test_manual_source_selection_cancels_old_edge_until_new_user_play(self):
+        music = Session(playing=False)
+        await self.enable([music])
+        await self.start_owned()
+        await self.collect()
+        self.provider.playback_source_changed()
+        music.playing = True
+        await self.collect()
+        self.assertEqual(self.owned_pauses(), 0)
+        self.assertTrue(self.provider._owned_active())
+        await self.start_owned()
+        self.assertEqual(music.pauses, 1)
+
+    async def test_pinned_session_track_changes_stay_pinned_and_removal_releases(self):
+        music = Session(playing=False)
+        await self.enable([music])
+        await self.start_owned()
+        await self.collect()
+        music.playing = True
+        await self.collect()
+        music.title = 'Next song'
+        await self.collect()
+        self.assertIs(await self.system._get_session(), music)
+        self.system._manager.sessions = []
+        await self.collect()
+        self.assertIsNone(self.provider._interruption_pin)
+        self.assertFalse(self.owned.interruption_playing())
+
+    async def test_netease_rejected_smtc_uses_existing_bound_cdp_without_relaunch(self):
+        music = Session('cloudmusic.exe')
+        music.pause_answer = False
+        music.pause_changes_state = False
+        cdp = SimpleNamespace(ready=True, generation=7, latest={'trackId': 'native'},
+            pause=AsyncMock(return_value=True), set_pause_observation_enabled=AsyncMock(return_value=True),
+            start=AsyncMock(side_effect=AssertionError('no start/relaunch')))
+        self.system._netease_cdp_session = cdp
+        data = EmptyIslandDataProvider().get_visual_data()
+        self.system._last_data = replace(data, track=replace(data.track, title=music.title,
+            artist=music.artist, source_app_id='cloudmusic.exe', track_id='captured'))
+        self.system._capture_runtime = SimpleNamespace(source=SimpleNamespace(session=music),
+            _cef_source=SimpleNamespace(session=cdp, native_track_id='native', generation=7, fresh=True),
+            identity=('cloudmusic.exe', 'captured'))
+        await self.enable([music])
+        await self.start_owned()
+        self.assertEqual(music.pauses, 1)
+        cdp.pause.assert_awaited_once()
+        self.assertEqual(cdp.pause.await_args.args[0], 'native')
+        cdp.start.assert_not_called()
+        self.assertEqual(self.saved, [])
+        # Returning to in-app playback must not pause the session we are
+        # already capturing. A second SMTC/CDP Pause would lock that player.
+        self.provider._set_interruption_route(self.provider._interruption_observer.snapshots()[0])
+        self.system._last_data = replace(data, track=replace(data.track, title=music.title,
+            artist=music.artist, source_app_id='cloudmusic.exe', track_id='captured'))
+        await self.start_owned()
+        self.assertEqual(cdp.pause.await_count, 1)
+        self.assertEqual(music.pauses, 1)
+        self.assertIsNone(self.provider._interruption_pin)
+
+    async def test_temporary_read_provenance_cannot_ensure_cdp_after_unpin_or_off(self):
+        music = Session('cloudmusic.exe')
+        track = replace(EmptyIslandDataProvider().get_visual_data().track,
+                        source_app_id='cloudmusic.exe')
+        runtime = SimpleNamespace(cef_session=None, cef_requested=True,
+                                  bind=AsyncMock(), close=AsyncMock())
+        self.system._capture_runtime = runtime
+        self.system._capture_is_enabled = lambda: True
+        self.system._netease_cef_enabled = lambda: True
+        self.system._ensure_netease_cdp = AsyncMock(side_effect=AssertionError('no ensure/start/reload'))
+        self.system._interruption_session = None
+        self.system._interruption_controller_enabled = False
+        task = asyncio.current_task()
+        task._gluspot_interruption_read = True  # Captured when this read began under t260.
+        try:
+            with patch('api.capture.capabilities.capture_profile', return_value='smtc'):
+                await self.system._bind_capture_session(music, track)
+        finally:
+            del task._gluspot_interruption_read
+        runtime.bind.assert_awaited_once()
+        self.system._ensure_netease_cdp.assert_not_called()
+
+    async def test_uncertain_netease_smtc_sends_one_cdp_pause_if_still_playing(self):
+        music = Session('orpheus.exe')
+        music.pause_answer = RuntimeError('uncertain write')
+        music.pause_changes_state = False
+        cdp = SimpleNamespace(ready=True, generation=7, port=4588, latest={'trackId': 'native'},
+            pause=AsyncMock(return_value=True), set_pause_observation_enabled=AsyncMock(return_value=True),
+            start=AsyncMock(side_effect=AssertionError('no start/relaunch')))
+        self.system._netease_cdp_session = cdp
+        data = EmptyIslandDataProvider().get_visual_data()
+        self.system._last_data = replace(data, track=replace(data.track, title=music.title,
+            artist=music.artist, source_app_id='orpheus.exe', track_id='captured'))
+        self.system._capture_runtime = SimpleNamespace(source=SimpleNamespace(session=music),
+            _cef_source=SimpleNamespace(session=cdp, native_track_id='native', generation=7, fresh=True),
+            identity=('orpheus.exe', 'captured'))
+        self.provider._NETEASE_SUPPLEMENT_DELAY = 0
+        await self.enable([music])
+        await self.start_owned()
+        self.assertEqual(music.pauses, 1)
+        cdp.pause.assert_awaited_once()
+        self.assertEqual(self.owned_pauses(), 0)
+        self.assertTrue(self.owned.interruption_playing())
+        cdp.start.assert_not_called()
+
+    async def test_uncertain_other_app_does_not_send_cdp(self):
+        music = Session('chrome.exe')
+        music.pause_answer = RuntimeError('uncertain write')
+        music.pause_changes_state = False
+        cdp = SimpleNamespace(ready=True, generation=7, latest={'trackId': 'native'},
+            pause=AsyncMock(side_effect=AssertionError('not netease')),
+            set_pause_observation_enabled=AsyncMock(return_value=True))
+        self.system._netease_cdp_session = cdp
+        await self.enable([music])
+        await self.start_owned()
+        self.assertEqual(music.pauses, 1)
+        cdp.pause.assert_not_called()
+        self.assertEqual(self.owned_pauses(), 0)
+
+    async def test_new_user_resume_revokes_old_queued_external_handoff(self):
+        music = Session(playing=False)
+        await self.enable([music])
+        await self.start_owned()
+        await self.collect()
+        original = self.provider._source_dispatch.call
+        intercepted = []
+        async def queued(guard, action):
+            if not intercepted:
+                intercepted.append(True)
+                # Real explicit Pause and Resume supersede the queued a intent.
+                self.assertTrue(self.owned.send_playback_command('toggle_play_pause'))
+                self.assertTrue(self.owned.send_playback_command('toggle_play_pause'))
+            return await original(guard, action)
+        with patch.object(self.provider._source_dispatch, 'call', side_effect=queued):
+            music.playing = True
+            await self.collect()
+        self.assertEqual(self.owned_pauses(), 1)  # The user's Pause only.
+        self.assertTrue(self.owned.interruption_playing())
+        self.assertIsNone(self.provider._interruption_pin)
+        self.assertEqual(music.pauses, 1)
+
+    async def test_video_update_at_final_gui_dispatch_revokes_music_permission(self):
+        music = Session(playing=False)
+        await self.enable([music])
+        await self.start_owned()
+        await self.collect()
+        original = self.provider._source_dispatch.call
+        intercepted = []
+        async def queued(guard, action):
+            if not intercepted:
+                intercepted.append(True)
+                music.media_type = 2
+                await self.provider._interruption_observer.collect_once()
+            return await original(guard, action)
+        with patch.object(self.provider._source_dispatch, 'call', side_effect=queued):
+            music.playing = True
+            await self.collect()
+        self.assertEqual(self.owned_pauses(), 0)
+        self.assertTrue(self.owned.interruption_playing())
+        self.assertEqual(music.pauses, 0)
+        self.assertIsNone(self.provider._interruption_pin)
+
+    async def test_new_external_edge_cancels_pending_library_pause_transaction(self):
+        earlier = Session('earlier.exe')
+        later = Session('later.exe', playing=False)
+        await self.enable([earlier, later])
+        reading = asyncio.Event()
+        release = asyncio.Event()
+        async def suspended_properties():
+            earlier.properties_hook = None
+            reading.set()
+            await release.wait()
+        earlier.properties_hook = suspended_properties
+        await self.start_owned()
+        self.assertTrue(reading.is_set())
+        await self.collect()  # Observe later non-playing after owned started.
+        later.playing = True
+        await self.collect()
+        release.set()
+        await self.flush()
+        self.assertEqual((earlier.pauses, later.pauses), (0, 0))
+        self.assertEqual(self.owned_pauses(), 1)
+        self.assertIs(self.provider._interruption_pin.session, later)
+
+    async def test_frozen_music_targets_do_not_include_late_unknown_metadata(self):
+        unknown = Session('unknown.exe', media_type=None, artist='')
+        await self.enable([unknown])
+        # Connected after the provider: eligibility freezes first, then native
+        # metadata arrives before the asynchronous pause transaction executes.
+        self.owned.playbackStarted.connect(lambda _event: setattr(unknown, 'artist', 'Late artist'))
+        await self.start_owned()
+        self.assertEqual(unknown.pauses, 0)
+        self.assertTrue(self.owned.interruption_playing())
+        self.assertIsNone(self.provider._interruption_pin)
+
+    async def test_manager_reconnect_releases_old_pin_and_rebaselines_playing(self):
+        old = Session(playing=False)
+        await self.enable([old])
+        await self.start_owned()
+        await self.collect()
+        old.playing = True
+        await self.collect()
+        self.assertIs(self.provider._interruption_pin.session, old)
+        old_observer = self.provider._interruption_observer
+        replacement = Session(playing=True)
+        self.system._manager = Manager([replacement])
+        await old_observer.collect_once()
+        await self.flush()
+        self.assertIsNot(self.provider._interruption_observer, old_observer)
+        self.assertIsNone(self.provider._interruption_pin)
+        self.assertIsNone(self.system._interruption_session)
+        self.assertFalse(self.owned.interruption_playing())
+        self.assertEqual(replacement.pauses, 0)
+        snapshot = self.provider._interruption_observer.snapshots()[0]
+        self.assertIsNone(snapshot.started_at)
+
+    async def test_equal_timestamp_external_candidates_do_not_choose_a_winner(self):
+        first = Session('first.exe', playing=False)
+        second = Session('second.exe', playing=False)
+        await self.enable([first, second])
+        await self.start_owned()
+        observer = self.provider._interruption_observer
+        observer.clock = lambda: self.provider._interruption_owned_at + 1.0
+        await self.collect()
+        original = self.provider._source_dispatch.call
+        release = asyncio.Event()
+        async def queued(guard, action):
+            await release.wait()
+            return await original(guard, action)
+        with patch.object(self.provider._source_dispatch, 'call', side_effect=queued):
+            first.playing = second.playing = True
+            await observer.collect_once()
+            release.set()
+            await self.flush()
+        self.assertEqual(self.owned_pauses(), 0)
+        self.assertTrue(self.owned.interruption_playing())
+        self.assertEqual((first.pauses, second.pauses), (0, 0))
+        self.assertIsNone(self.provider._interruption_pin)
+
+    async def test_off_emits_no_interruption_log_and_sends_no_command(self):
+        from api.capture.interruption import log_interruption
+        cdp = SimpleNamespace(ready=True, generation=1, port=4588, latest={'trackId': 'native'},
+            pause=AsyncMock(side_effect=AssertionError('pause')),
+            set_pause_observation_enabled=AsyncMock(side_effect=AssertionError('observe')),
+            start=AsyncMock(side_effect=AssertionError('start')))
+        self.system._netease_cdp_session = cdp
+        self.system._manager.sessions = [Session('cloudmusic.exe', title='SECRET_TITLE_XYZ')]
+        with _capture_interruption_log() as lines:
+            log_interruption(False, phase='enable', app_id='SECRET_TITLE_XYZ')
+            self.assertTrue(self.provider.set_playback_interruption_enabled(False))
+            await self.start_owned()
+            self.owned.send_playback_command('toggle_play_pause')
+            await self.flush()
+        self.assertEqual(lines, [])
+        cdp.pause.assert_not_called()
+        cdp.set_pause_observation_enabled.assert_not_called()
+        cdp.start.assert_not_called()
+
+    async def test_both_already_playing_logs_baseline_without_titles_or_pause(self):
+        await self.start_owned()
+        music = Session(r'C:\Users\secret\cloudmusic.exe', title='SECRET_TITLE_XYZ',
+                        artist='SECRET_ARTIST_XYZ')
+        with _capture_interruption_log() as lines:
+            await self.enable([music])
+        text = '\n'.join(lines)
+        self.assertIn('phase=enable decision=armed reason=owned-already-playing owned_playing=1', text)
+        self.assertIn('phase=focus decision=pause-external reason=unknown-order', text)
+        self.assertIn('phase=smtc-pause app_id=cloudmusic.exe result=paused', text)
+        self.assertIn('match=cloudmusic', text)
+        self.assertNotIn('SECRET', text)
+        self.assertNotIn('secret', text)
+        self.assertNotIn('Users', text)
+        self.assertEqual((music.pauses, self.owned_pauses()), (1, 0))
+        self.assertTrue(self.owned.interruption_playing())
+
+    async def test_library_start_logs_pause_result_without_titles(self):
+        music = Session('cloudmusic.exe', title='SECRET_TITLE_XYZ', artist='SECRET_ARTIST_XYZ')
+        with _capture_interruption_log() as lines:
+            await self.enable([music])
+            await self.start_owned()
+        text = '\n'.join(lines)
+        self.assertIn('phase=enable decision=armed reason=waiting-for-start owned_playing=0', text)
+        self.assertIn('phase=observer result=started', text)
+        self.assertIn('phase=owned-start decision=pause reason=eligible targets=1 observer=present', text)
+        self.assertIn('phase=smtc-pause app_id=cloudmusic.exe result=paused', text)
+        self.assertIn('phase=pause-external app_id=cloudmusic.exe kind=music result=paused', text)
+        self.assertNotIn('SECRET', text)
+        self.assertEqual(music.pauses, 1)
+
+    async def test_failed_cdp_observation_is_retried_without_a_pause_command(self):
+        calls = {'n': 0}
+
+        async def observe(enabled, guard=lambda: True):
+            # Startup still clears observation. Only an enabled arm is under test.
+            if enabled is not True:
+                return True
+            calls['n'] += 1
+            return calls['n'] >= 2
+
+        cdp = SimpleNamespace(ready=True, generation=3, port=4588, latest={'trackId': 'native'},
+            pause=AsyncMock(side_effect=AssertionError('observation must not pause')),
+            set_pause_observation_enabled=observe)
+        self.system._netease_cdp_session = cdp
+        music = Session('cloudmusic.exe', playing=False)
+        with _capture_interruption_log() as lines:
+            await self.enable([music])
+            await self.flush()
+        # The background poll retries a failed arm; success then sticks.
+        self.assertGreaterEqual(calls['n'], 2)
+        self.assertIsNotNone(self.provider._interruption_cdp_key)
+        text = '\n'.join(lines)
+        self.assertIn('phase=cdp-observe result=failed reason=rejected port=4588', text)
+        self.assertIn('phase=cdp-observe result=armed reason=armed port=4588', text)
+        self.assertNotIn('phase=cdp-pause', text)
+        cdp.pause.assert_not_called()
+
+    async def test_rejected_smtc_for_other_app_logs_mismatch_and_skips_cdp(self):
+        music = Session('chrome.exe')
+        music.pause_answer = False
+        music.pause_changes_state = False
+        cdp = SimpleNamespace(ready=True, generation=7, port=4588, latest={'trackId': 'native'},
+            pause=AsyncMock(side_effect=AssertionError('not cloudmusic')),
+            set_pause_observation_enabled=AsyncMock(return_value=True))
+        self.system._netease_cdp_session = cdp
+        with _capture_interruption_log() as lines:
+            await self.enable([music])
+            await self.start_owned()
+        text = '\n'.join(lines)
+        self.assertIn('phase=smtc-pause app_id=chrome.exe result=rejected status=4 accepted=false', text)
+        self.assertIn('phase=cdp-fallback app_id=chrome.exe decision=skip reason=app-id-mismatch', text)
+        self.assertNotIn('phase=cdp-pause', text)
+        cdp.pause.assert_not_called()
+        self.assertEqual(music.pauses, 1)
+
+
+def _capture_interruption_log():
+    logger = logging.getLogger('GluSpot.capture.interruption')
+    lines = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = _Collect()
+
+    class _Context:
+        def __enter__(self):
+            logger.addHandler(handler)
+            return lines
+
+        def __exit__(self, *args):
+            logger.removeHandler(handler)
+
+    return _Context()

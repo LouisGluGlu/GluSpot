@@ -99,15 +99,16 @@ class MusicLoadingHandoffTests(unittest.TestCase):
         self.assertTrue(self.window._has_timed_lyrics)
         self.assertEqual(self.window._lyric_motion.active_index, 2)
 
-    def test_instrumental_centers_only_after_visible_cycle_disappears(self):
+    def test_instrumental_centers_immediately_without_finishing_loading_cycle(self):
         self.begin()
         self.render(102.2)
         self.resolve(102.7, instrumental=True)
-        self.assertEqual(self.window._cover_layout_to, 0.0)
-        self.assertTrue(self.window._lyric_loading_visible(104.9))
+        self.assertEqual(self.window._cover_layout_to, 1.0)
+        self.assertFalse(self.window._lyric_loading_visible(102.7))
         self.render(105.01)
         self.assertEqual(self.window._cover_layout_to, 1.0)
         self.assertFalse(self.window._has_timed_lyrics)
+
 
     def test_resolved_long_song_prewarms_during_cycle_without_painting_or_seek_targets(self):
         self.begin()
@@ -151,19 +152,19 @@ class MusicLoadingHandoffTests(unittest.TestCase):
                 self.assertFalse(self.window._lyric_loading_visible(result_at + 0.51))
                 self.assertTrue(self.window._has_timed_lyrics)
 
-    def test_centered_previous_track_never_shows_skeleton_during_next_lookup(self):
+    def test_centered_previous_track_does_not_hide_next_tracks_loader(self):
         self.owner.timed_lyrics = []
         self.owner.lyrics = ["暂无歌词"]
         self.render(100.1)
         self.render(100.8)
         self.begin()
-        with patch.object(self.window, "_paint_lyric_loading") as loading:
+        with patch.object(self.window, "_paint_lyric_loading", wraps=self.window._paint_lyric_loading) as loading:
             self.render(104.4)
-        loading.assert_not_called()
-        self.assertEqual(self.window._cover_layout_to, 1.0)
-        self.resolve(104.5)
+        loading.assert_called()
+        self.assertTrue(self.window._lyric_loading_visible(104.4))
+        self.assertEqual(self.window._effective_content_layout(), "lyrics")
         self.assertEqual(self.window._cover_layout_to, 0.0)
-        self.assertAlmostEqual(self.window._cover_layout_fraction_at(104.5), 1.0)
+
 
     def test_rapid_track_change_cancels_previous_cycle_hold(self):
         self.begin()
@@ -186,6 +187,61 @@ class MusicLoadingHandoffTests(unittest.TestCase):
         repaint.assert_called()
         self.render(105.02)
         self.assertTrue(self.window._has_timed_lyrics)
+
+    def test_loading_skeleton_moves_and_changes_color_with_the_song(self):
+        """Song changes keep the sweeping placeholder, tinted by that cover.
+
+        Commit 79c0f90 pointed the bars at the neutralized reading color, so
+        every song's skeleton became the same gray.
+        """
+        def show(track, color, started):
+            self.owner.media_track_id = track
+            self.owner.track_title = track
+            self.owner.timed_lyrics = []
+            self.owner.lyrics = ["查找歌词中"]
+            art = QImage(120, 120, QImage.Format.Format_RGB32)
+            art.fill(color)
+            self.owner.album_art = art
+            self.owner.album_color = QColor(color)
+            self.owner.secondary_color = QColor(color).darker(180)
+            self.window._future_tone_cache.clear()
+            self.window._future_tone_track_key = None
+            self.render(started)
+
+        def bars(now):
+            image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            with patch("local.music_surface_window.time.monotonic", return_value=now), QPainter(image) as painter:
+                self.window._paint_lyric_loading(painter, self.column, now, 1.0)
+            return image
+
+        def strongest(image):
+            best = None
+            for y in range(0, image.height(), 3):
+                for x in range(0, image.width(), 3):
+                    pixel = image.pixelColor(x, y)
+                    if pixel.alpha() < 160:
+                        continue
+                    hue, saturation, _value, _alpha = pixel.getHsv()
+                    if best is None or saturation > best[0]:
+                        best = (saturation, hue)
+            return best
+
+        show("red-song", QColor(210, 36, 48), 101.0)
+        with patch.object(self.window, "_paint_lyric_loading", wraps=self.window._paint_lyric_loading) as loading:
+            self.render(102.55)
+        loading.assert_called()
+        early = bars(102.55)
+        later = bars(104.8)
+        self.assertNotEqual(bytes(early.constBits()), bytes(later.constBits()))
+        red = strongest(early)
+        show("blue-song", QColor(32, 78, 220), 201.0)
+        blue = strongest(bars(202.55))
+        self.assertIsNotNone(red)
+        self.assertIsNotNone(blue)
+        self.assertGreater(red[0], 28)
+        self.assertGreater(blue[0], 28)
+        self.assertGreater(min(abs(red[1] - blue[1]), 360 - abs(red[1] - blue[1])), 40)
 
     def test_loading_diagonal_reveal_and_exit_start_from_bottom_right(self):
         self.begin()

@@ -113,22 +113,20 @@ class FinderDjCompactTests(unittest.TestCase):
         self.assertGreaterEqual(texts[0][2].height(), 12)
         self.assertEqual(visual.music_button_rects, {})
 
-    def test_loading_ready_failure_evidence_stays_on_the_single_row(self):
-        for state, field, caption in (("loading", "introduction_pending", "加载中"),
-                ("ready", "introduction_pending", "已就绪"),
-                ("failed", "introduction_failed", "失败")):
+    def test_loading_ready_and_failure_leave_finder_lyrics_in_control(self):
+        for state, field in (("loading", "introduction_pending"), ("ready", "introduction_pending"), ("failed", "introduction_failed")):
             with self.subTest(state=state):
                 visual = self.visual()
+                with patch("local.island_stack_visual.time.monotonic", return_value=100.):
+                    baseline_size = visual._finder_bar_music_size()
                 self.sync(visual, {"speaking": False, field: True, "state": state,
-                    "token": 1, "next_title": visual.track_title}, 100.)
-                shell, texts = self.render(visual)
-                self.assertEqual([item[1] for item in texts], [caption, "Follow geometry - Test singer"])
-                status, metadata = texts
-                self.assertTrue(all(shell.contains(item[0]) for item in texts))
-                self.assertLess(metadata[0].right(), status[0].left())
-                self.assertEqual(metadata[0].center().y(), status[0].center().y())
-                self.assertGreaterEqual(status[0].width(), status[2].horizontalAdvance(caption))
-                self.assertFalse(visual._island_dj_speaking)
+                    "token": 1, "next_title": "Unrelated preload title"}, 100.)
+                self.assertFalse(visual._personal_dj_island_presenting())
+                with patch("local.island_stack_visual.time.monotonic", return_value=100.6):
+                    self.assertFalse(visual._finder_dj_render_active())
+                    self.assertEqual(visual._finder_bar_music_size(), baseline_size)
+                self.assertEqual(visual._finder_dj_reveal_progress(100.6), 0.)
+                self.assertEqual(visual._island_dj_title, "")
                 visual.data_provider.get_owned_personal_dj_audio_frame.assert_not_called()
                 self.assertTrue(visual.media_is_playing)
 
@@ -145,17 +143,17 @@ class FinderDjCompactTests(unittest.TestCase):
                 self.assertEqual(texts[0][1], "Follow geometry - Test singer")
                 self.assertTrue(shell.contains(texts[0][0]))
 
-    def test_long_metadata_elides_inside_bounded_row_beside_real_status(self):
+    def test_long_speech_metadata_elides_in_full_width_without_status_caption(self):
         visual = self.visual()
         visual.track_title = "A very long next song title " * 8
         visual.artist = "Singer with a very long stage name " * 8
-        self.sync(visual, {"speaking": False, "introduction_failed": True,
-            "state": "failed", "token": 1, "next_title": visual.track_title}, 100.)
+        self.speaking(visual)
+        visual._island_dj_status = "failed"
         shell, texts = self.render(visual, width=180.)
-        status, metadata = texts
-        self.assertEqual(status[1], "失败")
-        self.assertTrue(all(shell.contains(item[0]) for item in texts))
-        self.assertLess(metadata[0].right(), status[0].left())
+        self.assertEqual(len(texts), 1)
+        metadata = texts[0]
+        self.assertTrue(shell.contains(metadata[0]))
+        self.assertAlmostEqual(metadata[0].right(), shell.right() - visual._u(13))
         self.assertLessEqual(metadata[2].horizontalAdvance(metadata[1]), metadata[0].width())
         self.assertNotEqual(metadata[1], f"{visual.track_title} - {visual.artist}")
 
@@ -182,14 +180,15 @@ class FinderDjCompactTests(unittest.TestCase):
         self.assertEqual(visual._finder_dj_retained_title, "")
         visual.data_provider.request_control.assert_not_called()
 
-    def test_pending_to_speech_uses_same_continuous_reveal(self):
+    def test_pending_keeps_lyrics_visible_and_real_speech_starts_finder_reveal(self):
         visual = self.visual()
         self.sync(visual, {"speaking": False, "introduction_pending": True,
             "state": "loading", "token": 1, "next_title": visual.track_title}, 100.)
-        reveal = visual._finder_dj_reveal_progress(100.15)
+        self.assertEqual(visual._finder_dj_reveal_progress(100.15), 0.)
         self.speaking(visual, now=100.15)
-        self.assertAlmostEqual(visual._finder_dj_reveal_progress(100.15), reveal)
-        self.assertEqual(visual._finder_dj_reveal_at, 100.)
+        self.assertEqual(visual._finder_dj_reveal_progress(100.15), 0.)
+        self.assertAlmostEqual(visual._finder_dj_reveal_progress(100.36), .5)
+        self.assertEqual(visual._finder_dj_reveal_at, 100.15)
         self.assertEqual(visual._finder_dj_retained_status, "")
 
     def test_completion_fade_continues_idle_phase_and_does_not_retain_speech_fft(self):

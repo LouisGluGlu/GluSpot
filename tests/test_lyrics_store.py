@@ -112,6 +112,11 @@ class LyricsStoreTests(unittest.TestCase):
                 self.assertTrue(is_structured_lyric_metadata(json.dumps({
                     "t": timestamp, "c": [{"tx": "作词: "}, {"tx": "Jerry Murad"}],
                 })))
+        # A credit can link its person, and a timed parser can already
+        # have taken the "t" marker: both are still metadata, not vocals.
+        self.assertTrue(is_structured_lyric_metadata(
+            '{"c":[{"tx":"编曲: "},{"tx":"phifi","li":"http://p1.music.126.net/a.jpg",'
+            '"or":"orpheus://nm/artist/home?id=53394056&type=artist"}]}'))
         unrelated = (
             '{"verse":"Keep singing"}',
             '{"t":true,"c":[{"tx":"sung"}]}',

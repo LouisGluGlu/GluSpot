@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import tempfile
 import threading
 import time
@@ -34,7 +35,9 @@ class Tasks(QObject):
         return self.accepted
 
     def close(self):
+        # Like MusicTasks.close(): drop queued work so its callbacks stop holding the player.
         self.closed = True
+        self.jobs.clear()
 
 
 class Player(QObject):
@@ -103,6 +106,8 @@ class OwnedPlaybackTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # Collect Qt-holding cycles here, between tests, not mid-way through the next one.
+        self.addCleanup(gc.collect)
         self.temp = tempfile.TemporaryDirectory()
         self.tasks = Tasks()
         self.artwork_tasks = Tasks()
@@ -111,7 +116,8 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.service = SimpleNamespace(stream_url=lambda *args: None, lyrics=lambda *args: None)
         self.lyrics = LocalLyricsStore(root=Path(self.temp.name))
         self.player = OwnedMusicPlayer(self.service, self.lyrics, player=self.qt_player,
-                                      audio=object(), tasks=self.tasks, artwork_tasks=self.artwork_tasks, prefetch_tasks=self.prefetch_tasks, stream_cache=None)
+                                      audio=object(), dj_player=Player(), dj_audio=object(),
+                                      tasks=self.tasks, artwork_tasks=self.artwork_tasks, prefetch_tasks=self.prefetch_tasks, stream_cache=None)
         self.songs = (OnlineSong("netease", "1", "第一首", duration_seconds=120),
                       OnlineSong("netease", "2", "第二首", duration_seconds=150))
 
@@ -141,6 +147,76 @@ class OwnedPlaybackTests(unittest.TestCase):
         token = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "stream")
         song = self.player.queue[self.player.index]
         self.tasks.completed.emit(token, StreamInfo(song.source_id, song.song_id, "https://example.test/audio", True), None)
+
+    def test_fully_injected_setup_never_constructs_native_multimedia(self):
+        music, voice = Player(), Player()
+        audio, voice_audio = object(), object()
+        with patch("local.owned_music_player.QAudioOutput", side_effect=AssertionError("native audio initialized")) as native_audio, \
+                patch("local.owned_music_player.QMediaPlayer", side_effect=AssertionError("native decoder initialized")) as native_player:
+            player = OwnedMusicPlayer(self.service, self.lyrics,
+                player=music, audio=audio, dj_player=voice, dj_audio=voice_audio,
+                tasks=Tasks(), artwork_tasks=Tasks(), prefetch_tasks=Tasks(), stream_cache=None)
+        self.addCleanup(player.close)
+        self.assertIs(player.player, music)
+        self.assertIs(player.audio, audio)
+        self.assertIs(player.dj_player, voice)
+        self.assertIs(player.dj_audio, voice_audio)
+        native_audio.assert_not_called()
+        native_player.assert_not_called()
+
+    def test_owned_provider_transport_progress_lyric_seek_and_auto_next(self):
+        external = EmptyIslandDataProvider()
+        external.suspend_live_audio = lambda: None
+        external.close_audio_outputs = lambda: None
+        external.send_playback_command = lambda *_args: self.fail("owned command routed to system capture")
+        external.seek_playback_position = lambda *_args, **_kwargs: self.fail("owned seek routed to system capture")
+        provider = PlaybackSourceProvider(external, self.player, lambda _key, default: default)
+        self.addCleanup(provider.close_audio_outputs)
+
+        self.assertTrue(self.player.play_queue(self.songs))
+        self.authorize_current()
+        self.assertTrue(provider.get_visual_data().track.is_playing)
+        self.assertTrue(provider.send_playback_command("toggle_play_pause"))
+        self.assertEqual(self.qt_player.playbackState(), QMediaPlayer.PlaybackState.PausedState)
+        self.assertFalse(provider.get_visual_data().track.is_playing)
+        self.assertTrue(provider.send_playback_command("toggle_play_pause"))
+        self.assertTrue(provider.get_visual_data().track.is_playing)
+
+        self.qt_player.positionChanged.emit(12345)
+        observed = provider.get_visual_data().track
+        self.assertEqual(observed.position_seconds, 12.345)
+        self.assertEqual(observed.position_observed_seconds, 12.345)
+        self.assertEqual(observed.position_source, "owned-player")
+        self.assertGreater(observed.position_sampled_at, 0)
+
+        payload = LyricPayload("netease", "1",
+            raw_yrc="[20000,1500](20000,500,0)第一(20500,1000,0)句",
+            raw_lrc="[00:20.00]第一句", source="netease")
+        lyrics = self.lyrics.parse_online_lyrics(
+            raw_yrc=payload.raw_yrc, raw_lrc=payload.raw_lrc, source=payload.source)
+        lyric_token = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "lyrics")
+        self.tasks.completed.emit(lyric_token, (payload, lyrics), None)
+        current = provider.get_visual_data().track
+        word_start = current.timed_lyrics[0].units[1].start_seconds
+        self.assertEqual(word_start, 20.5)
+        self.assertFalse(provider.seek_playback_position(word_start, "owned:netease:2"))
+        self.assertEqual(self.qt_player.position, 0)
+        self.assertTrue(provider.seek_playback_position(word_start, current.track_id))
+        self.assertEqual(self.qt_player.position, 20500)
+        self.qt_player.positionChanged.emit(self.qt_player.position)
+        self.assertEqual(provider.get_visual_data().track.position_seconds, word_start)
+
+        self.assertTrue(provider.send_playback_command("next"))
+        self.authorize_current()
+        self.assertEqual(provider.get_visual_data().track.track_id, "owned:netease:2")
+        self.assertTrue(provider.send_playback_command("previous"))
+        self.authorize_current()
+        self.assertEqual(provider.get_visual_data().track.track_id, "owned:netease:1")
+        self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(provider.get_visual_data().track.track_id, "owned:netease:2")
+        self.assertEqual(self.player.status, "loading_stream")
+        self.authorize_current()
+        self.assertTrue(provider.get_visual_data().track.is_playing)
 
     def test_sequential_list_loops_eof_and_manual_boundaries(self):
         self.assertEqual(self.player.playback_mode, "sequential")
@@ -453,12 +529,14 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.assertEqual((self.player.status, self.player.track.lyrics, self.player.track.album_art_bytes), before)
         self.assertEqual(sum(job[0][2] == neighbor[2] for job in self.artwork_tasks.jobs), 1)
 
-    def test_source_replacement_waits_for_old_workers_then_rejects_their_cache_results(self):
+    def test_source_replacement_releases_old_slots_and_rejects_their_cache_results(self):
         self.player.play_queue(self.covered_songs(6))
         old = list(self.artwork_tasks.jobs)
         songs = (OnlineSong("qq", "0", "new source", artwork_url="https://example.test/new.png"),)
         self.player.play_queue(songs)
-        self.assertEqual(len(self.artwork_tasks.jobs), 2)
+        self.assertEqual(len(self.artwork_tasks.jobs), 3)
+        current = self.artwork_tasks.jobs[-1][0]
+        self.assertEqual(self.player._art_running, {current[3]: (current[1], current[2])})
         for token, action in old:
             with patch("local.owned_music_player.fetch_online_artwork") as fetch:
                 self.assertIsNone(action())
@@ -559,6 +637,7 @@ class OwnedPlaybackTests(unittest.TestCase):
             return ()
         self.service.personal_fm = fetch
         player = OwnedMusicPlayer(self.service, self.lyrics, player=Player(), audio=object(),
+                                  dj_player=Player(), dj_audio=object(),
                                   tasks=self.tasks, artwork_tasks=self.artwork_tasks, prefetch_tasks=workers, stream_cache=None)
         try:
             player.play_queue(self.songs)
@@ -953,6 +1032,12 @@ class OwnedPlaybackTests(unittest.TestCase):
                 token, action = self.artwork_tasks.jobs[-1]
                 if accepted:
                     self.artwork_tasks.completed.emit(token, result, error)
+                else:
+                    self.assertEqual(self.player.track.album_art_lookup_state, "pending")
+                    for _ in range(self.player.ARTWORK_TRANSIENT_RETRIES):
+                        due = max(self.player._art_retry_at.values())
+                        with patch("local.owned_music_player.time.monotonic", return_value=due + .01):
+                            self.player._pump_artwork()
                 self.assertEqual(self.player.track.album_art_lookup_state, "failed")
                 self.assertEqual(self.player.track.album_art_bytes, b"")
 
@@ -985,6 +1070,7 @@ class OwnedPlaybackTests(unittest.TestCase):
         release, entered = threading.Event(), threading.Event()
         workers = MusicTasks()
         player = OwnedMusicPlayer(self.service, self.lyrics, player=Player(), audio=object(),
+            dj_player=Player(), dj_audio=object(),
             tasks=self.tasks, artwork_tasks=workers, stream_cache=None)
         def fetch(url, *, raise_errors=False):
             entered.set()
@@ -1111,8 +1197,6 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.player.play_queue(self.songs)
         external = EmptyIslandDataProvider()
         external.get_visual_data = lambda: self.fail("external poll while owned")
-        external.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        external.message_detector = SimpleNamespace(messages=lambda: ())
         provider = PlaybackSourceProvider(external, self.player, lambda key, default: default)
         self.assertEqual(provider.get_visual_data().track.track_id, "owned:netease:1")
         self.assertIsNone(provider.get_audio_frame())
@@ -1141,12 +1225,14 @@ class OwnedControlThreadTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        self.addCleanup(gc.collect)
         self.temp = tempfile.TemporaryDirectory()
         self.qt_player = ThreadRecordingPlayer()
         self.tasks, self.artwork_tasks = Tasks(), Tasks()
         self.service = SimpleNamespace(stream_url=lambda *args: None, lyrics=lambda *args: None)
         self.player = OwnedMusicPlayer(self.service, LocalLyricsStore(root=Path(self.temp.name)),
-            player=self.qt_player, audio=object(), tasks=self.tasks, artwork_tasks=self.artwork_tasks, stream_cache=None)
+            player=self.qt_player, audio=object(), dj_player=Player(), dj_audio=object(),
+            tasks=self.tasks, artwork_tasks=self.artwork_tasks, prefetch_tasks=Tasks(), stream_cache=None)
         self.songs = (OnlineSong("netease", "1", "first", duration_seconds=120),
                       OnlineSong("netease", "2", "second", duration_seconds=150))
         self.player.play_queue(self.songs)

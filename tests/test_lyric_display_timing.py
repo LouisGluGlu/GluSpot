@@ -36,7 +36,12 @@ class DisplayLyricTimingTests(unittest.TestCase):
         self.assertEqual(plan.display_units[0].timing_origin, "segment")
         self.assertEqual(plan.reading_progress(5.), 12 / 17)
         self.assertFalse(genuinely_timed_unit_row(plan.display_units))
-        self.assertEqual(explicit_slow_unit_groups("Hello world again", plan.display_units)[0].source_text, "again")
+        # "again" (1 s) is not held against 2 s estimated neighbours; a 4 s
+        # final word is (twice the line's median).
+        self.assertEqual(explicit_slow_unit_groups("Hello world again", plan.display_units), ())
+        long_units = (Unit(0., 4., "Hello world "), Unit(6., 10., "again"))
+        long_plan = resolve_display_row_timing("Hello world again", long_units, "unit", start=0., next_start=12.)
+        self.assertEqual(explicit_slow_unit_groups("Hello world again", long_plan.display_units)[0].source_text, "again")
 
     def test_cjk_segment_splits_are_estimates_not_measured_long_syllables(self):
         units = (Unit(1., 7., "都可以"),)

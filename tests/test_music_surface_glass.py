@@ -14,6 +14,29 @@ from local.music_surface_window import (MusicSurfaceWindow, paint_audio_output_s
 from tests.test_music_surface_transition import _TransitionOwner
 
 
+class BackgroundCompositorRegressionTests(unittest.TestCase):
+    def test_background_compositor_matches_frozen_reference(self):
+        import numpy as np
+        from PySide6.QtCore import QSize
+        from local.music_surface_background import AlbumFlowBackgroundRenderer
+        from tests.glass_background_reference import reference_field_pixels
+
+        rng = np.random.default_rng(730)
+        for width, height in ((61, 37), (160, 90), (321, 181)):
+            for count in (1, 3, 5):
+                colors = tuple(QColor(*map(int, rgb)) for rgb in
+                               rng.integers(0, 256, (count, 3)))
+                strengths = tuple(map(float, rng.uniform(.3, 1.3, count - 1)))
+                for phase in (0., 17.5):
+                    args = (QSize(width, height), colors, strengths, phase)
+                    expected = reference_field_pixels(AlbumFlowBackgroundRenderer, *args)
+                    actual = AlbumFlowBackgroundRenderer._paint_field_pixels(*args)
+                    a = np.frombuffer(actual.constBits(), np.uint8)
+                    b = np.frombuffer(expected.constBits(), np.uint8)
+                    np.testing.assert_array_equal(a, b)
+
+
+
 class MusicSurfaceGlassTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -38,19 +61,38 @@ class MusicSurfaceGlassTests(unittest.TestCase):
         image.fill(Qt.GlobalColor.transparent)
         return image
 
-    def test_material_maps_local_source_and_follows_explicit_theme_even_when_active(self):
+    def test_white_field_uses_dark_title_artist_and_sung_ink(self):
+        from local.theme_tokens import contrast_ratio
+        self.window._background_cache.fill(QColor(248, 248, 250))
+        field = (248, 248, 250)
+        title = self.window._metadata_title_color()
+        artist = self.window._metadata_artist_color()
+        sung = self.window._sung_lyric_color()
+        self.assertGreaterEqual(contrast_ratio(title.getRgb()[:3], field), 4.5)
+        self.assertGreaterEqual(contrast_ratio(artist.getRgb()[:3], field), 3.0)
+        self.assertGreaterEqual(contrast_ratio(sung.getRgb()[:3], field), 4.5)
+        self.assertLess(title.lightness(), 40)
+        levels, _moving = self.window._lyric_blur_follow_levels(
+            "white", 0, (0.0, 40.0), (0.0, 40.0), ((0, 1), (1, 2)),
+        )
+        self.assertEqual(levels, (0.0, 0.0))
+
+    def test_clear_material_samples_surface_scene_and_keeps_shared_ink_even_when_active(self):
         target = QRectF(200, 100, 80, 40)
         for mode, light in (("dark", False), ("light", True)):
             self.mode = mode
             image = self.image()
             with QPainter(image) as painter, \
                     patch("local.music_surface_window.time.monotonic", return_value=100.), \
-                    patch("local.music_surface_window.paint_liquid_glass") as paint:
+                    patch.object(self.window._clear_control_renderer, "paint") as paint:
                 self.window._paint_surface_glass(painter, target, active=True)
-            self.assertEqual(paint.call_args.kwargs["light"], light)
-            self.assertTrue(paint.call_args.kwargs["refractive"])
-            self.assertEqual(paint.call_args.kwargs["backdrop_rect"], QRectF(50, 25, 20, 10))
-            self.assertIsNone(paint.call_args.kwargs.get("base_color"))
+                expected_ink = self.window._scene_control_ink()
+            args = paint.call_args
+            self.assertEqual(args.args[1], target)
+            self.assertEqual(args.kwargs["scene_bounds"], QRectF(self.window.rect()))
+            self.assertEqual(self.window._surface_glass_source_rect(target, args.kwargs["scene"]), QRectF(50, 25, 20, 10))
+            self.assertEqual(args.kwargs["ink"], expected_ink)
+            self.assertFalse(args.kwargs.get("selected", False))
 
     def test_idle_scene_freezes_for_prewarm_and_hide_then_refreshes_after_motion(self):
         idle = self.window.WINDOWED_CONTROL_IDLE_SECONDS
@@ -81,18 +123,27 @@ class MusicSurfaceGlassTests(unittest.TestCase):
         self.assertGreater(self.window._media_button_rects["next"].width(), next_icon.width())
 
     def test_foreground_contrast_tracks_real_scene_and_theme(self):
+        from local.theme_tokens import composite, contrast_ratio, glass_fill_rgba
         for mode in ("dark", "light"):
             self.mode = mode
             for color in (QColor("#111122"), QColor("#f0f1f2")):
                 self.window._background_cache.fill(color)
                 self.window._control_color_transitions.clear()
                 ink = self.window._surface_glass_ink(QRectF(0, 0, 44, 44), live=True)
-                self.assertGreaterEqual(self.window._contrast_ratio(ink, color), 7.)
+                if mode == "light":
+                    plate = composite(glass_fill_rgba(False, self.window._surface_glass_level()), color.getRgb()[:3])
+                    self.assertGreaterEqual(contrast_ratio(ink.getRgb()[:3], plate), 4.5)
+                    self.assertLess(ink.lightness(), 48)
+                else:
+                    self.assertGreater(ink.lightness(), 200)
 
     def test_whole_scene_area_overrules_minority_patch_beneath_each_button_in_both_themes(self):
         for mode in ("dark", "light"):
             self.mode = mode
             for majority, minority, expected in (("black", "white", "white"), ("white", "black", "black")):
+                # Light plates use black ink. Dark plates use white ink.
+                # The album under a button does not flip that choice.
+                expected = "black" if mode == "light" else "white"
                 with self.subTest(mode=mode, majority=majority):
                     self.window._control_color_transitions.clear()
                     self.window._background_cache.fill(QColor(majority))
@@ -126,7 +177,7 @@ class MusicSurfaceGlassTests(unittest.TestCase):
             self.assertEqual(vote.call_count, 1)
             self.assertEqual(vote.call_args.args[2:], (32, 18))
             for target in (QRectF(0, 0, 44, 44), QRectF(850, 450, 44, 44)):
-                self.assertEqual(self.window._surface_glass_ink(target, live=True), first)
+                self.assertEqual(self.window._surface_glass_ink(target, live=True), QColor("white"))
             self.assertEqual(vote.call_count, 1)
             self.window._background_cache.fill(QColor("white"))
             self.window._scene_control_ink()
@@ -151,7 +202,7 @@ class MusicSurfaceGlassTests(unittest.TestCase):
             self.assertTrue(110 <= middle.red() <= 145)
             self.assertEqual(middle.red(), middle.green())
             self.assertEqual(middle.green(), middle.blue())
-            self.assertEqual(self.window._surface_glass_ink(QRectF(850, 450, 44, 44), active=True), middle)
+            self.assertEqual(self.window._surface_glass_ink(QRectF(850, 450, 44, 44), active=True), QColor("white"))
         self.window._background_cache.fill(QColor("black"))
         with patch("local.music_surface_window.time.monotonic", return_value=101.18):
             self.assertEqual(self.window._scene_control_ink(), middle)
@@ -160,17 +211,17 @@ class MusicSurfaceGlassTests(unittest.TestCase):
 
     def test_fm_gradient_keeps_extracted_accent_and_uses_shared_decided_endpoint(self):
         target = QRectF(800, 10, 44, 44)
-        for background, expected in (("black", "white"), ("white", "black")):
+        for background, expected in (("black", "white"), ("white", "white")):
             with self.subTest(background=background):
                 self.window._control_color_transitions.clear()
                 self.window._background_cache.fill(QColor(background))
-                with patch.object(self.window, "_future_lyric_color", return_value=QColor("#248ace")):
+                with patch.object(self.window, "_album_accent_color", return_value=QColor("#248ace")):
                     stops = self.window._personal_fm_stops(target)
                 self.assertEqual(stops, ((0., QColor("#248ace")), (.5, QColor(expected)), (1., QColor("#248ace"))))
-                with patch.object(self.window, "_future_lyric_color", return_value=QColor("#be4c2b")), \
+                with patch.object(self.window, "_album_accent_color", return_value=QColor("#be4c2b")), \
                         patch("local.music_surface_window.time.monotonic", return_value=200.):
                     self.assertEqual(self.window._personal_fm_stops(target)[0][1], QColor("#248ace"))
-                with patch.object(self.window, "_future_lyric_color", return_value=QColor("#be4c2b")), \
+                with patch.object(self.window, "_album_accent_color", return_value=QColor("#be4c2b")), \
                         patch("local.music_surface_window.time.monotonic", return_value=200.36):
                     self.assertEqual(self.window._personal_fm_stops(target)[0][1], QColor("#be4c2b"))
 
@@ -196,12 +247,13 @@ class MusicSurfaceGlassTests(unittest.TestCase):
                 # Exercise the real direct drawing path for each theme and
                 # presentation; material reuse must not change glyph ink.
                 self.window._control_layer_cache.clear()
+                self.window._visible_control_layers.clear()
                 self.window._control_layer_cache_bytes = 0
                 with self.subTest(mode=mode, fullscreen=fullscreen), \
                         patch("local.music_surface_window.time.monotonic", return_value=100.), \
                         patch.object(self.window, "_audio_output_available", return_value=True), \
                         patch.object(self.window, "_library_back_available", return_value=True), \
-                        patch.object(self.window, "_future_lyric_color", return_value=QColor("magenta")), \
+                        patch.object(self.window, "_album_accent_color", return_value=QColor("magenta")), \
                         patch.object(self.window, "_personal_dj_reveal_at", return_value=1.), \
                         patch.object(self.window, "_personal_dj_activity_at", return_value=0.), \
                         patch("local.music_surface_window.paint_music_source_icon", wraps=paint_music_source_icon) as source, \
@@ -227,15 +279,16 @@ class MusicSurfaceGlassTests(unittest.TestCase):
                     calls_before = (source.call_count, output.call_count, transport.call_count)
                     self.assertEqual(paint_controls(), cold)
                     self.assertEqual((source.call_count, output.call_count, transport.call_count),
-                                     tuple(2 * count for count in calls_before))
+                                     calls_before)
                     self.assertEqual({key: image.cacheKey() for key, image in self.window._control_layer_cache.items()}, cache_before)
                     self.assertLessEqual(len(cache_before), 48)
                     self.assertLessEqual(self.window._control_layer_cache_bytes, self.window.CONTROL_LAYER_CACHE_MAX_BYTES)
-                    self.assertTrue(all(call.kwargs["tint"] == QColor("black") for call in source.call_args_list))
-                    self.assertTrue(all(call.args[3] == QColor("black") for call in output.call_args_list))
-                    self.assertTrue(all(call.args[3] == QColor("black") for call in presentation.call_args_list))
-                    self.assertTrue(all(call.args[2] == QColor("black") for call in dj.call_args_list))
-                    self.assertTrue(all(call.args[3] == QColor("black") for call in transport.call_args_list))
+                    expected_ink = QColor("black" if mode == "light" else "white")
+                    self.assertTrue(all(call.kwargs["tint"] == expected_ink for call in source.call_args_list))
+                    self.assertTrue(all(call.args[3] == expected_ink for call in output.call_args_list))
+                    self.assertTrue(all(call.args[3] == expected_ink for call in presentation.call_args_list))
+                    self.assertTrue(all(call.args[2] == expected_ink for call in dj.call_args_list))
+                    self.assertTrue(all(call.args[3] == expected_ink for call in transport.call_args_list))
 
     def test_waking_controls_reuse_frozen_scene_until_reveal_finishes(self):
         idle = self.window.WINDOWED_CONTROL_IDLE_SECONDS
@@ -265,9 +318,9 @@ class MusicSurfaceGlassTests(unittest.TestCase):
         image = self.image()
         with QPainter(image) as painter, \
                 patch("local.music_surface_window.time.monotonic", return_value=100. + idle + .1), \
-                patch("local.music_surface_window.paint_liquid_glass") as paint:
+                patch.object(self.window._clear_control_renderer, "paint") as paint:
             self.window._paint_surface_glass(painter, QRectF(800, 450, 44, 44), live=True)
-        sampled = paint.call_args.kwargs["backdrop"]
+        sampled = paint.call_args.kwargs["scene"]
         self.assertEqual(sampled.cacheKey(), self.window._background_cache.cacheKey())
         self.assertNotEqual(sampled.cacheKey(), frozen)
 

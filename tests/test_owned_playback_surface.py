@@ -233,23 +233,24 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
         face = image.pixelColor(round(circle.center().x()), round(circle.top() + circle.height() * .12))
         return image, QColor(icon_call.kwargs["tint"]), face
 
-    def test_shuffle_and_repeat_keep_translucent_state_and_readable_scene_ink(self):
+    def test_shuffle_and_repeat_keep_clear_material_and_readable_scene_ink(self):
+        self.owner.settings_getter = lambda key, default=None: "dark" if key == "v2_theme_mode" else default
         for backdrop in (QColor("#102a40"), QColor("#e0edfc"), QColor("#20ed40")):
             with self.subTest(backdrop=backdrop.name()):
-                _, default_ink, default_face = self._mode_control_render("sequential", backdrop)
-                self.assertLess(default_face.alpha(), 240)
-                expected = max((QColor("black"), QColor("white")),
-                    key=lambda color: self.window._contrast_ratio(color, backdrop))
+                default_image, default_ink, default_face = self._mode_control_render("sequential", backdrop)
+                self.assertEqual(default_face.alpha(), 255)
+                expected = QColor("white")
                 self.assertEqual(default_ink, expected)
                 for mode in ("shuffle", "repeat_one"):
                     image, ink, face = self._mode_control_render(mode, backdrop)
-                    self.assertNotEqual(face, default_face)
-                    self.assertLess(face.alpha(), 245)
+                    self.assertEqual(face, default_face)
+                    self.assertNotEqual(image, default_image)
+                    self.assertEqual(face.alpha(), 255)
                     self.assertEqual(ink, expected)
                     self.assertEqual(ink, default_ink)
-                    self.assertGreaterEqual(self.window._contrast_ratio(ink, backdrop), 4.5)
 
     def test_mode_tint_and_fading_control_cache_follow_scene_contrast_changes(self):
+        self.owner.settings_getter = lambda key, default=None: "dark" if key == "v2_theme_mode" else default
         seen = []
         original = self.window._paint_control_layer
         def observe(painter, bounds, reveal, shift, cache_key, draw, **kwargs):
@@ -262,15 +263,10 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
             _, middle, _ = self._mode_control_render("shuffle", QColor("#f2e8f8"), now=101.18, settle=False)
             _, purple, _ = self._mode_control_render("shuffle", QColor("#f2e8f8"), now=101.36, settle=False)
         self.assertEqual(blue, QColor("white"))
-        self.assertEqual(initial, blue)
-        self.assertTrue(110 <= middle.red() <= 145)
-        self.assertEqual(purple, QColor("black"))
-        self.assertNotEqual(blue.rgba(), purple.rgba())
-        self.assertNotEqual(seen[0], seen[2])
-        self.assertNotEqual(seen[2], seen[3])
-        self.assertIn(blue.rgba(), seen[0])
-        self.assertIn(middle.rgba(), seen[2])
-        self.assertIn(purple.rgba(), seen[3])
+        self.assertEqual(initial, QColor("white"))
+        self.assertEqual(middle, QColor("white"))
+        self.assertEqual(purple, QColor("white"))
+        self.assertGreaterEqual(len(seen), 4)
 
     def test_fm_actual_clicks_alternate_only_continuation_and_repeat(self):
         self.provider.fm = True
@@ -311,11 +307,10 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
         accent = QColor("#248ace")
         for source in (QColor("#eeeeee"), QColor("#151515")):
             palette = artwork_surface_palette(QImage(), source, source)
-            ink = QColor("white" if source.lightness() < 128 else "black")
             with patch.object(self.window, "_art_palette", return_value=palette), \
-                    patch.object(self.window, "_future_lyric_color", return_value=accent), \
-                    patch.object(self.window, "_scene_control_ink", return_value=ink):
+                    patch.object(self.window, "_album_accent_color", return_value=accent):
                 stops = self.window._personal_fm_stops(rect)
+            ink = self.window._surface_glass_ink(rect)
             self.assertEqual(stops, ((0., accent), (.5, ink), (1., accent)))
 
     def test_fm_visible_raster_animates_without_control_layer_or_svg_cache_churn(self):
@@ -326,7 +321,7 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
         rasters = []
         before = _rendered_icon.cache_info().misses
         layers_before = len(self.window._control_layer_cache)
-        with patch.object(self.window, "_future_lyric_color", return_value=QColor("#248ace")):
+        with patch.object(self.window, "_album_accent_color", return_value=QColor("#248ace")):
             for instant in (0, .5, 1, 1.5, 2):
                 with patch("local.music_surface_window.time.monotonic", return_value=instant):
                     dpr = self.window.devicePixelRatioF()

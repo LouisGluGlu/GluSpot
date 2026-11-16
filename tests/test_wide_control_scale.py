@@ -1,0 +1,96 @@
+"""Wide playback controls follow one window unit, including minimum hit sizes."""
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+from PySide6.QtCore import QRectF
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import QApplication
+
+from _demos.narrow3.narrow_window import NarrowStudyWindow
+from tests.test_music_surface_transition import _TransitionOwner
+from tests.test_owned_playback_surface import _Provider
+
+
+class WideControlScaleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.owner = _TransitionOwner()
+        self.owner.data_provider = _Provider()
+        self.owner._music_library_back_callback = Mock()
+        self.window = NarrowStudyWindow(self.owner, "B", "left", live=True)
+        self.window._timer.stop()
+        self.window.study_timer.stop()
+        self.window._audio_output_status_timer.stop()
+        self.window.set_content_layout("lyrics", animate=False)
+        self.window._finish_content_layout()
+        self.window._song_collection_state = lambda: SimpleNamespace(track_id="owned:netease:1")
+
+    def tearDown(self):
+        self.window.shutdown()
+        self.window.close()
+        self.owner.close()
+
+    def pose(self, size):
+        self.window._explicit_width_target = (*size, False)
+        self.window.resize(*size)
+        self.window._sync_narrow_mode()
+        self.window._finish_width_chrome()
+        self.window._finish_width_layout()
+        self.window.narrow = False
+        self.window._width_layout_fraction = 0.0
+        self.window._control_reveal_from = self.window._control_reveal_target = 1.0
+
+    def test_controls_follow_the_window_unit_and_minimum_hits(self):
+        for size in ((715, 540), (560, 420), (1000, 700), (440, 340)):
+            self.pose(size)
+            unit = min(size[0] / 100.0, size[1] / 75.8)
+            surface = QRectF(self.window.rect())
+            _content, cover, _lyric = self.window._wide_content_column_geometry()
+            title_font, title, artist_font, artist = self.window._metadata_layout(
+                cover, _content, self.window._surface_scale(), 1.0)
+            transport = self.window._wide_transport_rect(surface)
+            metrics = self.window._wide_layout_g(surface)
+            top = self.window._window_control_base_rect(surface)
+            collection = self.window._song_collection_geometry(surface, shifted=False)
+            buttons = self.window._song_collection_rects(surface)
+            # 440px is already the stacked lyric layout. The wide column still
+            # follows layout G; the visible title sits beside that small cover.
+            wide_pose = not self.window._content_layout_is_narrow()
+            with self.subTest(size=size):
+                self.assertAlmostEqual(self.window._control_unit(), unit)
+                self.assertAlmostEqual(cover.left(), metrics.cover.left(), delta=0.6)
+                self.assertAlmostEqual(cover.top(), metrics.cover.top(), delta=0.6)
+                self.assertAlmostEqual(cover.width(), metrics.cover.width(), delta=0.6)
+                self.assertAlmostEqual(cover.width(), cover.height(), delta=0.2)
+                if wide_pose:
+                    self.assertAlmostEqual(title.top(), metrics.title.top(), delta=1.5)
+                    self.assertAlmostEqual(
+                        title_font.pixelSize(), 3.1 * self.window.TITLE_EMPHASIS_SCALE * unit, delta=1.5,
+                    )
+                    self.assertEqual(title_font.weight(), QFont.Weight.Bold)
+                self.assertAlmostEqual(transport.left(), metrics.card.left(), delta=0.6)
+                self.assertAlmostEqual(transport.width(), metrics.card.width(), delta=0.6)
+                self.assertAlmostEqual(transport.top(), metrics.card.top(), delta=0.6)
+                # Glyphs follow the window; the hit targets keep their minimums.
+                keys = self.window._transport_key_boxes(metrics)
+                self.assertGreaterEqual(keys["toggle_play_pause"][0].height(), 28.0)
+                self.assertGreaterEqual(keys["toggle_play_pause"][0].width(), 28.0)
+                self.assertGreaterEqual(keys["previous"][0].width(), 22.0)
+                self.assertGreaterEqual(keys["next"][0].height(), 22.0)
+                self.assertGreaterEqual(top.width(), 34.0)
+                self.assertAlmostEqual(top.width(), max(34.0, 5.6 * unit), delta=0.6)
+                self.assertAlmostEqual(self.window.width() - top.right(), 2.4 * unit, delta=0.6)
+                self.assertGreaterEqual(collection.height(), 32.0)
+                self.assertAlmostEqual(self.window.width() - collection.right(), 2.4 * unit, delta=1.5)
+                if wide_pose:
+                    self.assertGreater(artist.height(), 1.0)
+                else:
+                    self.assertEqual(artist.height() > 1.0, size[0] >= 500)
+                self.assertEqual("playlist_add" in buttons, size[0] >= 440)
+                self.assertIn("favorite", buttons)

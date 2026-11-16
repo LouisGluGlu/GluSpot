@@ -6,6 +6,8 @@ import threading
 import time
 import traceback
 import ctypes
+import tempfile
+from functools import lru_cache
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QStyle, 
 
 from api.providers import PlaybackSourceProvider, WindowsMediaProvider
 from api.online_music import make_online_music_service
+from local.gc_scheduler import install_gc_scheduler
 from local.owned_music_player import OwnedMusicPlayer
 from local.windows_smtc import WindowsSmtcBridge
 from local.playback_entry_controller import PlaybackEntryController
@@ -29,11 +32,10 @@ from local.settings_store import (
     DEFAULT_SETTINGS,
     DEFAULT_MUSIC_AMBIENCE_VALUES,
     FIXED_DEFAULT_SETTING_KEYS,
-    MUSIC_READING_LIFT_DEFAULT_LEVEL,
-    MUSIC_READING_STRATEGY_DEFAULT,
     SettingsManager,
 )
 from local.startup import StartupManager, build_startup_command, normalize_startup_mode
+from local.startup_timing import startup_phase
 from local.settings_window import SettingsWindow, StatusLamp
 from local.ios_widgets import IosSwitch
 from local.ui_theme import set_theme_settings_getter
@@ -71,6 +73,26 @@ def _mydockfinder_candidate_process_names(configured_path: str, listener_process
     return set(_mydockfinder_listener_process_names(listener_process_names))
 
 
+@lru_cache(maxsize=None)
+def _process_entry32w_type():
+    """Define once: ctypes caches POINTER(cls) forever, so a class defined per call leaked on every call."""
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_ulong),
+            ("cntUsage", ctypes.c_ulong),
+            ("th32ProcessID", ctypes.c_ulong),
+            ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", ctypes.c_ulong),
+            ("cntThreads", ctypes.c_ulong),
+            ("th32ParentProcessID", ctypes.c_ulong),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_ulong),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    return PROCESSENTRY32W
+
+
 def _running_process_snapshots_for_names(names: set[str]) -> list[tuple[str, str]]:
     if sys.platform != "win32" or not names:
         return []
@@ -80,19 +102,7 @@ def _running_process_snapshots_for_names(names: set[str]) -> list[tuple[str, str
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-        class PROCESSENTRY32W(ctypes.Structure):
-            _fields_ = [
-                ("dwSize", ctypes.c_ulong),
-                ("cntUsage", ctypes.c_ulong),
-                ("th32ProcessID", ctypes.c_ulong),
-                ("th32DefaultHeapID", ctypes.c_void_p),
-                ("th32ModuleID", ctypes.c_ulong),
-                ("cntThreads", ctypes.c_ulong),
-                ("th32ParentProcessID", ctypes.c_ulong),
-                ("pcPriClassBase", ctypes.c_long),
-                ("dwFlags", ctypes.c_ulong),
-                ("szExeFile", ctypes.c_wchar * 260),
-            ]
+        PROCESSENTRY32W = _process_entry32w_type()
 
         kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
         kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_ulong, ctypes.c_ulong]
@@ -274,54 +284,106 @@ class MainThreadWatchdog:
 
 
 class LocalIslandApp:
-    def __init__(self, single_instance_guard: SingleInstanceGuard | None = None, *, installer_handoff=None, installer_sync=None):
+    def __init__(self, single_instance_guard: SingleInstanceGuard | None = None, *, installer_handoff=None, installer_sync=None,
+                 view="wide", capture=None, settings_path=None):
+        if view not in {"wide", "narrow"} or capture not in {None, "attach_only"}:
+            raise ValueError("Unsupported GluSpot view or capture mode")
+        self.view = view
+        self._temporary_settings = None
+        if (view == "narrow" or capture == "attach_only") and settings_path is None:
+            self._temporary_settings = tempfile.TemporaryDirectory(prefix="gluspot-session-")
+            settings_path = os.path.join(self._temporary_settings.name, "settings.json")
         self.single_instance_guard = single_instance_guard
         self._installer_handoff = installer_handoff
         self._installer_sync = installer_sync
-        _set_windows_process_identity()
-        self.app = QApplication(sys.argv)
-        self.app.setApplicationName(APP_NAME)
-        self.app.setQuitOnLastWindowClosed(False)
-        self.watchdog = MainThreadWatchdog(self.app)
+        with startup_phase("qapplication"):
+            _set_windows_process_identity()
+            self.app = QApplication.instance() or QApplication(sys.argv)
+            self.app.setApplicationName(APP_NAME)
+            self.app.setQuitOnLastWindowClosed(view == "narrow")
+            self.watchdog = MainThreadWatchdog(self.app)
+            self.gc_scheduler = install_gc_scheduler(self.app, busy=self._visual_animation_busy)
 
-        self.settings = SettingsManager()
-        self.icon_paths = resolve_icon_paths(self.settings.get("v2_custom_icon_path", ""))
-        self.app.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
-        set_theme_settings_getter(self.settings.get)
-        IslandStackVisual.load_embedded_lyric_fonts()
-        self.system_provider = WindowsMediaProvider(settings_getter=self._runtime_setting)
-        self.online_music = make_online_music_service()
-        self.owned_player = OwnedMusicPlayer(self.online_music, self.system_provider.lyrics_store, self.app)
-        self.owned_player.set_playback_mode(self.settings.get("v2_owned_playback_mode", "sequential"))
-        self.owned_player.set_personal_dj_enabled(self.settings.get("v2_personal_dj_enabled", False))
-        self.owned_player.restore_personal_dj_voice(self.settings.get("v2_personal_dj_voice_key", ""))
+        with startup_phase("settings"):
+            self.settings = SettingsManager(settings_path=settings_path) if settings_path is not None else SettingsManager()
+            if capture == "attach_only":
+                # Session settings use the same manager/getter/setter as wide.
+                # The explicit provider guard also prevents a later setting edit
+                # or repair request from authorizing a player relaunch.
+                for key, value in (
+                    ("v2_system_capture_enabled", True), ("v2_owned_playback_enabled", False),
+                    ("v2_capture_position_enabled", True), ("netease.cef.enabled", True),
+                    ("netease.transport", "attach"),
+                ):
+                    self.settings.set(key, value)
+            self.icon_paths = resolve_icon_paths(self.settings.get("v2_custom_icon_path", ""))
+            self.app.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
+            set_theme_settings_getter(self.settings.get)
+        with startup_phase("lyric_fonts"):
+            IslandStackVisual.load_embedded_lyric_fonts()
+        with startup_phase("windows_media_provider"):
+            self.system_provider = WindowsMediaProvider(settings_getter=self._runtime_setting, attach_only=capture == "attach_only")
+        with startup_phase("online_music"):
+            self.online_music = make_online_music_service()
+            # Desktop NetEase capture fetches lyrics by the player's song ID.
+            self.system_provider.online_music = self.online_music
+        with startup_phase("owned_player"):
+            self.owned_player = OwnedMusicPlayer(self.online_music, self.system_provider.lyrics_store, self.app)
+            self.owned_player.set_playback_mode(self.settings.get("v2_owned_playback_mode", "sequential"))
+            self.owned_player.set_personal_dj_enabled(self.settings.get("v2_personal_dj_enabled", False))
+            self.owned_player.restore_personal_dj_voice(self.settings.get("v2_personal_dj_voice_key", ""))
         self.data_provider = PlaybackSourceProvider(self.system_provider, self.owned_player, self._runtime_setting)
         self.data_provider.settings_setter = self.settings.set
-        self.system_media_controls = WindowsSmtcBridge(self.owned_player, self.data_provider._owned_active, self.app)
+        self.data_provider.set_playback_interruption_enabled(
+            self.settings.get("v2_playback_interruption_enabled", False))
+        with startup_phase("windows_smtc"):
+            self.system_media_controls = WindowsSmtcBridge(self.owned_player, self.data_provider._owned_active, self.app)
+        self.data_provider.sourceChanged.connect(self.system_media_controls.refresh)
         self.app.aboutToQuit.connect(self.system_media_controls.close)
         self.app.aboutToQuit.connect(self.data_provider.close_audio_outputs)
-        if self.settings.get("v2_owned_playback_enabled", True) or self.settings.get("v2_system_capture_enabled", False):
-            self.data_provider.start_audio_outputs()
+        with startup_phase("audio_outputs"):
+            if self.settings.get("v2_owned_playback_enabled", True) or self.settings.get("v2_system_capture_enabled", False):
+                self.data_provider.start_audio_outputs()
         app_font_family = IslandStackVisual.best_available_font_family(DEFAULT_SETTINGS["v2_font_family"])
         self.app.setFont(QFont(app_font_family, 9))
-        self.window = IslandStackVisual(data_provider=self.data_provider)
+        with startup_phase("island_window"):
+            self.window = IslandStackVisual(data_provider=self.data_provider)
         self.window._keep_minimum_surface = True
-        self.window._tray_hidden = False
+        self.window._tray_hidden = view == "narrow"
         self.window._application_quitting = False
         self.window.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         self.window.settings_getter = self._runtime_setting
         self.window.settings_setter = self.settings.set
-        self._apply_startup_setting()
-        self._apply_saved_settings()
+        with startup_phase("saved_settings"):
+            self._apply_startup_setting()
+            self._apply_saved_settings()
         self._owned_surface_key = None
         self.owned_player.changed.connect(self._owned_playback_changed)
-        self.settings_window = SettingsWindow(self.window, self.settings)
-        self.playback_entry = PlaybackEntryController(self.settings, self.system_provider, self.window,
-                                                       self.online_music, self.app)
-        self.music_library = MusicLibraryController(self.settings, self.online_music, self.owned_player,
-                                                   self.window, self.playback_entry, self.app)
-        self.song_collection = SongCollectionController(self.online_music, self.owned_player, self.app,
-            artwork_lookup=self.music_library.cached_playlist_artwork)
+        from local import sea_lyric_background
+
+        def _sea_audio_source(owned=self.owned_player, active=self.data_provider._owned_active):
+            track = owned.track
+            if track is None or not active():
+                return None
+            if owned._apple_companion_current():
+                # Apple sounds in its page; the sea uses a borrowed analysis.
+                key = owned.apple_sea_key(track.track_id)
+                return (track.track_id, key) if key else None
+            path = owned.player.source().toLocalFile()
+            return (track.track_id, path) if path else None
+
+        sea_lyric_background.set_audio_source(_sea_audio_source)
+        with startup_phase("settings_window"):
+            self.settings_window = SettingsWindow(self.window, self.settings)
+        with startup_phase("playback_entry"):
+            self.playback_entry = PlaybackEntryController(self.settings, self.system_provider, self.window,
+                                                           self.online_music, self.app)
+        with startup_phase("music_library"):
+            self.music_library = MusicLibraryController(self.settings, self.online_music, self.owned_player,
+                                                       self.window, self.playback_entry, self.app)
+        with startup_phase("song_collection"):
+            self.song_collection = SongCollectionController(self.online_music, self.owned_player, self.app,
+                artwork_lookup=self.music_library.cached_playlist_artwork)
         self.window._song_collection_controller = self.song_collection
         self.window._music_login_required = self._music_login_required
         self.window._music_login_callback = self._open_music_login
@@ -335,27 +397,61 @@ class LocalIslandApp:
         self.window._personal_dj_voice_hover_callback = self._show_personal_dj_hover
         self.app.aboutToQuit.connect(self.personal_dj_voices.tasks.close)
         self.settings.setting_changed.connect(self._playback_mode_changed)
+        from local.motion_cover_playback import MotionCoverSession, install_motion_cover
+        self.motion_cover = MotionCoverSession(enabled=bool(self.settings.get("v2_motion_cover_enabled", True)))
+        install_motion_cover(self.motion_cover)
+        self.app.aboutToQuit.connect(self.motion_cover.shutdown)
+        self.window._observe_motion_cover()
         self.app.aboutToQuit.connect(self.playback_entry.close)
         self.app.aboutToQuit.connect(self.music_library.close)
         self.app.aboutToQuit.connect(self.online_music.close)
         self.settings_window.icon_changed_callback = self._apply_global_icon
         self.settings_window.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         self.window.settings_changed_callback = self._save_visual_state
-        self._setup_mydockfinder_listener()
+        with startup_phase("mydockfinder"):
+            self._setup_mydockfinder_listener()
         self.tray = None
-        self._setup_tray()
+        self.view_window = self.window
+        if view == "narrow":
+            # Runtime construction is complete before choosing a presentation.
+            self.window.hide()
+            with startup_phase("narrow_view"):
+                from _demos.narrow3.narrow_window import NarrowStudyWindow
+                self.view_window = NarrowStudyWindow(self.window, "B", "left", live=True)
+                self.view_window.hints = False
+                self.window.music_fullscreen_overlay = self.view_window
+                self.window._music_surface_active = True
+        else:
+            with startup_phase("tray"):
+                self._setup_tray()
+
+    def _music_login_source(self):
+        """Match the library's pending/current account before saved preference."""
+        from local.playback_entry_window import LOGIN_SOURCE_IDS
+        supported = LOGIN_SOURCE_IDS
+        library = getattr(self, "music_library", None)
+        library_source = getattr(library, "_source", "")
+        track = getattr(self.owned_player, "track", None)
+        if (getattr(library, "_opening", None) is not None or track is None) and library_source in supported:
+            return library_source
+        track_id = str(getattr(track, "track_id", ""))
+        if track_id.startswith("owned:"):
+            source = track_id.split(":", 2)[1]
+            if source in supported:
+                return source
+        saved = self.settings.get("v2_online_music_source", "netease")
+        return saved if saved in supported else "netease"
 
     def _music_login_required(self):
         if not self.settings.get("v2_owned_playback_enabled", True):
             return False
         # Cached account snapshots are lock-only. No disk/network access from paint.
-        from local.playback_entry_window import ENTRY_SOURCES
-        return not any(self.online_music.account_status(source.source_id).logged_in
-                       for source in ENTRY_SOURCES)
+        return not self.online_music.account_status(self._music_login_source()).logged_in
 
     def _open_music_login(self):
         if not self._music_login_required():
             return False
+        source = self._music_login_source()
         from local.music_navigation_transition import MusicNavigationTransition
         if self.playback_entry._navigation is None:
             self.playback_entry._navigation = MusicNavigationTransition()
@@ -365,7 +461,7 @@ class LocalIslandApp:
             self.window._restore_island_from_music_surface()
         self.window.hide()
         self.playback_entry._library_origin = frame
-        self.playback_entry.show_login()
+        self.playback_entry.show_login(source)
         return True
 
     def _runtime_setting(self, key, default=None):
@@ -410,6 +506,16 @@ class LocalIslandApp:
             self.window.update()
 
     def _playback_mode_changed(self, key, value):
+        if key == "v2_playback_interruption_enabled":
+            self.data_provider.set_playback_interruption_enabled(value)
+        if key in {"v2_owned_playback_enabled", "v2_system_capture_enabled"}:
+            self.data_provider.playback_source_changed()
+        if key in {"v2_music_glass_level", "v2_theme_mode", "v2_music_ambience_style",
+                   "v2_theme_dark_start", "v2_theme_dark_end"}:
+            from local.ui_theme import publish_theme
+            getter = getattr(getattr(self, "settings", None), "get", None)
+            if callable(getter):
+                publish_theme(getter, animate=key != "v2_music_glass_level")
         if key == "v2_music_glass_level":
             surface = getattr(self.window, "music_fullscreen_overlay", None)
             if surface is not None:
@@ -418,6 +524,13 @@ class LocalIslandApp:
             self.owned_player.set_playback_mode(value)
         if key == "v2_personal_dj_enabled":
             self.owned_player.set_personal_dj_enabled(value)
+        if key == "v2_motion_cover_enabled":
+            cover = getattr(self, "motion_cover", None)
+            if cover is not None:
+                cover.set_enabled(bool(value))
+            observe = getattr(self.window, "_observe_motion_cover", None)
+            if callable(observe):
+                observe()
         if key == "v2_owned_playback_enabled" and value is False:
             self.owned_player.stop()
         if key == "v2_owned_playback_enabled":
@@ -452,7 +565,8 @@ class LocalIslandApp:
         return dict(DEFAULT_MUSIC_AMBIENCE_VALUES[style])
 
     def _location_mode_setting(self) -> str:
-        return DEFAULT_SETTINGS["v2_location_mode"]
+        from local.settings_store import normalize_location_mode
+        return normalize_location_mode(self.settings.get("v2_location_mode", "top"))
 
     def _mydockfinder_listener_process_names_setting(self) -> tuple[str, ...]:
         # Legacy choices remain on disk only as migration data.
@@ -465,6 +579,9 @@ class LocalIslandApp:
         StartupManager().apply(mode, build_startup_command())
 
     def _apply_saved_settings(self):
+        from local.ui_theme import publish_theme
+        publish_theme(self.settings.get, animate=False)
+
         def saved_setting(key, fallback=None):
             if key in FIXED_DEFAULT_SETTING_KEYS:
                 return DEFAULT_SETTINGS[key]
@@ -480,7 +597,6 @@ class LocalIslandApp:
         self.window.position_preset = str(saved_setting("v2_position_preset", "last") or "last")
         self.window.music_playing = bool(saved_setting("v2_music_playing", True))
         self.window.music_auto_detect = bool(saved_setting("v2_music_auto_detect", False))
-        self.window.persistent_plugin = False
         self.window.set_super_topmost(bool(saved_setting("v2_super_topmost", True)), notify=False)
         if hasattr(self.window, "set_finder_bar_style"):
             self.window.set_finder_bar_style(self.settings.get("v2_finder_bar_style", "transparent"), notify=False)
@@ -515,19 +631,33 @@ class LocalIslandApp:
         self.window.set_taskbar_left_handle_color(str(saved_setting("v2_taskbar_left_handle_color", "#8E8E93")), notify=False)
         self.window.expanded = bool(saved_setting("v2_expanded", False))
         self.window.show_seconds = bool(saved_setting("v2_show_seconds", True))
-        self.window.enabled_plugin_ids = set()
-        self.window.enabled_plugin_count = 0
         self.window.side_island_style = str(saved_setting("v2_side_island_style", "standard") or "standard")
-        self.window.plugin_island_style = str(saved_setting("v2_plugin_island_style", "standard") or "standard")
         self.window.music_island_style = str(saved_setting("v2_music_island_style", "standard") or "standard")
         self.window.set_music_expanded_layout_style(
             str(saved_setting("v2_music_expanded_layout_style", "standard") or "standard"),
             notify=False,
         )
-        self.window.time_alarm_side_display = str(saved_setting("v2_time_alarm_side_display", "note") or "note")
         ambience_style = str(saved_setting("v2_music_ambience_style", "sea_level") or "sea_level")
         if ambience_style not in DEFAULT_MUSIC_AMBIENCE_VALUES:
             ambience_style = "sea_level"
+        # The theme controls are gone: light or dark follows the island style.
+        # A style that "follow interface colour" swapped out is restored once.
+        def store_setting(key, value):
+            setter = getattr(self.settings, "set", None)
+            if callable(setter):
+                setter(key, value)
+            else:
+                self.settings[key] = value
+        if bool(saved_setting("v2_music_background_follow_theme", False)):
+            previous = str(saved_setting("v2_music_background_follow_previous_style", "") or "")
+            if previous in DEFAULT_MUSIC_AMBIENCE_VALUES:
+                ambience_style = previous
+                store_setting("v2_music_ambience_style", ambience_style)
+            store_setting("v2_music_background_follow_theme", False)
+            store_setting("v2_music_background_follow_previous_style", "")
+        derived_theme = "dark" if ambience_style == "sea_level" else "system"
+        if saved_setting("v2_theme_mode", "system") != derived_theme:
+            store_setting("v2_theme_mode", derived_theme)
         ambience_values = self._music_ambience_values_for_style(ambience_style)
         self.window.ambient_intensity = max(0.0, min(1.0, float(ambience_values["ambient_intensity"])))
         self.window.set_music_reactive_background_enabled(
@@ -576,14 +706,8 @@ class LocalIslandApp:
         self.window.set_expand_direction(str(saved_setting("v2_expand_direction", "auto")), notify=False)
         self.window.set_lyric_offset_seconds(float(saved_setting("v2_lyric_offset_seconds", 0.0)), notify=False)
         self.window.set_lyric_font_size(int(saved_setting("v2_lyric_font_size", 18)), notify=False)
-        self.window.set_music_surface_reading_lift_level(
-            saved_setting("v2_music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL), notify=False
-        )
         self.window.set_music_surface_reading_gradient_steps(
             saved_setting("v2_music_surface_reading_gradient_steps", 30), notify=False
-        )
-        self.window.set_music_surface_reading_strategy(
-            saved_setting("v2_music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT), notify=False
         )
         self.window.set_music_sparse_highlight_seconds_per_unit(
             saved_setting("v2_music_sparse_highlight_seconds_per_unit", 0.8), notify=False
@@ -598,25 +722,9 @@ class LocalIslandApp:
         self.window.set_lyric_flow_style(str(saved_setting("v2_lyric_flow_style", "wave_stream")), notify=False)
         self.window.set_gelv_font_family(IslandStackVisual.GELV_FONT_FAMILY, notify=False)
         self.window.set_no_lyrics_display_mode(str(saved_setting("v2_no_lyrics_display_mode", "text")), notify=False)
-        self.window.set_album_island_cover_count(int(saved_setting("v2_album_island_cover_count", 5)), notify=False)
-        self.window.set_album_island_cover_size(int(saved_setting("v2_album_island_cover_size", 30)), notify=False)
-        self.window.set_album_island_compact_cover_size(
-            int(saved_setting("v2_album_island_compact_cover_size", saved_setting("v2_album_island_cover_size", 30))),
-            notify=False,
-        )
-        self.window.set_album_island_expanded_cover_size(int(saved_setting("v2_album_island_expanded_cover_size", 72)), notify=False)
-        self.window.set_album_island_spacing(int(saved_setting("v2_album_island_spacing", 112)), notify=False)
-        self.window.set_album_island_secondary_style(str(saved_setting("v2_album_island_secondary_style", "perspective_dim")), notify=False)
-        self.window.set_album_island_perspective_amount(int(saved_setting("v2_album_island_perspective_amount", 100)), notify=False)
-        self.window.set_album_island_record(
-            float(saved_setting("v2_album_island_listened_seconds_total", 0.0) or 0.0),
-            saved_setting("v2_album_island_history", []),
-            notify=False,
-        )
         self.window.set_no_lyrics_text(str(saved_setting("v2_no_lyrics_text", "暂无歌词")), notify=False)
         position_preset = str(saved_setting("v2_position_preset", "last") or "last")
         self.window.apply_position_preset(position_preset, notify=False)
-        self.window._set_plugin_focus(min(self.window.plugin_focus_target, max(0, self.window.enabled_plugin_count - 1)), immediate=True)
         # The general placement preset may recenter the standalone surface.
         # Attach only after every saved setting has finished applying.
         if hasattr(self.window, "set_finder_bar_presence"):
@@ -817,12 +925,16 @@ class LocalIslandApp:
         self.app.quit()
 
     def run(self):
+        if self.view == "narrow":
+            self.view_window.show()
+            return self.app.exec()
         handoff = self._logical_installer_handoff(self._installer_handoff)
         def start():
-            if handoff is None:
-                self.playback_entry.start()
-            else:
-                self.playback_entry.start(installer_handoff=handoff)
+            with startup_phase("entry_start"):
+                if handoff is None:
+                    self.playback_entry.start()
+                else:
+                    self.playback_entry.start(installer_handoff=handoff)
         from local.installer_handoff import InstallerHandoffEvents, start_synchronized_handoff
         token = getattr(self, "_installer_sync", None)
         events = InstallerHandoffEvents.connect(token) if token is not None else None
@@ -833,12 +945,24 @@ class LocalIslandApp:
                 self.app, start, (self.window, self.playback_entry.window, self.music_library.window), events)
         return self.app.exec()
 
+    def _visual_animation_busy(self) -> bool:
+        window = getattr(self, "window", None)
+        return bool(getattr(window, "_visual_animation_active", False)
+                    or getattr(window, "_music_surface_active", False))
+
     def _logical_installer_handoff(self, values):
         """Resolve physical Windows installer bounds using Qt's monitor origin."""
         if values is None:
             return None
         from local.installer_handoff import logical_handoff_rect
         return logical_handoff_rect(values, QGuiApplication.screens())
+
+
+def bootstrap(*, view="wide", capture=None, settings_path=None, single_instance_guard=None,
+              installer_handoff=None, installer_sync=None):
+    """Build the shared runtime, then select its wide or narrow view."""
+    return LocalIslandApp(single_instance_guard, view=view, capture=capture, settings_path=settings_path,
+                          installer_handoff=installer_handoff, installer_sync=installer_sync)
 
 
 def main(*, installer_handoff=None, installer_sync=None):
@@ -851,7 +975,7 @@ def main(*, installer_handoff=None, installer_sync=None):
     if not single_instance_guard.acquired:
         return
 
-    app = LocalIslandApp(single_instance_guard, installer_handoff=installer_handoff, installer_sync=installer_sync)
+    app = bootstrap(single_instance_guard=single_instance_guard, installer_handoff=installer_handoff, installer_sync=installer_sync)
     sys.exit(app.run())
 
 

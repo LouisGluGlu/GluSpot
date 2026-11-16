@@ -11,9 +11,15 @@ for(const [name,version] of Object.entries(pinned)){
  if(!text.includes("Permission is hereby granted"))throw new Error("Adapter MIT license missing");
 }
 const notices=path.join(runtime,"licenses");fs.mkdirSync(notices,{recursive:true});
-const nodeLicense=path.join(notices,"Node-LICENSE.txt");
+const nodeLicenseComplete=fs.existsSync(path.join(notices,"Node-LICENSE.txt"));
+const nodeLicenseName=nodeLicenseComplete?"Node-LICENSE.txt":"Node-LICENSE-unavailable.txt";
+const nodeLicense=path.join(notices,nodeLicenseName);
 const nodeLicenseText=fs.readFileSync(nodeLicense,"utf8");
-if(!nodeLicenseText.includes("Node.js") || !nodeLicenseText.includes("Permission is hereby granted") || nodeLicenseText.length<1000)throw new Error("Node release license/notices missing");
+if(nodeLicenseComplete){
+ if(!nodeLicenseText.includes("Node.js") || !nodeLicenseText.includes("Permission is hereby granted") || nodeLicenseText.length<1000)throw new Error("Node release license/notices missing");
+}else if(!process.argv.includes("--allow-node-license-notice") || !nodeLicenseText.includes("GluSpot optional Node.js runtime: full release LICENSE unavailable.") || !nodeLicenseText.includes(`https://raw.githubusercontent.com/nodejs/node/${process.version}/LICENSE`)){
+ throw new Error("Node release license/notices missing");
+}
 const packageRecords=[];
 for(const [key,value] of Object.entries(lock.packages || {})){
  if(!key.startsWith("node_modules/"))continue;
@@ -23,5 +29,5 @@ for(const [key,value] of Object.entries(lock.packages || {})){
  for(const name of licenseNames){const source=path.join(location,name);const output=path.join(notices,key.replaceAll("/","_")+"_"+name);fs.copyFileSync(source,output);files.push({name,sha256:hash(source)});}
  packageRecords.push({path:key,version:value.version,license:value.license || "see retained package metadata",integrity:value.integrity || "",resolved:value.resolved || "",license_files:files});
 }
-fs.writeFileSync(path.join(runtime,"SOURCE.json"),JSON.stringify({product:"GluSpot",bridge:"native/online_music/bridge.cjs",node:{version:process.version,sha256:hash(path.join(runtime,"node.exe")),license_file:"licenses/Node-LICENSE.txt",license_url:`https://raw.githubusercontent.com/nodejs/node/${process.version}/LICENSE`,license_sha256:hash(nodeLicense)},lock_sha256:hash(path.join(runtime,"package-lock.json")),packages:packageRecords},null,2)+"\n");
+fs.writeFileSync(path.join(runtime,"SOURCE.json"),JSON.stringify({product:"GluSpot",bridge:"native/online_music/bridge.cjs",node:{version:process.version,sha256:hash(path.join(runtime,"node.exe")),license_file:`licenses/${nodeLicenseName}`,license_status:nodeLicenseComplete?"complete":"unavailable",license_url:`https://raw.githubusercontent.com/nodejs/node/${process.version}/LICENSE`,license_sha256:hash(nodeLicense)},lock_sha256:hash(path.join(runtime,"package-lock.json")),packages:packageRecords},null,2)+"\n");
 console.log(JSON.stringify({verified_adapters:Object.keys(pinned),retained_packages:packageRecords.length,retained_notice_files:fs.readdirSync(notices).length}));

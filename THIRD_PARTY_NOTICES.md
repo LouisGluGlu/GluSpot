@@ -29,3 +29,45 @@ Windows 系统字体由系统提供，不随本仓库分发。品牌字形的生
 图标素材的来源和边界分别见 [播放控件](assets/music_controls/README.md)、[音频设备](assets/audio_outputs/README.md)、[音乐来源](assets/music_sources/README.md) 与 [窗口控件](assets/window_controls/README.md) 的说明。第三方商标仍属于各自权利人，不代表赞助或官方合作。
 
 README 的界面演示用于说明软件功能；其中的歌曲、歌词、专辑封面及音乐平台标识属于各自权利人，不纳入本项目自有代码的 MIT 授权。演示素材不包含登录二维码或账号凭据。
+
+## 播报表情（样式二）
+
+### bloub
+
+The round broadcast face (样式二) ports the measured Grok-style avatar from
+[bloub](https://github.com/jeremy-prt/bloub) by Jérémy Perret: one circle body,
+two slanted eye capsules on a sphere, gaze drift, blinking, and exponential
+ease-outs. The measurements and the sphere/eye math follow `docs/architecture.md`,
+`docs/measurements.md`, `src/bot/face.ts`, `src/bot/math.ts`, and
+`src/bot/expressions.ts`. GluSpot draws them with QPainter. It does not vendor
+the Vue sources.
+
+```
+MIT License
+
+Copyright (c) 2026 Jérémy Perret
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### ComposeAnimation
+
+https://github.com/ommiao/ComposeAnimation has no license file. None of its
+source is copied. The blink, squint, happy curved eyes, and looking-aside
+expressions in 样式二 are original vector shapes drawn for this app.

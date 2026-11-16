@@ -55,13 +55,18 @@ class SongCollectionFooterMotionTests(unittest.TestCase):
                              "token": 4, "is_preview": False}
         self.sync(now)
 
-    def test_speech_retargets_collection_from_its_visible_position(self):
+    def test_speech_keeps_collection_still_and_voice_picker_retargets_it(self):
         region = QRectF(self.window.rect())
         before = self.window._song_collection_geometry(region, 101., shifted=False)
+        # Speech no longer widens the DJ corner, so the collection stays put.
         self.start_speech(101.)
-        start = self.window._song_collection_geometry(region, 101., shifted=False)
-        middle = self.window._song_collection_geometry(region, 101.12, shifted=False)
-        end = self.window._song_collection_geometry(region, 102., shifted=False)
+        spoken = self.window._song_collection_geometry(region, 102., shifted=False)
+        self.assertAlmostEqual(spoken.left(), before.left(), delta=.5)
+        # The voice picker still widens it, from the visible position.
+        self.window._dj_voice_selector_active = True
+        start = self.window._song_collection_geometry(region, 102.5, shifted=False)
+        middle = self.window._song_collection_geometry(region, 102.62, shifted=False)
+        end = self.window._song_collection_geometry(region, 103.5, shifted=False)
         self.assertAlmostEqual(start.left(), before.left(), delta=.5)
         self.assertLess(end.left(), before.left())
         self.assertLess(middle.left(), before.left())

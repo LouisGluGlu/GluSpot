@@ -59,7 +59,6 @@ class SyntheticOwner(QWidget):
         self.media_is_playing = True
         self.music_flow_intensity = 0.74
         self.music_sparse_highlight_seconds_per_unit = 1.5
-        self.music_surface_reading_lift_level = 2
         self.music_intro_cleanup_enabled = True
         self.enable_dual_line_lyrics = False
         self._music_windowed_preference = False
@@ -461,7 +460,7 @@ def benchmark_reading_cadence(
 def benchmark_highlight_transitions(
     app: QApplication, width: int, height: int, dpr: float,
 ) -> None:
-    """Time the actual timer requests while gold reading enters/leaves OBO glow."""
+    """Time the actual timer requests while measured reading enters/leaves OBO glow."""
     from api.models import TimedLyricUnit
 
     ordinary = "We walk a quiet road while city lights are fading"
@@ -469,7 +468,6 @@ def benchmark_highlight_transitions(
     future_highlighted = "Another dream moves slowly between the stars again"
     for entering in (True, False):
         owner = SyntheticOwner("unit-slow")
-        owner.music_surface_reading_strategy = "gold"
         owner.timed_lyrics = [
             (float(index * 6), (highlighted if index % 4 == 1 else future_highlighted) if index % 2 else ordinary)
             for index in range(24)
@@ -587,7 +585,7 @@ def main() -> None:
     parser.add_argument("--idle-controls", action="store_true", help="measure 5-second hide/restore over the two control dirty rectangles")
     parser.add_argument("--startup-gradient-sequence", action="store_true", help="measure cold open, 31 slider steps, and first three song changes")
     parser.add_argument("--reading-cadence", action="store_true", help="compare native versus cached metadata on slow real-unit lyric timer paints")
-    parser.add_argument("--highlight-transitions", action="store_true", help="time gold OBO ordinary/highlight boundaries at native DPR")
+    parser.add_argument("--highlight-transitions", action="store_true", help="time measured OBO ordinary/highlight boundaries at native DPR")
     args = parser.parse_args()
     if args.frames < 1 or args.warmup < 0 or args.event_loop_seconds < 0:
         parser.error("frames must be positive; warmup and event-loop seconds cannot be negative")

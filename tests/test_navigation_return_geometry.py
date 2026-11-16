@@ -687,6 +687,16 @@ class NavigationReturnGeometryTests(unittest.TestCase):
             }})
             return result
 
+        def local_target_cover():
+            # Derive the displayed cover from child-local geometry and the
+            # leased page origin, independently of transparent HWND mapping.
+            if self.window.library_variant == "sidebar":
+                island = self.window.now_playing_island
+                rect = island.music_cover_rect.toAlignedRect().translated(island.pos())
+            else:
+                rect = self.window.now_playing_button.geometry().adjusted(1, 1, -1, -1)
+            return QRectF(rect.translated(self.expected.topLeft()))
+
         sampler = QTimer()
         sampler.setInterval(10)
         sampler.timeout.connect(lambda: observations.append((
@@ -707,10 +717,7 @@ class NavigationReturnGeometryTests(unittest.TestCase):
                 "shared": QRect(self.owner._music_page_geometry),
                 "library_geometry": QRect(self.controller._library_geometry),
                 "normal_geometry": QRect(self.surface._normal_geometry),
-                # Derive this from the local button and the leased page
-                # rectangle, independently of a transparent HWND relocation.
-                "local_target_cover": QRectF(self.window.now_playing_button.geometry().adjusted(1, 1, -1, -1)
-                    .translated(self.expected.topLeft())),
+                "local_target_cover": local_target_cover(),
                 "origin_geometry": QRect(self.nav._origin_frame.geometry)
                     if self.nav._origin_frame is not None else QRect(),
                 "target_geometry": QRect(self.nav._target_frame.geometry)

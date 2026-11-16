@@ -19,6 +19,7 @@ class GroupedLibraryFlowTests(unittest.TestCase):
 
     def setUp(self):
         self.window = MusicLibraryWindow()
+        self.window.set_library_variant("classic")  # Folded groups and shelf transitions.
         self.window.set_account(AccountSnapshot('netease', True, 'fixture', '测试账号'))
         self.catalog = (
             LibraryCollection('fm', 'fm', '私人漫游', '', group='for_you'),
@@ -50,6 +51,10 @@ class GroupedLibraryFlowTests(unittest.TestCase):
         shelf=self.window._shelves[0]
         self.assertEqual(shelf.items,(self.catalog[1],))
         shelf.tiles[0][1].click()
+        # A playlist opens its own page first; playing it is the page's button.
+        self.assertTrue(self.window.playlist_page_open);self.assertEqual(played.count(),0)
+        self.assertEqual(self.window.playlist_page.collection,self.catalog[1])
+        self.window.playlist_page.request_play_all(shelf.tiles[0][1].geometry())
         self.assertEqual(played.at(0)[:2],[self.catalog[1],'default'])
         self.assertEqual(browsed.count(),0)
 
@@ -96,7 +101,10 @@ class GroupedLibraryFlowTests(unittest.TestCase):
         next(group for group in self.window._groups if group.title=='个人歌单').click();self.settle()
         self.assertEqual(played.count(),0)
         self.assertEqual(self.window._shelves[0].items,(self.catalog[2],))
-        self.window._shelves[0].tiles[0][1].click();self.assertEqual(played.count(),1)
+        self.window._shelves[0].tiles[0][1].click();self.assertEqual(played.count(),0)
+        self.assertTrue(self.window.playlist_page_open)
+        self.window.playlist_page.request_play_all(self.window._shelves[0].tiles[0][1].geometry())
+        self.assertEqual(played.count(),1)
 
     def test_horizontal_wheel_moves_collections_without_moving_title_or_vertical_page(self):
         more=tuple(LibraryCollection(f'rec-{i}','playlist',f'推荐{i}','','id-'+str(i),group='recommended') for i in range(10))

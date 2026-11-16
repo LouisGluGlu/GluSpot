@@ -24,6 +24,11 @@ from tests.test_owned_playback import Player as MediaPlayer
 from tests.test_playback_entry_controller import FakeIsland as EntryIsland, FakeSettings, FakeSystem, FakeTasks
 
 
+
+def _global_rect(widget):
+    from PySide6.QtCore import QPoint, QRect
+    return QRect(widget.mapToGlobal(QPoint(0, 0)), widget.size())
+
 class Service:
     def __init__(self):
         self.accounts = {source: AccountSnapshot(source, True, source + "-user", source + " account", state="verified")
@@ -143,6 +148,19 @@ class Player(QObject):
     def play_personal_fm(self, source): return self._catalog("fm", source)
     def play_personal_dj(self, source): return self._catalog("dj", source)
     def play_playlist(self, source, playlist): return self._catalog("playlist", source, playlist)
+
+    def insert_and_play(self, songs, index=0):
+        self.calls.append(("insert", tuple(song.song_id for song in songs), index))
+        if not self.accepted:
+            return False
+        cut = self.index + 1 if self.track is not None else 0
+        self.queue = self.queue[:cut] + tuple(songs) + self.queue[cut:]
+        self.index = cut + index
+        self.track = replace(track(self.queue[self.index]), is_playing=True)
+        self._set_status("loading_stream")
+        self._set_status("playing")
+        self.changed.emit()
+        return True
     def enqueue_next(self, song):
         self.calls.append(("enqueue", song))
         if not self.accepted or self.track is None:
@@ -204,6 +222,7 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.service, self.player = Service(), Player()
         self.tasks, self.art_tasks = FakeTasks(), FakeTasks()
         self.window, self.island, self.entry = MusicLibraryWindow(), Island(), Entry()
+        self.window.set_library_variant("classic")  # Aggregate paging and folded shelves.
         self.controller = MusicLibraryController(self.settings, self.service, self.player, self.island, self.entry,
             window=self.window, tasks=self.tasks, art_tasks=self.art_tasks)
         self.song = OnlineSong("netease", "song-1", "synthetic song")
@@ -421,11 +440,58 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.settings.set("v2_library_last_playback_surface", "window")
         shelf = next(shelf for shelf in self.window._shelves if shelf.group_key == "personal")
         shelf.tiles[0][1].click()
+        # The cover opens the playlist's page and asks for its songs.
+        self.assertEqual(self.player.calls, [])
+        self.assertTrue(any(token[0] == "page_tracks" for token, _action in self.tasks.jobs))
+        self.window.playlist_page.request_play_all(_global_rect(shelf.tiles[0][1]))
         self.assertEqual(self.player.calls, [("playlist", "netease", "list-1")])
         self.assertEqual(self.controller._opening[0], "window")
         self.assertTrue(self.controller._opening[1].isValid())
         self.assertFalse(any(call[0] == "tracks" for call in self.service.calls))
         self.assertFalse(any(token[0] == "browse" for token, _action in self.tasks.jobs))
+
+    def test_playlist_page_lists_songs_and_plays_a_row_ahead_of_the_queue(self):
+        self.open()
+        self.player.play_queue((OnlineSong("netease", "current", "current"), OnlineSong("netease", "after", "after")))
+        songs = tuple(OnlineSong("netease", f"s{i}", f"song {i}", "singer", duration_seconds=200) for i in range(3))
+        self.service.track_pages["netease", "list-1", 0] = CatalogPage(songs, 3, False)
+        shelf = next(shelf for shelf in self.window._shelves if shelf.group_key == "personal")
+        shelf.tiles[0][1].click()
+        page = self.window.playlist_page
+        self.assertTrue(self.window.playlist_page_open)
+        self.tasks.run(self.tasks.latest("page_tracks"))
+        self.assertEqual(tuple(row.song for row in page.rows), songs)
+        self.assertFalse(page.loading)
+        self.assertIn("3 首歌曲", page.summary())
+        # The cover of a row: only that song now, then the old queue.
+        page.request_song(1, "single", _global_rect(shelf.tiles[0][1]))
+        self.assertEqual(self.player.calls[-1], ("insert", ("s1",), 0))
+        self.assertEqual([s.song_id for s in self.player.queue], ["current", "s1", "after"])
+        self.window.finish_open_transition()
+        self.controller._opening = None
+        # "Play this": the whole list from that row, then the old queue.
+        self.controller.play_from_page(page.collection, page.rows, 2, _global_rect(shelf.tiles[0][1]), "list")
+        self.assertEqual(self.player.calls[-1], ("insert", ("s0", "s1", "s2"), 2))
+        self.assertEqual(self.player.track.track_id, "owned:netease:s2")
+
+    def test_playlist_page_queue_next_and_add_to_playlist(self):
+        self.open()
+        self.player.play_queue((OnlineSong("netease", "current", "current"),))
+        songs = (OnlineSong("netease", "s0", "song 0", "singer"),)
+        self.service.track_pages["netease", "list-1", 0] = CatalogPage(songs, 1, False)
+        shelf = next(shelf for shelf in self.window._shelves if shelf.group_key == "personal")
+        shelf.tiles[0][1].click()
+        self.tasks.run(self.tasks.latest("page_tracks"))
+        row = self.window.playlist_page.rows[0]
+        self.window.playlist_page.queueNextRequested.emit(row)
+        self.assertEqual(self.player.queue[1], songs[0])
+        added = []
+        self.service.add_song_to_playlist = lambda source, song_id, playlist_id: added.append((source, song_id, playlist_id))
+        target = next(c for c in self.controller._collections if c.kind == "playlist" and c.group == "personal")
+        self.controller._add_song_to(row.song, target)
+        self.tasks.run(self.tasks.latest("page_add"))
+        self.assertEqual(added, [("netease", "s0", target.playlist_id)])
+        self.assertIn(target.title, self.window._notice)
 
     def test_queue_next_uses_visible_authorized_song_and_keeps_current_playback(self):
         self.open()
@@ -441,6 +507,22 @@ class MusicLibraryControllerTests(unittest.TestCase):
         hidden = replace(song_row, key="song:netease:unavailable", song=replace(self.song, song_id="unavailable"))
         self.controller.queue_next(hidden)
         self.assertEqual(len(self.player.queue), 2)
+
+    def test_queue_next_retry_clears_its_error_but_preserves_other_actionable_errors(self):
+        self.open()
+        self.search("query")
+        row = self.controller._rows((self.song,))[0]
+        self.window.set_search_results((row,))
+        self.player.enqueue_next = Mock(return_value=False)
+        self.controller.queue_next(row)
+        self.assertIn("请先播放", self.window._error)
+        self.player.enqueue_next.return_value = True
+        self.controller.queue_next(row)
+        self.assertEqual(self.window._error, "")
+        self.assertIn("下一首", self.window.scroll.toolTip())
+        self.window.set_error("请求失败，请重试或重新进入当前平台")
+        self.controller.queue_next(row)
+        self.assertIn("请求失败", self.window._error)
 
     def test_search_song_selection_keeps_current_search_song_queue_and_selected_index(self):
         self.open()
@@ -525,6 +607,54 @@ class MusicLibraryControllerTests(unittest.TestCase):
             entry_window.close()
             entry_window.deleteLater()
             window.deleteLater()
+
+    def test_entry_receives_current_and_late_cover_palette_without_opening_library(self):
+        from local.music_surface_palette import idle_surface_palette
+        entry = Entry()
+        entry.window = PlaybackEntryWindow()
+        window, island = MusicLibraryWindow(), Island()
+        self.player.track = TrackData("Trippin", "Kara Marni", (), ColorToken(180, 40, 70),
+            ColorToken(40, 20, 30), (), album_art_bytes=_png(QColor("#ac182d")))
+        work = []
+        island._run_background = lambda name, prepare: work.append(prepare)
+        controller = MusicLibraryController(self.settings, self.service, self.player, island, entry,
+            window=window, tasks=FakeTasks(), art_tasks=FakeTasks())
+        try:
+            self.assertFalse(window.isVisible())
+            self.assertFalse(work)
+            entry.window.show_sources()
+            entry.window.show()
+            self.app.processEvents()
+            self.assertEqual(len(work), 1)
+            work.pop()()
+            self.assertIs(entry.window._background_palette, window._background_palette)
+            self.assertTrue(window._background_palette.ambient_colors)
+            self.player.track = None
+            self.player.changed.emit()
+            self.assertEqual(entry.window._background_palette, idle_surface_palette())
+        finally:
+            controller.close()
+            entry.window.close()
+            entry.window.deleteLater()
+            window.deleteLater()
+
+    def test_sidebar_more_fetches_selected_catalog_group(self):
+        self.open()
+        self.window.set_library_variant("sidebar")
+        self.controller._catalog_has_more = True
+        self.controller._recommended_has_more = True
+        self.controller._set_catalog_more()
+        self.window._variant_view.select_section("for_you")
+        self.assertFalse(self.window.more_button.isVisible())
+        self.window._variant_view.select_section("recommended")
+        self.window.more_button.click()
+        token = self.tasks.latest("recommended_catalog")[0]
+        self.assertEqual(token[0], "recommended_catalog")
+        self.tasks.run(self.tasks.latest("recommended_catalog"))
+        self.window._variant_view.select_section("personal")
+        self.assertTrue(self.window.more_button.isVisible())
+        self.window.more_button.click()
+        self.assertEqual(self.tasks.latest("catalog")[0][0], "catalog")
 
     def test_open_failure_does_not_invent_account_and_signed_out_returns_to_source_login(self):
         self.service.accounts["qq"] = AccountSnapshot("qq")
@@ -1202,6 +1332,7 @@ class OwnedControllerHandoffTests(unittest.TestCase):
             player=SignalingMediaPlayer(), audio=object(), tasks=self.play_tasks, artwork_tasks=self.play_art_tasks,
             prefetch_tasks=self.play_prefetch_tasks, stream_cache=None)
         self.window, self.island, self.entry = MusicLibraryWindow(), Island(), Entry()
+        self.window.set_library_variant("classic")  # Existing owned shelf handoffs.
         self.controller = MusicLibraryController(self.settings, self.service, self.player, self.island, self.entry,
             window=self.window, tasks=self.tasks, art_tasks=self.art_tasks)
         self.controller.open_source("netease")
@@ -1368,6 +1499,7 @@ class OwnedControllerHandoffTests(unittest.TestCase):
         self.window.set_library_expanded(True)
         self.window.set_collections((playlist,))
         self.window._shelves[0].tiles[0][1].click()
+        self.window.playlist_page.request_play_all(_global_rect(self.window._shelves[0].tiles[0][1]))
         self.assertFalse(any(call[0] == "tracks" for call in self.service.calls))
         self.assertEqual(self.player.status, "loading_catalog")
         self.assertFalse(self.window.isVisible())
@@ -1403,6 +1535,7 @@ class OwnedControllerHandoffTests(unittest.TestCase):
         self.window.set_library_expanded(True)
         self.window.set_collections((playlist,))
         self.window._shelves[0].tiles[0][1].click()
+        self.window.playlist_page.request_play_all(_global_rect(self.window._shelves[0].tiles[0][1]))
         self.play_tasks.run(self.play_tasks.latest("catalog"))
         self.assertEqual(self.player.index, 0)
         self.assertFalse(self.window.isVisible())
@@ -1427,6 +1560,7 @@ class OwnedControllerHandoffTests(unittest.TestCase):
         self.window.set_library_expanded(True)
         self.window.set_collections((playlist,))
         self.window._shelves[0].tiles[0][1].click()
+        self.window.playlist_page.request_play_all(_global_rect(self.window._shelves[0].tiles[0][1]))
         self.assertIs(self.player.track, current)
         self.assertTrue(current.is_playing)
         self.assertEqual(self.player.player.source(), source)
@@ -1461,6 +1595,7 @@ class OwnedControllerHandoffTests(unittest.TestCase):
                 current, queue, source = self.player.track, self.player.queue, self.player.player.source()
                 self.island.calls.clear()
                 self.window._rows[0].cover.click()
+                self.window.playlist_page.request_play_all(_global_rect(self.window._rows[0].cover))
                 token, catalog_action = self.play_tasks.latest("catalog")
                 self.assertIsNotNone(self.controller._opening)
                 if action == "back":

@@ -5,6 +5,7 @@ Fetching streams and lyrics is asynchronous; stale replies cannot replace a song
 """
 from __future__ import annotations
 
+import logging
 import time
 import threading
 import random
@@ -19,10 +20,22 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from api.models import AlbumQueueEntry, ColorToken, IslandVisualData, TrackData
 from api.lyric_timeline import has_sufficient_word_timing
+from api.lyric_diagnostics import log_lyric_event
+from api.artwork_sources import log_artwork_event
 from api.online_music import CatalogPage, LyricPayload, OnlineMusicError, OnlineSong, StreamInfo
 from api.online_music_artwork import ONLINE_ARTWORK_MAX_BYTES, fetch_online_artwork, online_artwork_colors, online_artwork_min_side, online_artwork_thumbnail_bytes
 from api.owned_stream_cache import OwnedStreamCache, PreparedAudio, StreamDownloadError
 from local.music_tasks import MusicTasks
+
+_DJ_LOG = logging.getLogger("GluSpot.dj")
+_DJ_LOG.setLevel(logging.INFO)
+if not _DJ_LOG.handlers:
+    import sys as _sys
+    if _sys.stderr is not None:
+        _dj_handler = logging.StreamHandler(_sys.stderr)
+        _dj_handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+        _DJ_LOG.addHandler(_dj_handler)
+        _DJ_LOG.propagate = False
 
 _DEFAULT_STREAM_CACHE = object()
 
@@ -88,15 +101,23 @@ class OwnedMusicPlayer(QObject):
     DJ_PREFETCH_FILES = 2
     DJ_CATALOG_TRANSIENT_RETRIES = 2
     ARTWORK_TRANSIENT_RETRIES = 2
+    ARTWORK_NETWORK_RETRIES = 3
     ARTWORK_RETRY_SECONDS = .75
+    ARTWORK_REQUEST_TIMEOUT_SECONDS = 8.0
+    ARTWORK_LOAD_TIMEOUT_SECONDS = 30.0
     AUDIO_PREPARATION_BUSY_SECONDS = 3.0
+    LYRICS_ATTEMPT_SECONDS = 12.0
+    LYRICS_TIMEOUT_SECONDS = 30.0
     changed = Signal()
     queueArtworkChanged = Signal()
     statusChanged = Signal(str)
+    # Emitted only while the opt-in provider arbitration is enabled.
+    playbackIntent = Signal(object)
+    playbackStarted = Signal(object)
     _control_requested = Signal(object)
 
     def __init__(self, service, lyrics_store, parent=None, *, player=None, audio=None, dj_player=None, dj_audio=None, tasks=None, artwork_tasks=None, prefetch_tasks=None,
-            stream_cache=_DEFAULT_STREAM_CACHE, download_tasks=None):
+            stream_cache=_DEFAULT_STREAM_CACHE, download_tasks=None, lyric_tasks=None):
         super().__init__(parent)
         self.service = service
         self.lyrics_store = lyrics_store
@@ -140,12 +161,22 @@ class OwnedMusicPlayer(QObject):
             self.audio.volumeChanged.connect(self._dj_music_volume_changed)
         self.tasks = tasks or MusicTasks(self)
         self.tasks.completed.connect(self._completed)
+        self.tasks.completed.connect(self._retry_cover_lyrics)
+        # Account lyric I/O can block independently of stream authorization.
+        # A bounded timed lane keeps stale lyrics from exhausting stream slots.
+        self.lyric_tasks = lyric_tasks if lyric_tasks is not None else (
+            self.tasks if tasks is not None else MusicTasks(self, task_timeout_seconds=self.LYRICS_ATTEMPT_SECONDS))
+        if self.lyric_tasks is not self.tasks:
+            self.lyric_tasks.completed.connect(self._completed)
+            self.lyric_tasks.completed.connect(self._retry_cover_lyrics)
         self._control_requested.connect(self._apply_control_request, Qt.ConnectionType.QueuedConnection)
         # Image downloads/decoding cannot occupy the stream/lyric workers.
-        self.artwork_tasks = artwork_tasks or MusicTasks(self)
+        self.artwork_tasks = artwork_tasks or MusicTasks(self,
+            task_timeout_seconds=self.ARTWORK_REQUEST_TIMEOUT_SECONDS)
         self.artwork_tasks.completed.connect(self._completed)
         self.prefetch_tasks = prefetch_tasks or MusicTasks(self)
         self.prefetch_tasks.completed.connect(self._completed)
+        self.prefetch_tasks.completed.connect(self._retry_cover_lyrics)
         self.stream_cache = OwnedStreamCache() if stream_cache is _DEFAULT_STREAM_CACHE else stream_cache
         self.download_tasks = (download_tasks or MusicTasks(self)) if self.stream_cache is not None else None
         if self.download_tasks is not None:
@@ -204,10 +235,26 @@ class OwnedMusicPlayer(QObject):
         # retained. Preferences reparse it off the GUI thread without new I/O.
         self._lyric_payload: LyricPayload | None = None
         self._lyrics_generation = 0
+        self._lyrics_request_serial = 0
+        self._lyrics_request_pending = None
+        self._lyrics_wait_track = None
+        self._lyrics_wait_started_at = 0.
+        self._lyrics_guard_timer = QTimer(self)
+        self._lyrics_guard_timer.setInterval(250)
+        self._lyrics_guard_timer.timeout.connect(self._check_lyrics_deadline)
+        self._companion_epoch = 0
+        self._companion_armed = False
+        self._companion_observed = 0.0
+        self._companion_sampled_at = 0.0
+        self._companion_polls = 0
+        self._companion_timer = QTimer(self)
+        self._companion_timer.setInterval(250)
+        self._companion_timer.timeout.connect(self._project_companion_clock)
         self._lyrics_parse_pending = None
         self._lyrics_enrichment_pending = None
         self._lyrics_enrichment_attempted = False
         self._lyrics_enrichment_source = None
+        self._cover_lyrics_retry = None
         self.playback_mode = "sequential"
         self._normal_playback_mode = "sequential"
         self._mode_epoch = 0
@@ -239,6 +286,9 @@ class OwnedMusicPlayer(QObject):
         self._art_request = 0
         self._art_targets = {}
         self._art_request_targets = {}
+        self._art_request_deadlines = {}
+        self._art_started_at = {}
+        self._art_current_wait = None
         self._art_visible_hint = None
         self._art_visible_keys = ()
         self._art_buffer_keys = ()
@@ -272,8 +322,154 @@ class OwnedMusicPlayer(QObject):
         self._dj_next_lyrics = None
         self._ready_song_lyrics = None
         self._closed = False
+        self._interruption_tracking = False
+        self._interruption_serial = 0
+        self._interruption_candidate = None
+        self._interruption_action_running = False
+        self._interruption_started = None
+        self._interruption_pause_latched = False
+        self._playback_running_since = None
+
+    def playback_running_since(self):
+        """When the current music playback interval began, if it is still running."""
+        if not self.interruption_playing():
+            return None
+        return self._playback_running_since
+
+    def _note_playback_running_clock(self):
+        running = bool(not self._closed and self.track is not None
+            and (self._stream_epoch == self._epoch or self._catalog_stream_is_current())
+            and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+        if running:
+            if self._playback_running_since is None:
+                self._playback_running_since = time.monotonic()
+        else:
+            self._playback_running_since = None
+
+    def set_interruption_tracking_enabled(self, enabled):
+        """Enable intent notifications on the player's owning Qt thread."""
+        if not isinstance(enabled, bool):
+            return False
+        if enabled == self._interruption_tracking:
+            return True
+        self._interruption_tracking = enabled
+        self._interruption_serial += 1
+        self._interruption_candidate = None
+        self._interruption_started = None
+        return True
+
+    def interruption_playing(self):
+        """Actual decoder playback, including genuine associated narration."""
+        return bool(not self._closed and self.track is not None
+            and (self._stream_epoch == self._epoch or self._catalog_stream_is_current())
+            and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+
+    def _user_playback_action(self, action, *, will_play=True, new_stream=True):
+        # Install the intent before an action: cached audio can synchronously
+        # emit PlayingState. Failed actions never publish playbackStarted.
+        latched = self._interruption_pause_latched
+        if will_play:
+            self._interruption_pause_latched = False
+        if not self._interruption_tracking:
+            accepted = action()
+            if not accepted:
+                self._interruption_pause_latched = latched
+            return accepted
+        self._interruption_serial += 1
+        serial = self._interruption_serial
+        intent = dict(serial=serial, at=time.monotonic(), will_play=will_play)
+        self._interruption_candidate = (dict(intent, epoch=self._epoch + int(new_stream))
+            if will_play else None)
+        self._interruption_started = None
+        self._interruption_action_running = True
+        self.playbackIntent.emit(intent)
+        if self._interruption_serial != serial or not self._interruption_tracking:
+            self._interruption_action_running = False
+            return False
+        try:
+            accepted = action()
+        except Exception:
+            if self._interruption_serial == serial:
+                self._interruption_candidate = None
+                self._interruption_started = None
+                self._interruption_pause_latched = latched
+            raise
+        finally:
+            self._interruption_action_running = False
+        if not accepted:
+            if self._interruption_serial == serial:
+                self._interruption_pause_latched = latched
+                self._interruption_candidate = None
+                self._interruption_started = None
+        elif self._interruption_started is not None:
+            started, self._interruption_started = self._interruption_started, None
+            if self._interruption_tracking and started['serial'] == self._interruption_serial:
+                self.playbackStarted.emit(started)
+        return accepted
+
+    def _publish_interruption_start(self):
+        candidate = self._interruption_candidate
+        if (not self._interruption_tracking or candidate is None
+                or not self.interruption_playing() or self._catalog_pending_epoch
+                or self._stream_epoch != self._epoch or self._epoch < candidate['epoch']
+                or self._stream_recovery is not None or self._output_preparing):
+            return
+        self._interruption_candidate = None
+        started = dict(serial=candidate['serial'], at=time.monotonic(),
+            origin=self.playback_origin_token())
+        if self._interruption_action_running:
+            self._interruption_started = started
+        else:
+            self.playbackStarted.emit(started)
+
+    def pause_for_interruption(self, guard=None):
+        """Idempotent Pause through the existing guarded GUI control queue.
+
+        A pending replacement is cancelled without clearing the retained queue
+        or seeking. The latch also blocks stale preparation/recovery callbacks;
+        only a later explicit user Play may release it.
+        """
+        if self._closed or self.track is None:
+            return False
+        if QThread.currentThread() != self.thread():
+            return self._request_control('interruption_pause', guard, self.track.track_id)
+        if not self._interruption_tracking or callable(guard) and not guard():
+            return False
+        serial = self._interruption_serial
+        generation = (self._epoch, self._catalog_epoch, self._queue_epoch, self._mode_epoch)
+        def valid():
+            return (self._interruption_tracking and serial == self._interruption_serial
+                and generation == (self._epoch, self._catalog_epoch, self._queue_epoch, self._mode_epoch)
+                and (not callable(guard) or guard()))
+        self._interruption_candidate = None
+        self._interruption_started = None
+        self._interruption_pause_latched = True
+        self._autoplay_after_load = False
+        self._output_prepare_resume = False
+        self._fm_resume = self._playlist_resume = False
+        if self._stream_recovery is not None:
+            self._stream_recovery.resume = False
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        if not valid():
+            return False
+        if self.dj_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.dj_player.pause()
+        if not valid():
+            return False
+        if self._catalog_pending_epoch:
+            self._catalog_epoch += 1
+            self._catalog_pending_epoch = 0
+            self._cancel_playlist_loading()
+            self._restore_catalog_stream()
+        self.changed.emit()
+        return not self.interruption_playing()
 
     def _set_status(self, value):
+        if value in {"busy", "catalog_unavailable", "stream_unavailable", "playback_failed"}:
+            # A failed selection cannot acquire a later automatic queue start.
+            self._interruption_candidate = None
+            self._interruption_started = None
         self.status = value
         self.statusChanged.emit(value)
 
@@ -309,13 +505,15 @@ class OwnedMusicPlayer(QObject):
         self._try_start_dj_overlay()
 
     def _play_music(self):
+        if self._interruption_pause_latched:
+            return
         if self._output_preparing:
             self._output_prepare_resume = True
             return
         self.player.play()
 
     def play_queue(self, songs, index=0):
-        return self._replace_queue(songs, index)
+        return self._user_playback_action(lambda: self._replace_queue(songs, index))
 
     def _refresh_queue_view(self):
         # Queue storage is immutable. Cache the ordinary-song view by object
@@ -440,7 +638,7 @@ class OwnedMusicPlayer(QObject):
             self._shuffle_bag = deque(i for i in self._shuffle_bag if i != target)
             self._trim_shuffle_history()
         self.index = self._intro_start_for_song(target)
-        return self._load_song()
+        return self._user_playback_action(self._load_song)
 
     def enqueue_next(self, song: OnlineSong) -> bool:
         """Retain the sounding song and queue, playing this addition next once.
@@ -484,6 +682,49 @@ class OwnedMusicPlayer(QObject):
         if self._playlist_waiting_next and self._play_next_indices:
             return self._advance_queue(autoplay=self._playlist_resume)
         return True
+
+    def insert_and_play(self, songs, index=0) -> bool:
+        """Play ``songs[index]`` now, then the rest of ``songs``, then the old queue.
+
+        A playlist page's "play this" inserts the whole list right after the
+        sounding song and starts at the chosen row; a single song inserted
+        this way is the cover's "play now". When the inserted songs run out,
+        the queue carries on where it was. With nothing playing yet the
+        songs simply become the queue.
+        """
+        songs = tuple(songs) if isinstance(songs, (tuple, list)) else ()
+        if (self._closed or not songs or not all(isinstance(song, OnlineSong) and song.media_kind == "song"
+                                                 for song in songs)
+                or not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(songs)):
+            return False
+        if (self.track is None or not 0 <= self.index < len(self.queue)
+                or self._catalog_pending_epoch or self._fm_advance_pending):
+            return self.play_queue(songs, index=index)
+        if QThread.currentThread() != self.thread():
+            return self._request_control("insert_play", (songs, index), self.track.track_id)
+        introduced = self._introduced_song_index() if self._is_voice_segment() else None
+        insertion = (introduced if introduced is not None else self.index) + 1
+        count = len(songs)
+        shifted = lambda i: i + count if i >= insertion else i
+        self._shuffle_history = [shifted(i) for i in self._shuffle_history]
+        self._shuffle_pending = deque(shifted(i) for i in self._shuffle_pending)
+        self._shuffle_bag = deque(shifted(i) for i in self._shuffle_bag)
+        earlier = deque(shifted(i) for i in self._play_next_indices)
+        self.queue = self.queue[:insertion] + songs + self.queue[insertion:]
+        target = insertion + index
+        # The rest of the chosen list plays next, in its own order, whatever
+        # the shuffle or repeat mode; then the earlier play-next songs.
+        self._play_next_indices = deque(range(target + 1, insertion + count))
+        self._play_next_indices.extend(earlier)
+        if self._uses_shuffle_order():
+            self._shuffle_cursor += 1
+            self._shuffle_history.insert(self._shuffle_cursor, target)
+            self._trim_shuffle_history()
+        self._mode_epoch += 1
+        self._clear_audio_prefetch()
+        self._clear_dj_audio_prefetch(keep_introduction=True)
+        self.index = target
+        return self._user_playback_action(self._load_song)
 
     def _replace_queue(self, songs, index=0, *, fm_source="", fm_kind="fm", prefetch_all_artwork=False):
         if self._closed:
@@ -629,6 +870,8 @@ class OwnedMusicPlayer(QObject):
         self._set_music_duck(False, ramp=restore_ramp)
 
     def _prepare_dj_overlay(self, voices, prepared=None):
+        _DJ_LOG.info("dj intro prepare parts=%d next=%r cached=%s", len(tuple(voices)),
+                     self.track.title if self.track is not None else "", prepared is not None)
         self._dj_completion = None
         self._dj_intro_failure = None
         self._dj_overlay_voices = tuple(voices)
@@ -747,7 +990,7 @@ class OwnedMusicPlayer(QObject):
             self.changed.emit()
 
     def _try_start_dj_overlay(self):
-        if self._output_preparing:
+        if self._output_preparing or self._interruption_pause_latched:
             return
         if self._dj_overlay_is_preview and self._dj_overlay_voices and self._dj_source_ready and not self._closed:
             if not self._dj_preview_authorized():
@@ -768,6 +1011,8 @@ class OwnedMusicPlayer(QObject):
             self._dj_music_start_seconds = max((self._qt_position_ms() - voice_ms) / 1000.0,
                 self._dj_pcm_clock_floor, self._dj_music_end_seconds if self._dj_overlay_position else 0.0)
             self._set_music_duck(True)
+            _DJ_LOG.info("dj intro speak part=%d/%d next=%r", self._dj_overlay_position + 1,
+                         len(self._dj_overlay_voices), self._dj_next_title)
             self.dj_player.play()
 
     def _sync_dj_preview_music_state(self):
@@ -854,6 +1099,8 @@ class OwnedMusicPlayer(QObject):
 
     def _fail_dj_overlay(self, reason):
         title, token = self._dj_next_title, self._dj_token
+        _DJ_LOG.warning("dj intro failed reason=%s next=%r preview=%s", reason, title,
+                        self._dj_overlay_is_preview)
         preview = self._dj_overlay_is_preview
         context = self._dj_completion_context()
         genuine = (not preview and bool(self._dj_overlay_voices) and self.personal_dj_enabled
@@ -1466,11 +1713,13 @@ class OwnedMusicPlayer(QObject):
             self._shuffle_cursor -= 1
 
     def play_daily(self, source_id="netease"):
-        return self._catalog("daily", source_id, lambda: self.service.daily_recommendations(source_id))
+        return self._user_playback_action(lambda: self._catalog("daily", source_id,
+            lambda: self.service.daily_recommendations(source_id)))
 
     def play_personal_fm(self, source_id="netease"):
         kind = "dj" if source_id == "netease" and self.personal_dj_enabled else "fm"
-        return self._catalog(kind, source_id, self._fm_fetch_action(kind, source_id))
+        return self._user_playback_action(lambda: self._catalog(kind, source_id,
+            self._fm_fetch_action(kind, source_id)))
 
     def play_personal_fm_selection(self, source_id, songs, index=0):
         """Play an already browsed FM song, retaining genuine FM continuation.
@@ -1490,8 +1739,8 @@ class OwnedMusicPlayer(QObject):
                     and song.song_id.strip() and isinstance(song.title, str) and song.title.strip()
                     for song in songs)):
             return False
-        return self._replace_queue(songs, index, fm_source=source_id,
-            fm_kind="dj" if self.personal_dj_enabled else "fm")
+        return self._user_playback_action(lambda: self._replace_queue(songs, index, fm_source=source_id,
+            fm_kind="dj" if self.personal_dj_enabled else "fm"))
 
     def play_personal_dj(self, source_id="netease"):
         # Compatibility entry point: this is FM with introductions enabled,
@@ -1515,7 +1764,7 @@ class OwnedMusicPlayer(QObject):
                     return _PlaylistStart(source_id, playlist_id, page, offset, pages)
                 offset = page.next_offset
             return ()
-        return self._catalog("playlist", source_id, fetch)
+        return self._user_playback_action(lambda: self._catalog("playlist", source_id, fetch))
 
     @staticmethod
     def _playlist_page_songs(page, source_id):
@@ -1774,6 +2023,14 @@ class OwnedMusicPlayer(QObject):
                 self.stop()
                 return True
             return False
+        self._interruption_candidate = None
+        self._interruption_started = None
+        if self._interruption_tracking:
+            self._interruption_serial += 1
+            serial, pending = self._interruption_serial, self._catalog_pending_epoch
+            self.playbackIntent.emit(dict(serial=serial, at=time.monotonic(), will_play=False))
+            if serial != self._interruption_serial or pending != self._catalog_pending_epoch:
+                return False
         self._catalog_epoch += 1
         self._catalog_pending_epoch = 0
         self._cancel_playlist_loading()
@@ -1800,6 +2057,7 @@ class OwnedMusicPlayer(QObject):
         return True
 
     def _load_song(self, *, autoplay=True, introduction=(), introduction_audio=None):
+        autoplay = autoplay and not self._interruption_pause_latched
         if self._closed:
             return False
         self._playlist_waiting_next = False
@@ -1869,6 +2127,9 @@ class OwnedMusicPlayer(QObject):
         prefetched = self._take_prefetched_audio(song)
         self._clear_audio_prefetch()
         cached = self._art_cache.get(self._art_key(song))
+        self._companion_epoch = self._epoch if song.source_id == "apple_music" and song.media_kind == "song" else 0
+        if not self._companion_epoch:
+            self._companion_timer.stop()
         self.player.stop()
         self.player.setSource(QUrl())
         self._release_prepared_audio()
@@ -1890,17 +2151,15 @@ class OwnedMusicPlayer(QObject):
             source_app_id="GluSpot", position_sampled_at=time.monotonic(), position_observed_seconds=0.0,
             album_art_source="thumbnail" if visual_preview else "original" if visual_cached else "",
             album_art_lookup_state=("pending" if visual_pending else "failed") if visual_preview
-                else "original" if visual_cached else "failed" if self._art_key(visual_song) in self._art_failed
+                else "original" if visual_cached else "failed" if visual_key in self._art_failed and not visual_pending
                 else "pending" if visual_song.artwork_url else "miss",
             album_queue=self._album_queue(),
         ))
+        self._begin_lyrics_wait()
         if introduction:
             self._prepare_dj_overlay(introduction, introduction_audio)
-            preferences = self._lyrics_preferences_snapshot()
-            if not self.tasks.submit(("dj_lyrics", epoch, self._catalog_epoch,
-                    song.source_id, song.song_id, self._lyrics_generation),
-                    lambda: self._fetch_lyrics(song, preferences) if not self._closed
-                    and epoch == self._epoch else None):
+            if not self._submit_lyrics_request(song, ("dj_lyrics", epoch, self._catalog_epoch,
+                    song.source_id, song.song_id, self._lyrics_generation)):
                 self._lyrics_reparse_failed()
         else:
             self._clear_dj_presentation()
@@ -1912,10 +2171,9 @@ class OwnedMusicPlayer(QObject):
                 # genuine visual payload. Resume a cancelled preference parse
                 # without waiting for another account request or audio file.
                 self._queue_lyrics_reparse()
-            preferences = self._lyrics_preferences_snapshot()
-            if not self.tasks.submit(("dj_lyrics", epoch, self._catalog_epoch, target.source_id, target.song_id, self._lyrics_generation),
-                lambda: self._fetch_lyrics(target, preferences) if not self._closed
-                and epoch == self._epoch and self._is_voice_segment() else None) and self._lyrics_parse_pending is None:
+            if not self._submit_lyrics_request(target,
+                    ("dj_lyrics", epoch, self._catalog_epoch, target.source_id, target.song_id, self._lyrics_generation)
+                    ) and self._lyrics_parse_pending is None:
                 self._lyrics_reparse_failed()
         elif not introduction:
             self._dj_state = "idle"
@@ -1928,8 +2186,36 @@ class OwnedMusicPlayer(QObject):
         if self.personal_dj_enabled and self._fm_source == "netease" and self._fm_kind == "dj":
             self._prefetch_fm()
             self._prefetch_audio()
+        key = self._art_key(song)
+        if not cached and key not in self._art_failed:
+            self._art_attempted.discard(key)
+        if self._companion_epoch == epoch:
+            if not self._autoplay_after_load:
+                # Nothing is waiting on the page, so the lyric query can go now.
+                self._queue_apple_lyrics(song)
+                self._companion_armed = False
+                self._set_status("playing")
+                self.changed.emit()
+                self._pump_artwork()
+                return True
+            # Play owns the page until it returns. A lyric query sent beside it
+            # can hit the 20s reload and tear the song down.
+            accepted = self.tasks.submit(("companion", epoch, catalog_epoch), lambda: self._request_companion_play(song)
+                if not self._closed and epoch == self._epoch and catalog_epoch == self._catalog_epoch else None)
+            if not accepted:
+                self._set_status("busy")
+                self._lyrics_unavailable()
+            else:
+                self.changed.emit()
+            self._pump_artwork()
+            return accepted
         if prefetched is not None:
             self._audio_completed(("audio", epoch, catalog_epoch), prefetched, None)
+            # A local audio hit still advances the cover window. Otherwise
+            # cached list thumbnails never acquire their current-song original
+            # once continuous audio prefetch bypasses the stream task path.
+            if not self._closed and epoch == self._epoch and catalog_epoch == self._catalog_epoch:
+                self._pump_artwork()
             return True
         accepted = self.tasks.submit(("stream", epoch, catalog_epoch), lambda: self._resolve_stream(song)
             if not self._closed and epoch == self._epoch and catalog_epoch == self._catalog_epoch else None)
@@ -1942,15 +2228,30 @@ class OwnedMusicPlayer(QObject):
             self._lyrics_unavailable()
         else:
             self.changed.emit()
-        key = self._art_key(song)
-        if not cached and key not in self._art_failed:
-            self._art_attempted.discard(key)
         self._pump_artwork()
         return accepted
 
     def _completed(self, token, result, error):
+        if token[0] in {"lyrics", "dj_lyrics"} and len(token) == (4 if token[0] == "lyrics" else 7):
+            pending = self._lyrics_request_pending
+            if pending is None or pending[0] != token:
+                return
+            self._check_lyrics_deadline()
+            if self._lyrics_request_pending is None:
+                return
+            self._lyrics_request_pending = None
+            base_token, song, attempt = token[:-1], pending[1], pending[2]
+            if (error in {"timeout", "network", "request_failed", "busy", "rate_limited"}
+                    and attempt == 1 and not self._closed
+                    and token[1] == self._epoch):
+                if self._submit_lyrics_request(song, base_token, attempt=2):
+                    return
+            token = base_token
         if token[0] == "dj_prefetch":
             self._dj_prefetch_completed(token, result, error)
+            return
+        if token[0] == "apple_lyric_prefetch":
+            # The worker already filled the caches; nothing is shown from here.
             return
         if token[0] in {"dj_stream", "dj_audio"}:
             self._dj_overlay_completed(token, result, error)
@@ -1961,6 +2262,19 @@ class OwnedMusicPlayer(QObject):
         if self._closed:
             return
         kind, epoch, *extra = token
+        if kind in {"lyrics", "dj_lyrics", "lyrics_refresh", "lyrics_enrichment"}:
+            log_lyric_event("owned_completion", self.track.track_id if self.track is not None else "",
+                "stale_epoch" if epoch != self._epoch else "result_error" if error else "result_received",
+                epoch=epoch, current_epoch=self._epoch, current_generation=self._lyrics_generation,
+                error=bool(error))
+        if kind == "companion":
+            self._companion_ready(epoch, extra[0] if extra else 0, result, error)
+            return
+        if kind == "companion_status":
+            self._companion_status_ready(epoch, result, error)
+            return
+        if kind in {"companion_seek", "companion_pause"}:
+            return
         if kind == "artwork":
             self._artwork_completed(epoch, extra, result, error)
             return
@@ -2074,7 +2388,10 @@ class OwnedMusicPlayer(QObject):
                 return
             self._start_stream_audio(result, QUrl(result.url))
         elif kind == "lyrics":
-            if self._stream_epoch != epoch and not self._catalog_stream_is_current():
+            # Apple plays inside the companion page, not on a local stream, so
+            # its lyrics are current while the companion owns this epoch.
+            if (self._stream_epoch != epoch and not self._catalog_stream_is_current()
+                    and not (epoch == self._epoch and self._apple_companion_current())):
                 return
             if error or result is None:
                 self._lyrics_reparse_failed()
@@ -2138,6 +2455,295 @@ class OwnedMusicPlayer(QObject):
             self._lyrics_enrichment_source = result
             self._lyrics_generation += 1
             self._queue_lyrics_reparse()
+
+    def _queue_apple_lyrics(self, song) -> bool:
+        """Ask the signed-in page for timed lyrics after playback has the page."""
+        if song is None or getattr(song, "source_id", "") != "apple_music" or getattr(song, "media_kind", "song") != "song":
+            return False
+        from api.apple_music_log import apple_log
+        apple_log("lyrics", stage="request", result="begin")
+        return self._submit_lyrics_request(song, ("lyrics", self._epoch, self._lyrics_generation))
+
+    APPLE_LYRIC_CACHE_LIMIT = 32
+    APPLE_LYRIC_MISS_SECONDS = 600.0
+
+    def _apple_lyric_cache_key(self, song):
+        catalog_id = str(getattr(song, "catalog_id", "") or "")
+        if not catalog_id and song.song_id.isdigit():
+            catalog_id = song.song_id
+        return song.song_id, catalog_id
+
+    def _apple_lyric_cache_get(self, key):
+        """Cached TTML text ("" is a recent miss), or None when unknown."""
+        import threading
+        lock = self.__dict__.setdefault("_apple_lyric_lock", threading.Lock())
+        with lock:
+            cache = self.__dict__.setdefault("_apple_lyric_cache", {})
+            entry = cache.get(key)
+            if entry is None:
+                return None
+            ttml, stored_at = entry
+            if not ttml and time.monotonic() - stored_at > self.APPLE_LYRIC_MISS_SECONDS:
+                cache.pop(key, None)
+                return None
+            return ttml
+
+    def _apple_lyric_cache_put(self, key, ttml):
+        import threading
+        lock = self.__dict__.setdefault("_apple_lyric_lock", threading.Lock())
+        with lock:
+            cache = self.__dict__.setdefault("_apple_lyric_cache", {})
+            cache.pop(key, None)
+            cache[key] = (str(ttml or ""), time.monotonic())
+            while len(cache) > self.APPLE_LYRIC_CACHE_LIMIT:
+                cache.pop(next(iter(cache)))
+
+    def _prefetch_next_apple_lyrics(self) -> bool:
+        """Look up the next song's lyrics while this one plays.
+
+        A song with no Apple TTML falls back to the title search, which can
+        take 10 s or more. Pressing Next used to start that search only then,
+        so the skipped-to song sat on "加载歌词中". Fetching one song ahead
+        fills the TTML cache and the lyric store's own cache instead.
+        """
+        if self._closed or not self.queue:
+            return False
+        try:
+            upcoming = next((i for i in self._upcoming_indices(include_voice=False)
+                             if 0 <= i < len(self.queue) and i != self.index), None)
+        except (IndexError, ValueError):
+            # A shuffle order that is not built yet; the prefetch is only a hint.
+            return False
+        song = self.queue[upcoming] if upcoming is not None else None
+        if (song is None or getattr(song, "source_id", "") != "apple_music"
+                or getattr(song, "media_kind", "song") != "song"):
+            return False
+        key = self._apple_lyric_cache_key(song)
+        if self._apple_lyric_cache_get(key):
+            return False
+        discard = getattr(self.lyric_tasks, "discard", None)
+        if callable(discard):
+            discard(lambda queued: queued[0] == "apple_lyric_prefetch")
+        return self.lyric_tasks.submit(("apple_lyric_prefetch", self._epoch, song.song_id),
+                                       lambda: self._prefetch_apple_lyrics(song, key))
+
+    def _prefetch_apple_lyrics(self, song, key):
+        """Worker thread: warm the TTML cache, else the title-search cache."""
+        if self._closed:
+            return None
+        ttml = self._apple_lyric_cache_get(key)
+        if ttml is None:
+            reader = getattr(self.service, "apple_timed_lyrics", None)
+            try:
+                ttml = reader(*key) if callable(reader) else ""
+            except Exception:
+                return None             # a failed read is not a miss; ask again later
+            self._apple_lyric_cache_put(key, ttml)
+        if not ttml and (song.title or "").strip() and not self._closed:
+            try:
+                self.lyrics_store.resolve(song.title, song.artist, song.album, song.duration_seconds)
+            except Exception:
+                return None
+        return True
+
+    def _start_apple_sea(self, song) -> bool:
+        """Give an Apple song the sea level's lights and colour change.
+
+        The analysis is borrowed from the same recording on NetEase (see
+        ``local.apple_sea_source``), read from disk when it was made before.
+        Only while the sea-level background is the chosen style.
+        """
+        if self._closed or song is None or getattr(song, "source_id", "") != "apple_music" or self.track is None:
+            return False
+        try:
+            style = str(self.lyrics_store._setting_value("v2_music_ambience_style", "") or "").strip().lower()
+        except Exception:
+            style = ""
+        if style != "sea_level":
+            return False
+        from local import apple_sea_source
+        from local.sea_lyric_background import shared_analyzer
+        key = apple_sea_source.plan_key(song)
+        if not key:
+            return False
+        by_track = self.__dict__.setdefault("_apple_sea_by_track", {})
+        pending = self.__dict__.setdefault("_apple_sea_pending", set())
+        track_id = self.track.track_id
+        analyzer = shared_analyzer()
+        if analyzer.has_plan(key):
+            by_track[track_id] = key
+            return True
+        data = apple_sea_source.load(key)
+        if data is not None:
+            if data.get("miss"):
+                return False
+            analyzer.adopt(key, data)
+            by_track[track_id] = key
+            return True
+        if key in pending:
+            return False
+        tasks = self.__dict__.get("_apple_sea_tasks")
+        if tasks is None:
+            tasks = self._apple_sea_tasks = MusicTasks(self, worker_count=1, task_timeout_seconds=240.0)
+            tasks.completed.connect(self._apple_sea_completed)
+        accepted = tasks.submit(("apple_sea", self._epoch, key, track_id),
+                                lambda: apple_sea_source.borrow(self.service, self.stream_cache, song,
+                                                                cancelled=lambda: self._closed))
+        if accepted:
+            pending.add(key)
+        return accepted
+
+    def _apple_sea_completed(self, token, result, error):
+        _kind, _epoch, key, track_id = token
+        self.__dict__.setdefault("_apple_sea_pending", set()).discard(key)
+        if self._closed or error or not isinstance(result, dict):
+            return
+        from local.sea_lyric_background import shared_analyzer
+        self.__dict__.setdefault("_apple_sea_by_track", {})[track_id] = key
+        shared_analyzer().adopt(key, result)
+
+    def apple_sea_key(self, track_id: str):
+        """The borrowed analysis for this Apple track, once it exists."""
+        key = self.__dict__.get("_apple_sea_by_track", {}).get(track_id)
+        if not key:
+            return None
+        from local.sea_lyric_background import shared_analyzer
+        return key if shared_analyzer().has_plan(key) else None
+
+    def _apple_companion_current(self) -> bool:
+        return self._companion_epoch != 0 and self._companion_epoch == self._epoch
+
+    def _request_companion_play(self, song):
+        body = self.service.companion_transport("apple_music", "play", {"song_id": song.song_id})
+        if not isinstance(body, dict):
+            raise OnlineMusicError("invalid_response", "apple_music")
+        return body
+
+    def _companion_ready(self, epoch, catalog_epoch, result, error):
+        if self._closed or epoch != self._epoch or catalog_epoch != self._catalog_epoch or self.track is None:
+            return
+        song = self.queue[self.index] if 0 <= self.index < len(self.queue) else None
+        if error or not isinstance(result, dict):
+            self._companion_timer.stop()
+            self._companion_epoch = 0
+            self._set_status("stream_unavailable")
+            self.failure_reason = error or "request_failed"
+            if not self._queue_apple_lyrics(song):
+                self._lyrics_unavailable()
+            self.changed.emit()
+            return
+        duration = result.get("duration")
+        position = result.get("position")
+        try:
+            duration = float(duration) if duration else self.track.duration_seconds
+            position = max(0.0, float(position or 0))
+        except (TypeError, ValueError):
+            duration, position = self.track.duration_seconds, 0.0
+        preview = result.get("preview") is True or (0 < duration <= 35 and self.track.duration_seconds > duration + 15)
+        self._companion_observed = position
+        self._companion_sampled_at = time.monotonic()
+        self._companion_polls = 0
+        self._companion_armed = True
+        self._companion_peak = position
+        self.track = replace(self.track, is_playing=result.get("playing") is not False, duration_seconds=duration or self.track.duration_seconds,
+            position_seconds=position, position_observed_seconds=position, position_sampled_at=self._companion_sampled_at)
+        self._set_status("trial" if preview else "playing")
+        self._companion_timer.start()
+        self._queue_apple_lyrics(song)
+        self._prefetch_next_apple_lyrics()
+        self._start_apple_sea(song)
+        self.changed.emit()
+
+    def _project_companion_clock(self):
+        if not self._apple_companion_current() or self.track is None or self.status not in {"playing", "trial"}:
+            return
+        elapsed = max(0.0, time.monotonic() - self._companion_sampled_at)
+        position = self._companion_observed + (elapsed if self.track.is_playing else 0.0)
+        if self.track.duration_seconds:
+            position = min(position, self.track.duration_seconds)
+        self.track = replace(self.track, position_seconds=position, position_observed_seconds=self._companion_observed,
+                             position_sampled_at=self._companion_sampled_at)
+        self._companion_polls += 1
+        if self._companion_polls % 4 == 0:
+            epoch, catalog_epoch = self._epoch, self._catalog_epoch
+            self.tasks.submit(("companion_status", epoch), lambda: self.service.companion_transport("apple_music", "status")
+                if not self._closed and epoch == self._epoch and catalog_epoch == self._catalog_epoch else None)
+        self.changed.emit()
+
+    def _companion_status_ready(self, epoch, result, error):
+        if error or not isinstance(result, dict) or epoch != self._epoch or self.track is None or not self._apple_companion_current():
+            return
+        try:
+            position = max(0.0, float(result.get("position") or 0))
+        except (TypeError, ValueError):
+            return
+        playing = result.get("playing") is True
+        if self._companion_song_ended(epoch, result, position, playing):
+            # The page plays one song and stops. Advance GluSpot's own queue
+            # (next, shuffle or repeat-one) exactly as a local stream's end.
+            self._companion_timer.stop()
+            self.track = replace(self.track, is_playing=False)
+            self._end_current_stream()
+            return
+        self._companion_observed = position
+        self._companion_sampled_at = time.monotonic()
+        self.track = replace(self.track, is_playing=playing, position_seconds=position,
+                             position_observed_seconds=position, position_sampled_at=self._companion_sampled_at)
+        self.changed.emit()
+
+    def _companion_song_ended(self, epoch, result, position: float, playing: bool) -> bool:
+        """True once per song when the page has finished it.
+
+        MusicKit reports ended/completed; as a fallback a stop within 1.5 s of
+        the end (or a reset to 0 after reaching the last 2.5 s) counts. A user
+        pause mid-song never does.
+        """
+        if getattr(self, "_companion_end_epoch", None) == epoch:
+            return False
+        peak = max(float(getattr(self, "_companion_peak", 0.0) or 0.0), position)
+        self._companion_peak = peak
+        if playing or peak < 1.0:
+            return False
+        try:
+            duration = float(self.track.duration_seconds or result.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        near_end = duration > 5.0 and (position >= duration - 1.5 or (peak >= duration - 2.5 and position < 1.0))
+        if result.get("ended") is True or near_end:
+            self._companion_end_epoch = epoch
+            return True
+        return False
+
+    def _toggle_companion(self):
+        if self.track is None:
+            return False
+        pieces = str(self.track.track_id).split(":", 2)
+        song_id = pieces[2] if len(pieces) == 3 else ""
+        if self.track.is_playing:
+            action, params = "pause", {}
+        elif self._companion_armed:
+            action, params = "resume", {}
+        else:
+            action, params = "play", {"song_id": song_id}
+        self.track = replace(self.track, is_playing=action != "pause")
+        if action == "pause":
+            self._companion_observed = self.track.position_seconds
+            self._companion_sampled_at = time.monotonic()
+        else:
+            self._companion_armed = True
+            self._companion_sampled_at = time.monotonic()
+            self._set_status("trial" if self.status == "trial" else "playing")
+        epoch = self._epoch
+        self.tasks.submit(("companion_pause", epoch), lambda: self.service.companion_transport("apple_music", action, params)
+            if not self._closed and epoch == self._epoch else None)
+        self.changed.emit()
+        return True
+
+    def _pause_companion_best_effort(self):
+        if self._companion_epoch == 0:
+            return
+        epoch = self._companion_epoch
+        self.tasks.submit(("companion_pause", epoch), lambda: self.service.companion_transport("apple_music", "pause"))
 
     def _resolve_stream(self, song):
         if song.media_kind == "dj_voice":
@@ -2244,10 +2850,7 @@ class OwnedMusicPlayer(QObject):
         if self._stream_recovery is not None:
             song = self.queue[self.index]
             if self._lyric_payload is None and song.media_kind != "dj_voice":
-                preferences = self._lyrics_preferences_snapshot()
-                if not self.tasks.submit(("lyrics", epoch, self._lyrics_generation),
-                        lambda: self._fetch_lyrics(song, preferences)
-                        if not self._closed and epoch == self._epoch else None):
+                if not self._submit_lyrics_request(song, ("lyrics", epoch, self._lyrics_generation)):
                     self._lyrics_reparse_failed()
             self._check_stream_recovery()
             return
@@ -2284,9 +2887,7 @@ class OwnedMusicPlayer(QObject):
                 and (self._lyric_payload.source_id, self._lyric_payload.song_id) == (song.source_id, song.song_id)):
             self._queue_lyrics_reparse()
         else:
-            preferences = self._lyrics_preferences_snapshot()
-            if not self.tasks.submit(("lyrics", epoch, self._lyrics_generation), lambda: self._fetch_lyrics(song, preferences)
-                    if not self._closed and epoch == self._epoch else None):
+            if not self._submit_lyrics_request(song, ("lyrics", epoch, self._lyrics_generation)):
                 self._lyrics_unavailable()
         self._prefetch_fm()
         self._prefetch_audio()
@@ -2502,16 +3103,23 @@ class OwnedMusicPlayer(QObject):
             return
         self.track = replace(self.track, timed_lyrics=match.timed_lyrics, lyrics=match.lyrics,
                              lyrics_source=match.source)
+        self._lyrics_guard_timer.stop()
+        log_lyric_event("owned_publish", self.track.track_id, "match_applied",
+                        rows=len(match.lyrics), timed=len(match.timed_lyrics))
         self.changed.emit()
         self._schedule_lyrics_enrichment(match)
 
     def _reset_lyrics_payload(self):
+        self._lyrics_request_pending = None
+        self._lyrics_wait_track = None
+        self._lyrics_guard_timer.stop()
         self._lyric_payload = None
         self._lyrics_generation += 1
         self._lyrics_parse_pending = None
         self._lyrics_enrichment_pending = None
         self._lyrics_enrichment_attempted = False
         self._lyrics_enrichment_source = None
+        self._cover_lyrics_retry = None
 
     def _lyrics_enrichment_context_is_current(self, song, epoch):
         return (not self._closed and epoch == self._epoch and self.track is not None
@@ -2600,6 +3208,8 @@ class OwnedMusicPlayer(QObject):
     def _lyrics_parse_context_is_current(self, epoch):
         if self._stream_epoch == epoch or self._catalog_stream_is_current():
             return True
+        if epoch == self._epoch and self._apple_companion_current():
+            return True
         # Parsing the introduced song is pure visual work. Its verified
         # association and payload identity remain valid before speech audio is
         # ready; the completion token still fences decoder/preference epochs.
@@ -2618,9 +3228,11 @@ class OwnedMusicPlayer(QObject):
             self._lyrics_unavailable()
 
     def _lyrics_unavailable(self):
+        self._lyrics_guard_timer.stop()
         if self.track is not None:
             self.track = replace(self.track, timed_lyrics=(),
                 lyrics=("暂无歌词",), lyrics_source="")
+            log_lyric_event("owned_publish", self.track.track_id, "lyrics_unavailable")
             self.changed.emit()
 
     @staticmethod
@@ -2647,6 +3259,14 @@ class OwnedMusicPlayer(QObject):
         self._art_retry_counts.clear()
         self._art_retry_at.clear()
         self._art_retry_timer.stop()
+        self._art_running.clear()
+        self._art_request_targets.clear()
+        self._art_request_deadlines.clear()
+        self._art_started_at.clear()
+        self._art_current_wait = None
+        discard = getattr(self.artwork_tasks, "discard", None)
+        if callable(discard):
+            discard(lambda token: token[0] == "artwork")
         self._art_targets.clear()
         self._art_visible_hint = None
         self._art_visible_keys = ()
@@ -2701,6 +3321,7 @@ class OwnedMusicPlayer(QObject):
         self._art_retry_counts = {key: count for key, count in self._art_retry_counts.items() if key in self._art_window}
         self._art_retry_at = {key: due for key, due in self._art_retry_at.items() if key in self._art_window}
         self._art_targets = {key: target for key, target in self._art_targets.items() if key in self._art_window}
+        self._art_started_at = {key: started for key, started in self._art_started_at.items() if key in self._art_window}
 
     def _album_queue(self):
         entries = []
@@ -2717,11 +3338,43 @@ class OwnedMusicPlayer(QObject):
     def _pump_artwork(self):
         if self._closed or self.track is None:
             return
+        now = time.monotonic()
+        current = self._art_key(self.queue[self.index])
+        if self._art_current_wait is None or self._art_current_wait[0] != current:
+            self._art_current_wait = (current, now)
+        current_deadline = self._art_current_wait[1] + self.ARTWORK_LOAD_TIMEOUT_SECONDS
+        current_expired = now >= current_deadline
+        expired = False
+        if current_expired and (self._artwork_is_preview(current) or current not in self._art_cache):
+            for request, running in tuple(self._art_running.items()):
+                if running == (self._queue_epoch, current):
+                    self._art_running.pop(request, None)
+                    self._art_request_deadlines.pop(request, None)
+                    self._art_request_targets.pop(request, None)
+            self._art_retry_at.pop(current, None)
+            self._art_attempted.add(current)
+            if current not in self._art_failed:
+                self._art_failed.add(current)
+                self._log_owned_artwork(current, "failed", "timeout")
+                expired = True
+        for request, deadline in tuple(self._art_request_deadlines.items()):
+            if now < deadline:
+                continue
+            self._art_request_deadlines.pop(request, None)
+            self._art_request_targets.pop(request, None)
+            running = self._art_running.pop(request, None)
+            if running is None:
+                continue
+            epoch, key = running
+            if epoch == self._queue_epoch and key in self._art_window:
+                if not self._schedule_artwork_retry(key, error="timeout"):
+                    self._art_failed.add(key)
+                self._log_owned_artwork(key, "timeout", "timeout")
+                expired = True
         upcoming = self._upcoming_indices(include_voice=False)
         neighbors = (self.index, *upcoming, *self._previous_indices(include_voice=False))
         original_indices = (self.index, *upcoming[:1]) if self._art_prefetch_all else neighbors
         original_keys = {self._art_key(self.queue[i]) for i in original_indices}
-        current = self._art_key(self.queue[self.index])
         # The current cover and immediate real next song retain priority. A
         # scrolled-to window then fills before more distant neighbor upgrades.
         priority_neighbors = () if self._art_prefetch_all else neighbors
@@ -2739,6 +3392,8 @@ class OwnedMusicPlayer(QObject):
                 break
             if key not in self._art_window or (self._queue_epoch, key) in self._art_running.values():
                 continue
+            if key == current and current_expired:
+                continue
             target = self.ARTWORK_ORIGINAL_SIDE if key in original_keys else self.ARTWORK_THUMBNAIL_SIDE
             if self._art_targets.get(key, target) < target:
                 # A ready list thumbnail remains visible while its newly
@@ -2746,6 +3401,8 @@ class OwnedMusicPlayer(QObject):
                 self._art_attempted.discard(key)
                 self._art_retry_at.pop(key, None)
                 self._art_retry_counts.pop(key, None)
+                self._art_started_at.pop(key, None)
+                self._art_failed.discard(key)
             due = self._art_retry_at.get(key)
             if due is not None and due <= time.monotonic():
                 self._art_retry_at.pop(key, None)
@@ -2756,45 +3413,79 @@ class OwnedMusicPlayer(QObject):
                     or key in self._art_cache and not 0 < self._art_sizes.get(key, 0) < 320
                     and self._art_cache_targets.get(key, target) >= target):
                 continue
+            started = self._art_started_at.setdefault(key, now)
+            if now >= started + self.ARTWORK_LOAD_TIMEOUT_SECONDS:
+                self._art_retry_at.pop(key, None)
+                self._art_attempted.add(key)
+                self._art_failed.add(key)
+                self._log_owned_artwork(key, "failed", "timeout")
+                expired = True
+                continue
             self._art_request += 1
             request, epoch = self._art_request, self._queue_epoch
             self._art_attempted.add(key)
             self._art_targets[key] = target
             self._art_running[request] = (epoch, key)
             self._art_request_targets[request] = target
+            self._art_request_deadlines[request] = min(now + self.ARTWORK_REQUEST_TIMEOUT_SECONDS,
+                started + self.ARTWORK_LOAD_TIMEOUT_SECONDS)
+            self._log_owned_artwork(key, "pending")
             accepted = self.artwork_tasks.submit(("artwork", epoch, key, request),
-                lambda key=key, epoch=epoch, target=target: self._fetch_artwork(key, epoch, target))
+                lambda key=key, epoch=epoch, target=target, request=request:
+                    self._fetch_artwork(key, epoch, target) if request in self._art_running else None)
             if not accepted:
                 self._art_running.pop(request, None)
                 self._art_request_targets.pop(request, None)
-                self._art_failed.add(key)
-                self._schedule_artwork_retry(key)
+                self._art_request_deadlines.pop(request, None)
+                if not self._schedule_artwork_retry(key):
+                    self._art_failed.add(key)
                 if key == current:
-                    self.track = replace(self.track, album_art_lookup_state="failed")
-                    self.changed.emit()
-        if self._art_retry_at:
-            delay = max(.01, min(self._art_retry_at.values()) - time.monotonic())
+                    self._apply_cached_artwork()
+        if expired:
+            self._apply_cached_artwork()
+        waiting = bool(current in self._art_window and current not in self._art_failed
+            and (current not in self._art_cache or self._artwork_is_preview(current)))
+        wakeups = (*self._art_retry_at.values(), *self._art_request_deadlines.values(),
+            *((current_deadline,) if waiting and not current_expired else ()))
+        if wakeups:
+            delay = max(.01, min(wakeups) - time.monotonic())
             self._art_retry_timer.start(max(1, round(delay * 1000)))
 
-    def _schedule_artwork_retry(self, key):
+    def _log_owned_artwork(self, key, state, error="none"):
+        log_artwork_event("owned", f"owned:{key[0]}:{key[1]}",
+            "original" if self._art_targets.get(key, self.ARTWORK_ORIGINAL_SIDE) == self.ARTWORK_ORIGINAL_SIDE else "thumbnail",
+            self._art_sizes.get(key, 0), state, error)
+
+    def _schedule_artwork_retry(self, key, *, error=None):
         count = self._art_retry_counts.get(key, 0)
-        if count >= self.ARTWORK_TRANSIENT_RETRIES or key not in self._art_window:
-            return
+        limit = self.ARTWORK_NETWORK_RETRIES if error in {"network", "timeout", "incomplete"} else self.ARTWORK_TRANSIENT_RETRIES
+        if (count >= limit or key not in self._art_window
+                or time.monotonic() >= self._art_started_at.get(key, time.monotonic()) + self.ARTWORK_LOAD_TIMEOUT_SECONDS):
+            return False
         self._art_retry_counts[key] = count + 1
         self._art_retry_at[key] = time.monotonic() + self.ARTWORK_RETRY_SECONDS * (count + 1)
+        self._log_owned_artwork(key, "retry", error or "preview")
         self._art_retry_timer.start(max(1, round(self.ARTWORK_RETRY_SECONDS * 1000)))
+        return True
 
     def _artwork_completed(self, epoch, extra, result, error):
         key, request = extra
+        deadline = self._art_request_deadlines.get(request)
+        if deadline is not None and time.monotonic() >= deadline:
+            # Reject delivery even if the Qt completion event beats its timer.
+            self._pump_artwork()
+            return
+        self._art_request_deadlines.pop(request, None)
         requested_target = self._art_request_targets.pop(request, self.ARTWORK_ORIGINAL_SIDE)
         if self._art_running.pop(request, None) != (epoch, key):
             return
         if epoch == self._queue_epoch and key in self._art_window and self.track is not None:
             published = None
             if error or not result or len(result[0]) > ONLINE_ARTWORK_MAX_BYTES:
-                self._art_failed.add(key)
-                if error in {"network", "timeout", "incomplete", "invalid_image", "busy"}:
-                    self._schedule_artwork_retry(key)
+                retrying = (error in {"network", "timeout", "incomplete", "invalid_image", "busy"}
+                            and self._schedule_artwork_retry(key, error=error))
+                if not retrying:
+                    self._art_failed.add(key)
             else:
                 self._art_failed.discard(key)
                 side = result[3] if len(result) > 3 else 0
@@ -2825,6 +3516,8 @@ class OwnedMusicPlayer(QObject):
                     self._art_cache.pop(farthest)
                     self._art_sizes.pop(farthest, None)
                     self._art_cache_targets.pop(farthest, None)
+            self._log_owned_artwork(key, "failed" if error or not result else
+                "preview" if self._artwork_is_preview(key) else "ready", error or "none")
             self._apply_cached_artwork()
             if (published is not None and not self._closed and epoch == self._queue_epoch
                     and key in self._art_window and self._art_cache.get(key, (None,))[0] == published):
@@ -2832,6 +3525,7 @@ class OwnedMusicPlayer(QObject):
         self._pump_artwork()
 
     def _apply_cached_artwork(self):
+        previous = self.track
         visual_song = (next((song for song in self.queue
             if self.track.track_id == f"owned:{song.source_id}:{song.song_id}"), None)
             if self._is_voice_segment() else self.queue[self.index])
@@ -2840,15 +3534,47 @@ class OwnedMusicPlayer(QObject):
         if cached:
             key = self._art_key(visual_song)
             preview = self._artwork_is_preview(key)
-            pending = (key in self._art_retry_at or (self._queue_epoch, key) in self._art_running.values()
+            pending = key not in self._art_failed and (key in self._art_retry_at
+                       or (self._queue_epoch, key) in self._art_running.values()
                        or self._art_targets.get(key, self.ARTWORK_ORIGINAL_SIDE) < self.ARTWORK_ORIGINAL_SIDE)
             changes.update(album_art_bytes=cached[0], album_color=cached[1], secondary_color=cached[2],
                            album_art_source="thumbnail" if preview else "original",
                            album_art_lookup_state="pending" if preview and pending else "failed" if preview else "original")
-        elif visual_song is not None and self._art_key(visual_song) in self._art_failed:
-            changes["album_art_lookup_state"] = "failed"
+        elif visual_song is not None:
+            key = self._art_key(visual_song)
+            pending = key in self._art_retry_at or (self._queue_epoch, key) in self._art_running.values()
+            changes["album_art_lookup_state"] = ("pending" if pending else "failed" if key in self._art_failed
+                                                 else "pending" if visual_song.artwork_url else "miss")
         self.track = replace(self.track, **changes)
+        if (cached and not preview and cached[0] != previous.album_art_bytes
+                and (not previous.album_art_bytes or "original" not in previous.album_art_source)
+                and not previous.timed_lyrics and previous.lyrics == ("暂无歌词",)
+                and not self._closed and not self._is_voice_segment()
+                and visual_song is not None and visual_song.media_kind == "song"
+                and previous.track_id == f"owned:{visual_song.source_id}:{visual_song.song_id}"
+                and self._lyrics_parse_context_is_current(self._epoch)):
+            self._cover_lyrics_retry = (self._epoch, visual_song)
+            self._retry_cover_lyrics()
         self.changed.emit()
+
+    def _retry_cover_lyrics(self, *_completed):
+        pending = self._cover_lyrics_retry
+        if pending is None:
+            return
+        epoch, song = pending
+        if (self._closed or epoch != self._epoch or self.track is None
+                or not 0 <= self.index < len(self.queue) or self.queue[self.index] != song
+                or self.track.track_id != f"owned:{song.source_id}:{song.song_id}"
+                or self.track.timed_lyrics or self.track.lyrics != ("暂无歌词",)):
+            self._cover_lyrics_retry = None
+            return
+        if (self._lyrics_parse_pending is not None or self._lyrics_enrichment_pending is not None
+                or not self._lyrics_parse_context_is_current(epoch)):
+            return
+        # Keep one song-scoped intent if the bounded foreground queue is full.
+        # Its next completion supplies capacity; no new timer or network loop.
+        if self._submit_lyrics_request(song, ("lyrics", epoch, self._lyrics_generation)):
+            self._cover_lyrics_retry = None
 
     def _fetch_artwork(self, key, epoch, target_side=2560):
         if self._closed or epoch != self._queue_epoch or key not in self._art_window:
@@ -3011,6 +3737,55 @@ class OwnedMusicPlayer(QObject):
         fetch = self._fm_fetch_action(self._fm_kind, source)
         return self._catalog("fm_skip_continue" if skip_voice else "fm_continue", source, fetch)
 
+    def _begin_lyrics_wait(self):
+        if self.track is None or self.track.lyrics != ("加载歌词中",):
+            return
+        if self._lyrics_wait_track != self.track.track_id:
+            self._lyrics_wait_track = self.track.track_id
+            self._lyrics_wait_started_at = time.monotonic()
+        self._lyrics_guard_timer.start()
+
+    def _check_lyrics_deadline(self):
+        if (self._closed or self.track is None or self.track.track_id != self._lyrics_wait_track
+                or self.track.lyrics != ("加载歌词中",)):
+            self._lyrics_guard_timer.stop()
+            return
+        if time.monotonic() - self._lyrics_wait_started_at >= self.LYRICS_TIMEOUT_SECONDS:
+            self._lyrics_request_pending = None
+            self._lyrics_parse_pending = None
+            self._lyrics_unavailable()
+
+    def _submit_lyrics_request(self, song, token, *, attempt=1):
+        expired = (self.track is not None and self.track.lyrics == ("加载歌词中",)
+            and self._lyrics_wait_track == self.track.track_id
+            and time.monotonic() - self._lyrics_wait_started_at >= self.LYRICS_TIMEOUT_SECONDS)
+        self._check_lyrics_deadline()
+        if self._closed or token[1] != self._epoch or expired:
+            return False
+        pending = self._lyrics_request_pending
+        if (attempt == 1 and pending is not None and pending[0][1] == token[1]
+                and (pending[1].source_id, pending[1].song_id) == (song.source_id, song.song_id)):
+            # DJ speech can request its visible song before the audio stream
+            # starts. Starting that same song must retain its genuine reply,
+            # rather than replace the request with an equivalent fetch token.
+            return True
+        self._lyrics_request_serial += 1
+        request = (*token, self._lyrics_request_serial)
+        self._lyrics_request_pending = (request, song, attempt)
+        preferences = self._lyrics_preferences_snapshot()
+        # Remove obsolete queued work; an already running task has a timed
+        # delivery lease and cannot publish after this request is superseded.
+        discard = getattr(self.lyric_tasks, "discard", None)
+        if callable(discard):
+            discard(lambda queued: queued[0] in {"lyrics", "dj_lyrics"})
+        accepted = self.lyric_tasks.submit(request, lambda: self._fetch_lyrics(song, preferences,
+                retry_official=attempt == 1)
+            if not self._closed and self._lyrics_request_pending is not None
+            and self._lyrics_request_pending[0] == request and token[1] == self._epoch else None)
+        if not accepted:
+            self._lyrics_request_pending = None
+        return accepted
+
     def _lyrics_preferences_snapshot(self):
         # The source parser reads these several times. Capture once on the
         # owner thread so a button change cannot mix preferences within a row.
@@ -3019,9 +3794,14 @@ class OwnedMusicPlayer(QObject):
             "v2_lyric_chinese_conversion": "off", "v2_cantonese_secondary_priority": "phonetic_first"}
         return {key: self.lyrics_store._setting_value(key, value) for key, value in defaults.items()}
 
-    def _fetch_lyrics(self, song, preferences):
+    def _fetch_lyrics(self, song, preferences, *, retry_official=False):
         if song.media_kind == "dj_voice":
             return LyricPayload(song.source_id, song.song_id), None
+        if song.source_id == "apple_music":
+            return self._fetch_apple_lyrics(song, preferences)
+        debug_track = f"owned:{song.source_id}:{song.song_id}"
+        began = time.monotonic()
+        log_lyric_event("owned_lookup", debug_track, "fetch_begin")
         try:
             payload = self.service.lyrics(song.source_id, song.song_id)
         except OnlineMusicError as error:
@@ -3030,10 +3810,90 @@ class OwnedMusicPlayer(QObject):
             # failure's provenance without inventing any lyric text. Explicit
             # service/account cancellation keeps its existing request fence.
             if error.code in {"cancelled", "closed"}:
+                log_lyric_event("owned_lookup", debug_track, "fetch_cancelled", error=True)
                 raise
+            if retry_official and error.code in {"timeout", "network", "request_failed", "busy", "rate_limited"}:
+                # The first failure retains the current loading budget. The
+                # second attempt can use the exact-ID unavailable fallback.
+                log_lyric_event("owned_lookup", debug_track, "fetch_failed", error=True)
+                raise
+            log_lyric_event("owned_lookup", debug_track, "official_unavailable", error=True)
             payload = LyricPayload(song.source_id, song.song_id,
                 source=f"{song.source_id}_unavailable")
-        return payload, self._parse_lyrics_payload(payload, preferences, song=song)
+        except Exception:
+            log_lyric_event("owned_lookup", debug_track, "fetch_failed", error=True,
+                            elapsed_ms=round((time.monotonic() - began) * 1000))
+            raise
+        try:
+            match = self._parse_lyrics_payload(payload, preferences, song=song)
+        except Exception:
+            log_lyric_event("owned_lookup", debug_track, "parse_failed", error=True,
+                            elapsed_ms=round((time.monotonic() - began) * 1000))
+            raise
+        log_lyric_event("owned_lookup", debug_track, "fetch_ready" if match is not None else "fetch_empty",
+                        rows=len(match.lyrics) if match is not None else 0,
+                        timed=len(match.timed_lyrics) if match is not None else 0,
+                        elapsed_ms=round((time.monotonic() - began) * 1000))
+        return payload, match
+
+    def _fetch_apple_lyrics(self, song, preferences):
+        """Prefer the signed-in page's timed TTML, then the existing title search."""
+        from api.apple_music_log import apple_log
+        from api.online_music import OnlineMusicError
+        reader = getattr(self.service, "apple_timed_lyrics", None)
+        key = self._apple_lyric_cache_key(song)
+        catalog_id = key[1]
+        cached = self._apple_lyric_cache_get(key)
+        if cached is not None:
+            apple_log("lyrics", stage="ttml", result="cached" if cached else "cached-miss")
+        if not callable(reader) and cached is None:
+            apple_log("lyrics", stage="ttml", result="miss", reason="no-reader")
+        else:
+            if cached is not None:
+                ttml = cached
+            else:
+                try:
+                    ttml = reader(song.song_id, catalog_id)
+                    self._apple_lyric_cache_put(key, ttml)
+                except OnlineMusicError as error:
+                    apple_log("lyrics", stage="ttml", result="error", reason=error.code if error.code in {"timeout", "runtime", "auth_required", "response"} else "error")
+                    ttml = ""
+                except Exception:
+                    apple_log("lyrics", stage="ttml", result="error", reason="runtime")
+                    ttml = ""
+            if ttml:
+                payload = LyricPayload(song.source_id, song.song_id, source="apple-ttml", raw_ttml=ttml)
+                try:
+                    match = self._parse_lyrics_payload(payload, preferences, song=song)
+                except Exception:
+                    apple_log("lyrics", stage="ttml", result="error", reason="parse")
+                    match = None
+                if match is not None and (match.timed_lyrics or match.lyrics):
+                    apple_log("lyrics", stage="ttml", result="ok", count=len(match.timed_lyrics))
+                    return payload, match
+                apple_log("lyrics", stage="ttml", result="miss", reason="parse")
+        if not (song.title or "").strip():
+            apple_log("lyrics", stage="title-search", result="miss", reason="no-title")
+            return LyricPayload(song.source_id, song.song_id, source="apple-title-search"), None
+        if not (song.artist or "").strip():
+            apple_log("lyrics", stage="title-search", result="miss", reason="no-artist")
+        if not song.duration_seconds:
+            apple_log("lyrics", stage="title-search", result="miss", reason="no-duration")
+        try:
+            match = self.lyrics_store.resolve(song.title, song.artist, song.album, song.duration_seconds)
+        except Exception:
+            apple_log("lyrics", stage="title-search", result="error", reason="runtime")
+            return LyricPayload(song.source_id, song.song_id, source="apple-title-search"), None
+        found = match is not None and bool(match.timed_lyrics or match.lyrics)
+        apple_log("lyrics", stage="title-search", result="ok" if found else "miss", reason="matched" if found else "no-match",
+                  count=len(match.timed_lyrics) if found else 0)
+        fields = {"source": "apple-title-search"}
+        if found:
+            allowed = {"raw_lrc", "raw_yrc", "translation", "romanization", "raw_qrc", "raw_ttml", "raw_netease"}
+            for key, value in getattr(match, "raw_sources", ()) or ():
+                if key in allowed and isinstance(value, str):
+                    fields[key] = value
+        return LyricPayload(song.source_id, song.song_id, **fields), match
 
     def _parse_lyrics_payload(self, payload, preferences, enrichment=None, *, song=None):
         # Parsing is read-only; a shallow view preserves the established
@@ -3061,6 +3921,8 @@ class OwnedMusicPlayer(QObject):
         return baseline
 
     def _position_changed(self, milliseconds):
+        if self._apple_companion_current():
+            return
         if self._closed or (self._stream_epoch != self._epoch
                 and not self._catalog_stream_is_current()):
             return
@@ -3091,6 +3953,8 @@ class OwnedMusicPlayer(QObject):
             self.track = replace(self.track, duration_seconds=milliseconds / 1000.0)
 
     def _state_changed(self, state):
+        if self._apple_companion_current():
+            return
         if self._dj_overlay_is_preview:
             self._sync_dj_preview_music_state()
         if (self._stream_fault is not None and state in {
@@ -3109,6 +3973,9 @@ class OwnedMusicPlayer(QObject):
                     and not self._closed and self._stream_recovery is None):
                 self._set_status("trial" if self._stream_trial else "playing")
             self.changed.emit()
+            if state == QMediaPlayer.PlaybackState.PlayingState:
+                self._publish_interruption_start()
+        self._note_playback_running_clock()
         if self._dj_overlay_voices:
             if state == QMediaPlayer.PlaybackState.PlayingState:
                 self._try_start_dj_overlay()
@@ -3141,6 +4008,8 @@ class OwnedMusicPlayer(QObject):
                 self._finish_stream_failure(self._stream_fault[1])
 
     def _end_current_stream(self):
+        if self._interruption_pause_latched:
+            return
         self._stop_dj_overlay()
         self._clear_stream_fault()
         self._stream_epoch = 0
@@ -3307,6 +4176,9 @@ class OwnedMusicPlayer(QObject):
                 position_sampled_at=time.monotonic())
             self._set_status("trial" if self._stream_trial else "playing")
             self.changed.emit()
+            # PlayingState arrived while recovery still owned the decoder.
+            # Only a pending explicit user Resume may publish this commit.
+            self._publish_interruption_start()
 
     def _check_stream_fault(self):
         if self._stream_recovery is not None:
@@ -3358,7 +4230,38 @@ class OwnedMusicPlayer(QObject):
             return False
         if QThread.currentThread() != self.thread():
             return self._request_control("command", command, self.track.track_id)
+        if not self._interruption_tracking and not self._interruption_pause_latched:
+            return self._send_playback_command(command)
         if command == "toggle_play_pause":
+            if self._output_preparing:
+                playing_intent = self._output_prepare_resume
+            elif self._stream_recovery is not None:
+                playing_intent = self._stream_recovery.resume
+            elif self.status in {"loading_stream", "loading_catalog", "recovering_stream"}:
+                playing_intent = self._autoplay_after_load
+            else:
+                playing_intent = self.interruption_playing()
+            will_play = not playing_intent
+        else:
+            will_play = True
+        return self._user_playback_action(lambda: self._send_playback_command(command),
+            will_play=will_play, new_stream=(command != "toggle_play_pause"
+                or self.status in {"playback_failed", "stream_unavailable"} and self._stream_epoch == 0))
+
+    def _send_playback_command(self, command):
+        if self._apple_companion_current() and command == "toggle_play_pause":
+            return self._toggle_companion()
+        if command == "toggle_play_pause":
+            if (self._interruption_tracking and self._stream_epoch == 0
+                    and self.status == "loading_stream" and not self._output_preparing
+                    and self._stream_recovery is None):
+                self._autoplay_after_load = not self._autoplay_after_load
+                self._fm_resume = self._playlist_resume = self._autoplay_after_load
+                if not self._autoplay_after_load:
+                    self.player.pause()
+                    self.dj_player.pause()
+                self.changed.emit()
+                return True
             if self._output_preparing:
                 self._output_prepare_resume = not self._output_prepare_resume
                 self._autoplay_after_load = self._output_prepare_resume
@@ -3407,6 +4310,9 @@ class OwnedMusicPlayer(QObject):
                 self._play_music()
             return True
         if command in {"previous", "next"}:
+            if self._apple_companion_current():
+                from api.apple_music_log import apple_log
+                apple_log("skip", action=command, result="ok")
             if command == "next":
                 self._autoplay_after_load = True
                 if self._play_next_indices:
@@ -3442,6 +4348,16 @@ class OwnedMusicPlayer(QObject):
             return False
         if QThread.currentThread() != self.thread():
             return self._request_control("seek", seconds, expected_track_id or self.track.track_id)
+        if self._apple_companion_current():
+            seconds = max(0.0, min(float(seconds), self.track.duration_seconds or float(seconds)))
+            self._companion_observed = seconds
+            self._companion_sampled_at = time.monotonic()
+            self.track = replace(self.track, position_seconds=seconds, position_observed_seconds=seconds,
+                                 position_sampled_at=self._companion_sampled_at)
+            self.tasks.submit(("companion_seek", self._epoch), lambda: self.service.companion_transport(
+                "apple_music", "seek", {"seconds": seconds}))
+            self.changed.emit()
+            return True
         if not self.player.isSeekable():
             return False
         self._stop_dj_overlay()
@@ -3496,10 +4412,14 @@ class OwnedMusicPlayer(QObject):
             elif kind == "cancel_selection":
                 result["succeeded"] = self.cancel_pending_selection()
             elif self.track is not None and self.track.track_id == track_id:
-                if kind == "lyrics_refresh":
+                if kind == "interruption_pause":
+                    result["succeeded"] = self.pause_for_interruption(value)
+                elif kind == "lyrics_refresh":
                     result["succeeded"] = self.refresh_lyrics()
                 elif kind == "enqueue_next":
                     result["succeeded"] = self.enqueue_next(value)
+                elif kind == "insert_play":
+                    result["succeeded"] = self.insert_and_play(*value)
                 elif kind == "queue_index":
                     result["succeeded"] = self.select_queue_index(*value)
                 elif kind == "queue_artwork":
@@ -3519,8 +4439,13 @@ class OwnedMusicPlayer(QObject):
         self._closed = True
         self.stop()
         self.tasks.close()
+        if self.lyric_tasks is not self.tasks:
+            self.lyric_tasks.close()
         self.artwork_tasks.close()
         self.prefetch_tasks.close()
+        sea_tasks = self.__dict__.get("_apple_sea_tasks")
+        if sea_tasks is not None:
+            sea_tasks.close()
         if self.download_tasks is not None:
             self.download_tasks.close()
         if self.stream_cache is not None:
@@ -3528,7 +4453,17 @@ class OwnedMusicPlayer(QObject):
 
     def stop(self):
         """Invalidate queued I/O before disabling or changing playback modes."""
+        if self._interruption_tracking and not self._closed:
+            self._interruption_serial += 1
+            self.playbackIntent.emit(dict(serial=self._interruption_serial,
+                at=time.monotonic(), will_play=False))
+        self._interruption_candidate = None
+        self._interruption_started = None
+        self._pause_companion_best_effort()
         self._epoch += 1
+        self._companion_epoch = 0
+        self._companion_armed = False
+        self._companion_timer.stop()
         self._stop_dj_overlay()
         self._reset_lyrics_payload()
         self._catalog_epoch += 1

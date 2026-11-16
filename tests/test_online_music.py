@@ -99,7 +99,7 @@ class OnlineMusicServiceTests(unittest.TestCase):
         return self.service.poll_login(snapshot.session_id)
 
     def test_listing_and_default_snapshots_have_no_network_or_credentials(self):
-        self.assertEqual([s.source_id for s in self.service.list_sources()], ["netease", "kugou", "qq", "qishui"])
+        self.assertEqual([s.source_id for s in self.service.list_sources()], ["netease", "kugou", "qq", "apple_music", "qishui"])
         self.assertFalse(self.service.list_sources()[-1].available)
         self.assertFalse(self.service.account_status("netease").logged_in)
         self.assertFalse(self.service.has_login_record("netease"))

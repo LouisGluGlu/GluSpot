@@ -154,20 +154,22 @@ class MusicSurfaceConnectionMotionTests(unittest.TestCase):
         self.window.shutdown()
         self.owner.close()
 
-    def test_confirmed_addition_animates_once_pending_and_volume_never_restart(self):
+    def test_confirmed_addition_updates_route_without_status_announcement(self):
         self.snapshot = replace(self.snapshot, state="connecting", pending_ids=("buds", "mini"))
         self.window._sync_audio_output_status()
         self.assertFalse(self.window._audio_output_motion.active)
         self.assertEqual(self.window._audio_output_kinds, ("airpods-pro",))
         self.snapshot = replace(self.snapshot, state="casting", pending_ids=(), member_ids=("buds", "mini"))
-        self.window._sync_audio_output_status()
-        pose = self.window._audio_output_motion.pose
-        self.assertEqual(pose.device.id, "mini")
-        self.snapshot = replace(self.snapshot, revision=10, devices=tuple(replace(d, volume=.3) for d in self.devices))
-        self.window._sync_audio_output_status()
-        self.assertEqual(self.window._audio_output_motion.pose, pose)
+        with patch.object(self.window._audio_output_motion, "announce") as announce:
+            self.window._sync_audio_output_status()
+            self.snapshot = replace(self.snapshot, revision=10, devices=tuple(replace(d, volume=.3) for d in self.devices))
+            self.window._sync_audio_output_status()
+        announce.assert_not_called()
+        self.assertEqual(self.window._audio_output_kinds, ("airpods-pro", "homepod-mini"))
+        self.assertEqual(self.window._audio_output_motion.status.count, 2)
+        self.assertFalse(self.window._audio_output_motion.active)
 
-    def test_paint_uses_current_pose_without_provider_reads_and_keeps_neighbors_fixed(self):
+    def test_quiet_route_paint_avoids_provider_reads_and_keeps_neighbors_fixed(self):
         self.snapshot = replace(self.snapshot, state="casting", member_ids=("buds", "mini"))
         self.window._sync_audio_output_status()
         began = self.window._audio_output_motion._clock.last_at
@@ -183,26 +185,29 @@ class MusicSurfaceConnectionMotionTests(unittest.TestCase):
         audio = self.window._audio_output_button_rect(mode, self.window._surface_scale())
         self.assertEqual(self.window._button_rects["return"], mode)
         self.assertEqual(self.window._button_rects["audio_output"].right(), audio.right())
-        self.assertGreater(self.window._button_rects["audio_output"].width(), audio.width())
+        self.assertEqual(self.window._button_rects["audio_output"].width(), audio.width())
         count = len(self.window._control_layer_cache)
         self.window._advance_audio_output_motion(began + 1.7)
         with QPainter(image) as painter, patch("local.music_surface_window.time.monotonic", return_value=100):
             self.window._paint_window_controls(painter, QRectF(self.window.rect()))
         self.assertEqual(len(self.window._control_layer_cache), count)
 
-    def test_available_arrival_uses_animation_without_claiming_playback_count(self):
+    def test_available_arrival_keeps_confirmed_route_without_announcement(self):
         arrival = replace(self.snapshot, event_serial=1, event_device_id="mini", event_name="HomePod Mini")
-        self.window.on_audio_device_event(arrival, self.devices[1])
-        self.assertEqual(self.window._audio_output_motion.pose.device.id, "mini")
-        self.assertEqual(self.window._audio_output_motion.pose.target.count, 1)
+        with patch.object(self.window._audio_output_motion, "announce") as announce:
+            self.window.on_audio_device_event(arrival, self.devices[1])
+            self.window.on_audio_device_event(arrival, self.devices[1])
+        announce.assert_not_called()
+        self.assertIsNone(self.window._audio_output_motion.pose)
+        self.assertEqual(self.window._audio_output_motion.status.count, 1)
         self.assertEqual(self.window._audio_output_kinds, ("airpods-pro",))
-        self.window.on_audio_device_event(arrival, self.devices[1])
+        self.assertEqual(self.window._audio_output_event_serial, 1)
         self.assertEqual(len(self.window._audio_output_motion._queue), 0)
 
     def test_hide_settles_motion_and_does_not_replay_on_show(self):
         self.snapshot = replace(self.snapshot, state="casting", member_ids=("buds", "mini"))
         self.window._sync_audio_output_status()
-        self.assertTrue(self.window._audio_output_motion.active)
+        self.assertFalse(self.window._audio_output_motion.active)
         self.window.hide()
         self.assertFalse(self.window._audio_output_motion.active)
         self.window.show()
@@ -219,6 +224,8 @@ class MusicSurfaceConnectionMotionTests(unittest.TestCase):
     def test_bitmap_transition_pauses_instead_of_consuming_motion(self):
         self.snapshot = replace(self.snapshot, state="casting", member_ids=("buds", "mini"))
         self.window._sync_audio_output_status()
+        self.window._audio_output_motion.announce(MINI,
+            self.window._audio_output_motion.status, self.window._audio_output_motion.status, 100.)
         pose = self.window._audio_output_motion.pose
         began = self.window._audio_output_motion._clock.last_at
         self.window._geometry_transition_snapshot = QImage(10, 10, QImage.Format.Format_RGB32)
@@ -229,21 +236,24 @@ class MusicSurfaceConnectionMotionTests(unittest.TestCase):
         self.assertTrue(self.window._audio_output_motion.active)
         self.assertLess(self.window._audio_output_motion._elapsed, .04)
 
-    def test_confirmed_reconnection_within_four_seconds_is_not_discarded(self):
-        self.snapshot = replace(self.snapshot, state="casting", active_id="mini")
-        self.window._sync_audio_output_status()
-        self.snapshot = replace(self.snapshot, state="ready", active_id="buds")
-        self.window._sync_audio_output_status()
-        self.snapshot = replace(self.snapshot, state="casting", active_id="mini")
-        self.window._sync_audio_output_status()
-        identities = [self.window._audio_output_motion.pose.device.id] + [
-            item[0].id for item in self.window._audio_output_motion._queue]
-        self.assertIn("mini", identities)
+    def test_quick_confirmed_reconnection_updates_glyph_without_announcement(self):
+        with patch.object(self.window._audio_output_motion, "announce") as announce:
+            self.snapshot = replace(self.snapshot, state="casting", active_id="mini")
+            self.window._sync_audio_output_status()
+            self.snapshot = replace(self.snapshot, state="ready", active_id="buds")
+            self.window._sync_audio_output_status()
+            self.snapshot = replace(self.snapshot, state="casting", active_id="mini")
+            self.window._sync_audio_output_status()
+        announce.assert_not_called()
+        self.assertEqual(self.window._audio_output_kinds, ("homepod-mini",))
+        self.assertFalse(self.window._audio_output_motion.active)
 
-    def test_headset_arrival_uses_same_normalized_kind_as_status(self):
+    def test_confirmed_headset_arrival_normalizes_route_glyph_without_announcement(self):
         device = replace(self.devices[0], kind="headset")
-        self.window.on_audio_device_event(replace(self.snapshot, event_serial=1), device)
-        self.assertEqual(self.window._audio_output_motion.pose.device.kind, "headphones")
+        arrival = replace(self.snapshot, devices=(device,) + self.devices[1:], event_serial=1)
+        self.window.on_audio_device_event(arrival, device)
+        self.assertEqual(self.window._audio_output_kinds, ("headphones",))
+        self.assertIsNone(self.window._audio_output_motion.pose)
 
 
 if __name__ == "__main__":

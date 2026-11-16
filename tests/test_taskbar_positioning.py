@@ -225,7 +225,7 @@ class TaskbarPositioningTests(unittest.TestCase):
                             owner_bar_hidden=True,
                             hide_follow_enabled=follow,
                         ),
-                        (expected, True) if follow else ("top", False),
+                        ("top", False),          # fullscreen: the ultra-short top bar
                     )
 
     def test_fullscreen_placement_with_dock_without_finder_uses_top_and_option_visibility(self):
@@ -239,7 +239,7 @@ class TaskbarPositioningTests(unittest.TestCase):
                             owner_bar_hidden=owner_hidden,
                             hide_follow_enabled=follow,
                         ),
-                        ("top", follow),
+                        ("top", False),
                     )
 
     def test_canonical_location_mode_rejects_stick_when_autohide_disabled(self):
@@ -2077,7 +2077,29 @@ class TaskbarPositioningTests(unittest.TestCase):
             compact_active=True,
             manual_width=500.0,
         )
-        self.assertEqual(manual_width, 500.0)
+        # A manual width cannot push the island over the taskbar icons either.
+        self.assertEqual(manual_width, 52.0)
+        fitted, _h = taskbar_compact_music_size(
+            taskbar_height=44.0, default_music_width=420.0,
+            selected_zone=QRectF(0.0, 0.0, 260.0, 40.0), compact_active=True, manual_width=0.0,
+        )
+        self.assertEqual(fitted, 260.0)          # a gap of 150 px or more: the island fits it
+
+    def test_gap_zones_avoid_the_icons_and_the_tray(self):
+        from local.taskbar_positioning import build_taskbar_gap_zones, taskbar_gap_for_center
+        bar = QRectF(0.0, 1392.0, 2560.0, 48.0)
+        icons = QRectF(1074.0, 1392.0, 413.0, 48.0)
+        tray = QRectF(2276.0, 1392.0, 292.0, 48.0)
+        zones = build_taskbar_gap_zones(bar, [icons, tray])
+        self.assertEqual(len(zones), 2)
+        for zone in zones:
+            self.assertFalse(zone.intersects(icons))
+            self.assertFalse(zone.intersects(tray))
+        self.assertLess(zones[0].right(), icons.left())
+        self.assertGreater(zones[1].left(), icons.right())
+        self.assertEqual(taskbar_gap_for_center(zones, 300.0), zones[0])
+        self.assertEqual(taskbar_gap_for_center(zones, 1300.0), zones[0] if 1300 - zones[0].right() < zones[1].left() - 1300 else zones[1])
+        self.assertEqual(taskbar_gap_for_center(zones, 2000.0), zones[1])
 
     def test_taskbar_cover_only_music_active_detects_selected_slot_and_crowded_rect(self):
         self.assertFalse(
@@ -4000,7 +4022,7 @@ class TaskbarPositioningTests(unittest.TestCase):
         self.assertEqual(target.direction, 1)
         self.assertAlmostEqual(target.window_pos.y() + target.main_top, 0.0, delta=1.0)
 
-    def test_build_standalone_top_notch_target_clamps_window_inside_screen_width(self):
+    def test_build_standalone_top_notch_target_keeps_the_island_not_the_canvas_on_screen(self):
         target = build_standalone_top_notch_target(
             anchor_rect=QRectF(-200.0, 6.0, 420.0, 48.0),
             screen_geometry=QRectF(0.0, 0.0, 1920.0, 1080.0),
@@ -4013,7 +4035,17 @@ class TaskbarPositioningTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(target)
-        self.assertEqual(target.window_pos.x(), 0)
+        # The island's left edge meets the screen edge; its transparent canvas
+        # may extend past it, so a top island can sit anywhere along the top.
+        island_left = target.window_pos.x() + target.main_left
+        self.assertEqual(island_left, 0)
+        self.assertLess(target.window_pos.x(), 0)
+        right = build_standalone_top_notch_target(
+            anchor_rect=QRectF(1700.0, 6.0, 420.0, 48.0), screen_geometry=QRectF(0.0, 0.0, 1920.0, 1080.0),
+            window_width=940.0, main_kind="music", stack_width=420.0, main_width=420.0,
+            main_height=48.0, main_top=72.0,
+        )
+        self.assertEqual(right.window_pos.x() + right.main_left + 420.0, 1920.0)
 
     def test_build_standalone_free_release_target_preserves_anchor_with_up_direction(self):
         target = build_standalone_free_release_target(

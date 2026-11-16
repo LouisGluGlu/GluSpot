@@ -19,6 +19,11 @@ class AudioFrame:
     low: float
     mid: float
     high: float
+    vocal: float = 0.0
+    spectrum: tuple[float, ...] = ()
+    vocal_spectrum: tuple[float, ...] = ()
+    # Absolute PCM/render peak; None means this source only supplied bands.
+    peak: float | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +97,10 @@ class TrackData:
     # Exact identity supplied by the selected Windows media session. Audio
     # routing resolves it against live Core Audio sessions, never display text.
     source_app_id: str = ""
+    # Shared capture binding/route generation. The first projected observation
+    # stays marked until newer physical evidence, independent of view width.
+    capture_epoch_id: int = 0
+    is_first_sample: bool = False
 
 
 @dataclass(frozen=True)

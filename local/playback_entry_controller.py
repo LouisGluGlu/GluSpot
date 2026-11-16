@@ -6,9 +6,10 @@ import time
 from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QTransform
 
-from api.online_music import LoginSnapshot
+from api.online_music import AccountSnapshot, LoginSnapshot
 from local.music_tasks import MusicTasks
-from local.playback_entry_window import ChoicePlacement, PlaybackEntryWindow
+from local.startup_timing import log_startup_phase
+from local.playback_entry_window import ChoicePlacement, LOGIN_SOURCE_IDS, PlaybackEntryWindow
 from local.music_navigation_transition import MusicNavigationTransition
 from local.runtime_platform import normalize_playback_selection, owned_playback_only, system_media_unavailable_reason
 
@@ -51,6 +52,8 @@ class PlaybackEntryController(QObject):
         self.login_callback = login_callback
         self.window = window or PlaybackEntryWindow(
             owned=bool(settings.get(OWNED_KEY, True)), system=bool(settings.get(SYSTEM_KEY, True)))
+        self.window.settings_getter = settings.get
+        self.window.setProperty("followsAppTheme", True)
         self.tasks = tasks or MusicTasks(self)
         # Optional avatar I/O must not occupy the two authentication workers.
         # One bounded existing worker queue is enough for this selected account.
@@ -64,6 +67,12 @@ class PlaybackEntryController(QObject):
         self.window.closed.connect(self._entry_closed)
         self.window.backRequested.connect(self._cancel_login)
         self.window.loginAccepted.connect(self.enter_account)
+        logout = getattr(self.window, "sourceLogoutRequested", None)
+        if logout is not None and hasattr(logout, "connect"):
+            logout.connect(self.logout_source)
+        sync = getattr(self.window, "playlistSyncRequested", None)
+        if sync is not None and hasattr(sync, "connect"):
+            sync.connect(self.open_playlist_sync)
         self._generation = 0
         self._route_generation = 0
         self._session = ""
@@ -90,6 +99,17 @@ class PlaybackEntryController(QObject):
         self._placement_timer.timeout.connect(self._refresh_choices_placement)
         self._choices_screen_anchor = QPoint()
         self._account_source = ""
+        watch = getattr(self.service, "watch_apple_login_window", None)
+        if callable(watch):
+            watch(self._apple_window_closed)
+
+    def _apple_window_closed(self):
+        """The login window closed. Read the WebView account and refresh the light."""
+        if self._closed:
+            return
+        generation = self._generation
+        self.tasks.submit(("apple-window", generation), lambda: self.service.account_status("apple_music", refresh=True)
+            if not self._closed and generation == self._generation else None)
 
     def _refresh_login(self):
         source = self.window.selected_source
@@ -155,6 +175,7 @@ class PlaybackEntryController(QObject):
 
     def _start_route(self, *, first_run):
         self._route_generation += 1
+        self._log_platform_account_status = True
         owned = bool(self.settings.get(OWNED_KEY, True))
         system = bool(self.settings.get(SYSTEM_KEY, True))
         if first_run:
@@ -175,8 +196,12 @@ class PlaybackEntryController(QObject):
                 return None
             # DPAPI/disk work remains off the GUI thread. This checks persisted
             # account records without waiting for a live internet validation.
-            return tuple(source.source_id for source in self.service.list_sources()
-                         if self.service.has_login_record(source.source_id))
+            started = time.perf_counter()
+            try:
+                return tuple(source.source_id for source in self.service.list_sources()
+                             if source.source_id in LOGIN_SOURCE_IDS and self.service.has_login_record(source.source_id))
+            finally:
+                log_startup_phase("platform_login_status", started)
         if not self.tasks.submit(("accounts", generation), accounts):
             self._accounts_ready = True
         self._probe_timer.start()
@@ -242,6 +267,8 @@ class PlaybackEntryController(QObject):
             self.window.set_sources(())
 
     def select_source(self, source_id):
+        if source_id not in LOGIN_SOURCE_IDS:
+            return
         if self.login_callback is None:
             self.begin_login(source_id)
             return
@@ -253,23 +280,31 @@ class PlaybackEntryController(QObject):
         generation = self._generation
         self.window.set_login_snapshot(LoginSnapshot("", source_id, "loading", message="正在读取账号…"))
         def account():
-            if self._closed or generation != self._generation:
-                return None
-            # A card verified in this session is already the provider's source
-            # of truth. Do not repeat the live login-status request on every
-            # return from the library; logged-out/startup records still validate.
-            restore = getattr(self.service, "restore_account", None)
-            cached = restore(source_id) if callable(restore) else self.service.account_status(source_id)
-            if cached.logged_in or self._closed or generation != self._generation:
-                return cached
-            if cached.state == "cached":
-                return cached
-            return self.service.account_status(source_id, refresh=True)
+            started = time.perf_counter()
+            log_this = bool(getattr(self, "_log_platform_account_status", False))
+            if log_this:
+                self._log_platform_account_status = False
+            try:
+                if self._closed or generation != self._generation:
+                    return None
+                # A card verified in this session is already the provider's source
+                # of truth. Do not repeat the live login-status request on every
+                # return from the library; logged-out/startup records still validate.
+                restore = getattr(self.service, "restore_account", None)
+                cached = restore(source_id) if callable(restore) else self.service.account_status(source_id)
+                if cached.logged_in or self._closed or generation != self._generation:
+                    return cached
+                if cached.state == "cached":
+                    return cached
+                return self.service.account_status(source_id, refresh=True)
+            finally:
+                if log_this:
+                    log_startup_phase("platform_account_status", started)
         if not self.tasks.submit(("account", generation, source_id), account):
             self.window.set_login_snapshot(LoginSnapshot("", source_id, "error", message="服务繁忙，请稍后重试"))
 
     def enter_account(self, source_id):
-        if self._closed or self._shell_hidden():
+        if self._closed or self._shell_hidden() or source_id not in LOGIN_SOURCE_IDS:
             return
         if self.login_callback is None:
             self._show_island()
@@ -283,13 +318,155 @@ class PlaybackEntryController(QObject):
         self.window.hide()
         self.login_callback(source_id)
 
+    def logout_source(self, source_id):
+        """Clear one platform's saved login. Other platforms stay as they are."""
+        if self._closed or source_id not in LOGIN_SOURCE_IDS:
+            return
+        generation = self._generation
+        def work():
+            if self._closed or generation != self._generation:
+                return None
+            self.service.logout(source_id)
+            return source_id
+        if not self.tasks.submit(("logout", generation, source_id), work):
+            self.window.message_label.setText("退出失败，请重试")
+
+    def open_playlist_sync(self, source_id="apple_music"):
+        """Show the sync example. Playlist reads and writes stay off the UI thread."""
+        if self._closed or source_id != "apple_music":
+            return
+        from local.apple_music_sync_dialog import PlaylistSyncDialog
+        dialog = PlaylistSyncDialog(self.window)
+        dialog.previewRequested.connect(self._request_sync_preview)
+        dialog.confirmRequested.connect(self._request_sync_write)
+        dialog.netease_button.clicked.connect(lambda _checked=False: self._request_sync_lists())
+        dialog.apple_button.clicked.connect(lambda _checked=False: self._request_sync_lists())
+        dialog.finished.connect(lambda *_args: setattr(self, "_sync_dialog", None))
+        self._sync_dialog = dialog
+        self._sync_payload = None
+        dialog.show()
+        self._request_sync_lists()
+
+    def _sync_store(self):
+        store = getattr(self, "_sync_links", None)
+        if store is None:
+            import os
+            from pathlib import Path
+            from api.apple_music_sync import FileLinkStore
+            base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
+            store = FileLinkStore(Path(base) / "GluSpot" / "apple-music-sync.json")
+            self._sync_links = store
+        return store
+
+    def _request_sync_lists(self):
+        dialog = getattr(self, "_sync_dialog", None)
+        if dialog is None or self._closed:
+            return
+        generation = self._generation
+        if not self.tasks.submit(("sync_lists", generation), lambda: self._load_sync_lists()
+                if not self._closed and generation == self._generation else None):
+            dialog.set_result("服务繁忙，请稍后重试")
+
+    def _load_sync_lists(self):
+        netease = self.service.playlists("netease")
+        apple = self.service.playlists("apple_music")
+        return (
+            tuple((item.playlist_id, item.title) for item in netease.items),
+            tuple((item.playlist_id, item.title) for item in apple.items),
+        )
+
+    def _request_sync_preview(self):
+        dialog = getattr(self, "_sync_dialog", None)
+        if dialog is None or self._closed:
+            return
+        request = dialog.request()
+        from local.apple_music_sync_flow import sync_direction_allowed
+        if not sync_direction_allowed(request["direction"]):
+            dialog.set_result("反向同步还没打开。现在只从网易云导入到 Apple Music。")
+            return
+        dialog.set_busy(True)
+        generation = self._generation
+
+        def work():
+            from local.apple_music_sync_flow import build_import_preview, preview_lines
+            rows, plan, _link = build_import_preview(
+                self.service, request["direction"], request["source_playlist_id"],
+                request["target_playlist_id"], self._sync_store(),
+            )
+            uncertain = tuple(
+                (row.source.song_id, f"{row.source.title} / {row.source.artist}")
+                for row in rows if row.state == "uncertain"
+            )
+            return {"text": preview_lines(rows, plan), "uncertain": uncertain, "rows": rows, "plan": plan}
+
+        if not self.tasks.submit(("sync_preview", generation), work):
+            dialog.set_busy(False)
+            dialog.set_result("服务繁忙，请稍后重试")
+
+    def _request_sync_write(self):
+        dialog = getattr(self, "_sync_dialog", None)
+        payload = getattr(self, "_sync_payload", None)
+        if dialog is None or payload is None or self._closed:
+            return
+        request = dialog.request()
+        from local.apple_music_sync_flow import sync_direction_allowed
+        if not sync_direction_allowed(request["direction"]):
+            dialog.set_result("反向同步还没打开。现在只从网易云导入到 Apple Music。")
+            return
+        dialog.set_busy(True)
+        generation = self._generation
+
+        def work():
+            from local.apple_music_sync_flow import execute_import, result_lines, selected_additions
+            additions = selected_additions(payload["rows"], payload["plan"], request["include_uncertain"])
+            direction = request["direction"]
+            if direction == "netease_to_apple":
+                netease_id, apple_id = request["source_playlist_id"], request["target_playlist_id"]
+            else:
+                apple_id, netease_id = request["source_playlist_id"], request["target_playlist_id"]
+            result = execute_import(
+                self.service, direction, netease_id, apple_id, additions, self._sync_store(),
+                new_name=request["new_name"],
+            )
+            return result_lines(result)
+
+        if not self.tasks.submit(("sync_write", generation), work):
+            dialog.set_busy(False)
+            dialog.set_result("服务繁忙，请稍后重试")
+
+    def _sync_completed(self, kind, result, error):
+        dialog = getattr(self, "_sync_dialog", None)
+        if dialog is None:
+            return
+        dialog.set_busy(False)
+        if error or result is None:
+            dialog.set_result("这次没有完成，请重试。")
+            return
+        if kind == "sync_lists":
+            netease, apple = result
+            if dialog.direction() == "netease_to_apple":
+                dialog.set_source_playlists(netease)
+                dialog.set_target_playlists(apple)
+            else:
+                dialog.set_source_playlists(apple)
+                dialog.set_target_playlists(netease)
+            return
+        if kind == "sync_preview":
+            self._sync_payload = result
+            dialog.set_preview(result["text"], result["uncertain"])
+            return
+        dialog.set_result(str(result))
+
     def begin_login(self, source_id):
-        if self._closed or source_id not in {source.source_id for source in self._sources if source.available}:
+        if (self._closed or source_id not in LOGIN_SOURCE_IDS
+                or source_id not in {source.source_id for source in self._sources if source.available}):
             return
         self._cancel_login()
         self._attempt_source = source_id
         generation = self._generation
-        self.window.set_login_snapshot(LoginSnapshot("", source_id, "starting", message="正在获取登录二维码…"))
+        starting = "正在打开 Apple 登录窗口…" if source_id == "apple_music" else "正在获取登录二维码…"
+        self.window.set_login_snapshot(LoginSnapshot("", source_id, "starting", message=starting,
+                                                     login_kind="window" if source_id == "apple_music" else "qr"))
         if not self.tasks.submit(("begin", generation, source_id), lambda: self.service.begin_login(source_id)
                 if not self._closed and generation == self._generation else None):
             self.window.set_login_snapshot(LoginSnapshot("", source_id, "error", message="服务繁忙，请稍后刷新"))
@@ -346,8 +523,8 @@ class PlaybackEntryController(QObject):
         if generation != self._generation:
             return
         if kind == "sources":
-            self._sources = result or ()
-            self.window.set_sources(self._sources)
+            self._sources = tuple(source for source in (result or ()) if source.source_id in LOGIN_SOURCE_IDS)
+            self.window.set_sources(result or ())
             source, enter_saved = getattr(self, "_select_after_sources", ("", False))
             self._select_after_sources = ("", False)
             if source in {s.source_id for s in self._sources if s.available}:
@@ -364,6 +541,36 @@ class PlaybackEntryController(QObject):
                             break
                         self.service.prepare_login_runtime(source_id)
                 self.tasks.submit(("prepare", generation), prepare)
+                def statuses():
+                    found = []
+                    for source_id in available:
+                        if self._closed or generation != self._generation:
+                            break
+                        try:
+                            found.append((source_id, self.service.account_status(source_id, refresh=True)))
+                        except Exception:
+                            found.append((source_id, None))
+                    return found
+                self.tasks.submit(("source-statuses", generation), statuses)
+            return
+        if kind == "source-statuses":
+            for source_id, account in (result or ()):
+                if account is None:
+                    continue
+                self.window._set_source_status(source_id, self.window._account_status(account))
+            return
+        if kind == "apple-window":
+            if isinstance(result, AccountSnapshot):
+                self.window._set_source_status("apple_music", self.window._account_status(result))
+            return
+        if kind == "logout":
+            source_id = extra[0]
+            if error:
+                self.window.message_label.setText("退出失败，请重试")
+                return
+            self.window._set_source_status(source_id, "signed_out")
+            if getattr(self.window, "_account", None) is not None and self.window._account.source_id == source_id:
+                self.window._account = None
             return
         if kind == "account":
             source = extra[0]
@@ -388,6 +595,9 @@ class PlaybackEntryController(QObject):
             else:
                 self.begin_login(source)
             return
+        if kind in {"sync_lists", "sync_preview", "sync_write"}:
+            self._sync_completed(kind, result, error)
+            return
         if kind == "avatar":
             if not error and result:
                 from PySide6.QtGui import QImage
@@ -399,10 +609,16 @@ class PlaybackEntryController(QObject):
         self._poll_pending = False
         if error or result is None:
             self._poll_timer.stop()
-            self.window.set_login_snapshot(LoginSnapshot(self._session, extra[0], "error",
-                message="二维码获取失败，请重试" if kind == "begin" else "扫码状态检测失败，请重试",
+            source_id = extra[0] if extra else ""
+            if source_id == "apple_music":
+                failure = "登录窗口没有打开，请重试" if kind == "begin" else "登录状态没有读到，请重试"
+            else:
+                failure = "二维码获取失败，请重试" if kind == "begin" else "扫码状态检测失败，请重试"
+            self.window.set_login_snapshot(LoginSnapshot(self._session, source_id, "error",
+                message=failure,
                 failure_category=str(error) if str(error) in {"network", "timeout", "runtime", "credential", "cancelled"} else "request_failed",
-                failure_stage="begin_login" if kind == "begin" else "poll_login"))
+                failure_stage="begin_login" if kind == "begin" else "poll_login",
+                login_kind="window" if source_id == "apple_music" else "qr"))
             return
         self._session = result.session_id
         self._verification_retry = result.state == "error" and result.failure_stage == "account_status"

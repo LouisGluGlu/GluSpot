@@ -638,7 +638,7 @@ def music_background_layer_paint_plan(
             steps.append("bilateral_diffraction_ambience")
     else:
         steps.extend(("glass_body", "bottom_ambience"))
-        if style != "duotone_full":
+        if style not in {"duotone_full", "sea_level"}:
             steps.append("blur_mask")
         steps.append("light_wave")
     return MusicBackgroundLayerPaintPlan(ambience_style=style, steps=tuple(steps))
@@ -653,6 +653,13 @@ def music_surface_paint_plan(
 ) -> MusicSurfacePaintPlan:
     style = _normalized_music_ambience_style(ambience_style)
     layout_style = str(expanded_layout_style or "standard").strip().lower()
+    if not bool(expanded) and style == "sea_level":
+        # The compact now-playing face is an opaque black pill. Expanded
+        # water retains its existing background layers.
+        return MusicSurfacePaintPlan(
+            ambience_style=style,
+            steps=("pure_black_background", "compact_content"),
+        )
     if bool(expanded) and layout_style == "dual_panel":
         return MusicSurfacePaintPlan(
             ambience_style=style,
@@ -692,7 +699,6 @@ def active_visual_animation_plan(
     music_surface_transition_active: bool = False,
     lyric_index_transition_active: bool = False,
     lyric_kind_transition_active: bool = False,
-    album_island_transition_active: bool = False,
     plugin_time_module_active: bool = False,
     plugin_alarm_editor_page_active: bool = False,
     plugin_alarm_editor_reflow_active: bool = False,
@@ -712,7 +718,6 @@ def active_visual_animation_plan(
         ("music_surface_transition", music_surface_transition_active),
         ("lyric_index_transition", lyric_index_transition_active),
         ("lyric_kind_transition", lyric_kind_transition_active),
-        ("album_island_transition", album_island_transition_active),
         ("plugin_time_module", plugin_time_module_active),
         ("plugin_alarm_editor_page", plugin_alarm_editor_page_active),
         ("plugin_alarm_editor_reflow", plugin_alarm_editor_reflow_active),

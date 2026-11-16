@@ -89,7 +89,7 @@ async function ncmCall(state, method, params = {}) {
       else throw error;
     }
   } else {
-    const allowed = new Set(["login_qr_key","login_qr_create","login_status","user_playlist","playlist_track_all","recommend_songs","personalized","personal_fm","aidj_content_rcmd","lyric_new","lyric","cloudsearch","song_url","likelist","like","playlist_detail","playlist_tracks"]);
+    const allowed = new Set(["login_qr_key","login_qr_create","login_status","user_playlist","playlist_track_all","recommend_songs","personalized","personal_fm","aidj_content_rcmd","lyric_new","lyric","cloudsearch","song_url","likelist","like","playlist_detail","playlist_tracks","playlist_create"]);
     if (!allowed.has(method)) fail("unsupported");
     const fn = require(path.join(state.root,"module",method + ".js"));
     result = await fn(query,state.request);
@@ -148,6 +148,14 @@ async function ncmFavorites(state,op,p) {
     return {ok:true};
   }
   fail("unsupported");
+}
+async function ncmCreatePlaylist(state, p) {
+  const name = typeof p.name === "string" ? p.name.trim() : "";
+  if (!name || Array.from(name).length > 40) fail("invalid_response");
+  const body = ncmSuccess(await ncmCall(state, "playlist_create", {name, privacy: 10, type: "NORMAL"}));
+  const id = body.id || (body.playlist && body.playlist.id);
+  if (!id) fail("invalid_response");
+  return {ok: true, playlist_id: String(id), name};
 }
 async function ncmPersonalDjCall(state, operation, params) {
   // Verified official 9.6.05 catalog/selection contract, documented in
@@ -422,6 +430,7 @@ async function dispatch(source,op,p,credential,context) {
     if(op==="logout") { state.cookie={}; return {}; }
     if(!state.cookie.MUSIC_U) fail("auth_required");
     if(["favorite_status","set_favorite","writable_playlists","add_song_to_playlist"].includes(op)) return await ncmFavorites(state,op,p);
+    if(op==="create_playlist") return await ncmCreatePlaylist(state,p);
     if(op==="search") {
       const params=searchInput(p),body=await ncmCall(state,"cloudsearch",{keywords:params.query,type:params.kind==="songs"?1:1000,limit:params.limit,offset:params.offset});
       if(Number(body.code)!==200 || !body.result || typeof body.result!=="object") fail("invalid_response");

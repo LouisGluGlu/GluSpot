@@ -262,6 +262,10 @@ class SongCollectionTests(unittest.TestCase):
         self.tasks.run()
         self.assertEqual(self.writes(), [("add", "netease", "9", "12", "42")])
         self.assertEqual(self.controller.context(self.track_id).message, "已添加到歌单")
+        self.assertTrue(self.controller.context(self.track_id).playlists[0].contains_track)
+        self.assertFalse(self.controller.add_to_playlist("12", self.track_id))
+        self.assertEqual(self.controller.context(self.track_id).message, "已在歌单")
+        self.assertEqual(self.writes(), [("add", "netease", "9", "12", "42")])
 
     def test_paging_consumes_filtered_page_cursor_and_deduplicates_rows(self):
         self.ready()

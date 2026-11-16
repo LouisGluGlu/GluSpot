@@ -24,6 +24,40 @@ MAX_TTML_ROWS = 2000
 _TTML_NS = "http://www.w3.org/ns/ttml"
 _TTM_NS = "http://www.w3.org/ns/ttml#metadata"
 _SECONDARY_ROLES = {"x-translation", "x-roman", "x-romanization", "x-transliteration"}
+# Apple's lyric TTML keys each line (itunes:key="L1") and, when asked with
+# extend=ttmlLocalizations, carries translations in the head:
+# <iTunesMetadata><translations><translation xml:lang=".."><text for="L1">.
+_ITUNES_NS = "http://music.apple.com/lyric-ttml-internal"
+_XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
+
+
+def _apple_translations(root: ElementTree.Element, preferred: str = "zh") -> dict[str, str]:
+    """{line key: translated text} from Apple's head metadata, or {}.
+
+    A language starting with ``preferred`` wins; otherwise the first set.
+    Background-vocal spans inside a translation are left out, as they are
+    for the sung line.
+    """
+    sets: list[tuple[str, dict[str, str]]] = []
+    for node in root.iter():
+        if _name(node.tag) != "translation":
+            continue
+        texts: dict[str, str] = {}
+        for text in node:
+            if _name(text.tag) != "text":
+                continue
+            key = str(text.get("for") or "").strip()
+            value = _vocal_text(text).strip()
+            if key and value and len(key) <= 32:
+                texts[key] = value
+        if texts:
+            sets.append((str(node.get(_XML_LANG) or node.get("lang") or ""), texts))
+    if not sets:
+        return {}
+    for lang, texts in sets:
+        if lang.lower().startswith(preferred):
+            return texts
+    return sets[0][1]
 
 
 @dataclass(frozen=True)
@@ -164,6 +198,7 @@ def parse_ttml(raw_text: str) -> TtmlDocument | None:
     originals: list[tuple[TimedLyricLine, str]] = []
     translations: list[TimedLyricLine] = []
     romanizations: list[TimedLyricLine] = []
+    keyed_starts: list[tuple[str, float]] = []
     try:
         for paragraph in body.iter():
             if _name(paragraph.tag) != "p":
@@ -179,6 +214,9 @@ def parse_ttml(raw_text: str) -> TtmlDocument | None:
             main = _row(paragraph, background=paragraph_role == "x-bg")
             if main is not None:
                 originals.append((main, agent))
+                line_key = str(paragraph.get(f"{{{_ITUNES_NS}}}key") or "").strip()
+                if line_key:
+                    keyed_starts.append((line_key, main.time_seconds))
             fallback = main.time_seconds if main is not None else parse_ttml_time(paragraph.get("begin"))
             def companions(parent: ElementTree.Element, parent_start: float | None) -> None:
                 for child in parent:
@@ -199,6 +237,10 @@ def parse_ttml(raw_text: str) -> TtmlDocument | None:
             companions(paragraph, fallback)
     except RecursionError:
         return None
+    if not translations and keyed_starts:
+        apple = _apple_translations(root)
+        if apple:
+            translations = [TimedLyricLine(start, apple[key]) for key, start in keyed_starts if key in apple]
     if not originals or len(originals) + len(translations) + len(romanizations) > MAX_TTML_ROWS:
         return None
     originals.sort(key=lambda entry: entry[0].time_seconds)

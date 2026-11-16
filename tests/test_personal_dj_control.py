@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from api.models import AudioFrame
 from local.owned_audio_bridge import OwnedAudioBridge
 from local.personal_dj_icon import (DJ_RING_CYCLE_SECONDS, DJ_RING_HOLD_SECONDS, DJ_RING_TRAVEL_SECONDS,
-                                   paint_personal_dj_icon, personal_dj_ring_color, personal_dj_ring_poses, personal_dj_status_color,
+                                   paint_personal_dj_icon, personal_dj_icon_bounds, personal_dj_ring_color, personal_dj_ring_poses, personal_dj_status_color,
                                    personal_dj_status_opacity, personal_dj_travel_progress)
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_owned_audio_bridge_handoff import Owner
@@ -255,6 +255,38 @@ class PersonalDjControlTests(unittest.TestCase):
         self.window._reset_control_idle(111)
         self.assertEqual(self.window._personal_dj_reveal_at(111), 1)
 
+    def test_status_light_bounding_rect_stays_inside_the_round_button(self):
+        self.enabled = True
+        self.presentation = {"state": "ready", "next_title": "", "token": 1}
+        for size in ((960, 540), (440, 340), (1920, 1080), (320, 240)):
+            with self.subTest(size=size):
+                self.window.resize(*size)
+                with patch("local.music_surface_window.time.monotonic", return_value=100):
+                    self.window._sync_owned_playback_mode()
+                region = QRectF(self.window.rect())
+                icon, _caption = self.window._personal_dj_geometry(region, 100, expansion=0, posed=False)
+                badge = self.window._personal_dj_status_badge_rect(icon, icon, None, 0)
+                self._assert_status_light_inside(icon, badge)
+
+    def _assert_status_light_inside(self, button, badge):
+        from local.personal_dj_icon import (
+            personal_dj_legacy_status_dot_diameter, personal_dj_status_dot_diameter,
+        )
+        radius = min(button.width(), button.height()) / 2.0
+        center = button.center()
+        self.assertGreater(badge.width(), 0.0)
+        self.assertAlmostEqual(badge.width(), badge.height())
+        legacy = personal_dj_legacy_status_dot_diameter(min(button.width(), button.height()))
+        self.assertLessEqual(badge.width(), personal_dj_status_dot_diameter(min(button.width(), button.height())) + 1e-6)
+        self.assertAlmostEqual(badge.width(), legacy * 0.60)
+        self.assertGreater(badge.center().x(), center.x())
+        self.assertGreater(badge.center().y(), center.y())
+        farthest = 0.0
+        for corner in (badge.topLeft(), badge.topRight(), badge.bottomLeft(), badge.bottomRight()):
+            farthest = max(farthest, math.hypot(corner.x() - center.x(), corner.y() - center.y()))
+        self.assertLessEqual(farthest, radius + 1e-4)
+        self.assertLess(farthest, radius - 0.5)
+
     def test_button_is_bottom_right_with_own_round_hit_shape(self):
         for size in ((640, 360), (960, 540), (1920, 1080)):
             self.window.resize(*size)
@@ -267,7 +299,7 @@ class PersonalDjControlTests(unittest.TestCase):
             self.assertTrue(self.window._window_control_contains("personal_dj", dj, dj.center()))
             self.assertFalse(self.window._window_control_contains("personal_dj", dj, dj.topLeft()))
 
-    def test_speech_expands_twice_with_actual_next_title_below_not_over_cover(self):
+    def test_speech_keeps_the_corner_one_still_button(self):
         self.enabled = True
         self.presentation = {"state": "speaking", "next_title": "真实下一首歌曲的名称", "speaking": True, "token": 4}
         for size in ((640, 360), (960, 540), (1920, 1080)):
@@ -284,26 +316,22 @@ class PersonalDjControlTests(unittest.TestCase):
                     self.window._dj_activity_to = 1.0
                     self.window._dj_activity_started_at = 100.0
                 icon, title = self.window._personal_dj_geometry(region, 100.4)
-                self.assertAlmostEqual(icon.width(), compact.width() * 2)
-                self.assertGreater(title.top(), icon.bottom())
-                self.assertGreater(title.width(), icon.width())
-                self.assertTrue(region.contains(icon.united(title)))
-                self.assertGreater(icon.left(), region.width() * .65)
-                self.assertGreater(icon.top(), region.height() * .60)
+                self.assertEqual(icon, compact)
+                self.assertEqual(title, icon)
+                self.assertTrue(region.contains(icon))
+                # The next title is still known; it is just not shown in the corner.
                 self.assertEqual(self.window._dj_next_title, self.presentation["next_title"])
 
-    def test_speech_union_hit_shape_rejects_empty_space_and_keeps_title_clickable(self):
+    def test_speech_button_hit_shape_is_the_round_button(self):
         self.enabled = self.speaking = True
         self.presentation = {"state": "speaking", "next_title": "Next actual music", "token": 3}
         with patch("local.music_surface_window.time.monotonic", return_value=100):
             self.window._sync_owned_playback_mode()
         with patch("local.music_surface_window.time.monotonic", return_value=100.4):
-            icon, caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.4)
+            icon, _caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.4)
             whole = self.window._personal_dj_button_rect(QRectF(self.window.rect()))
             self.assertTrue(self.window._window_control_contains("personal_dj", whole, icon.center()))
-            self.assertTrue(self.window._window_control_contains("personal_dj", whole, caption.center()))
             self.assertFalse(self.window._window_control_contains("personal_dj", whole, whole.topLeft()))
-            self.assertFalse(self.window._window_control_contains("personal_dj", whole, QPointF(icon.center().x(), (icon.bottom() + caption.top()) / 2)))
 
     def test_snapshot_hit_shape_stays_captured_when_speech_ends_and_morph_stretches(self):
         self.enabled = self.speaking = True
@@ -361,31 +389,23 @@ class PersonalDjControlTests(unittest.TestCase):
         self.assertTrue(self.enabled)
         self.assertEqual(self.presentation, {"state": "idle", "token": 3})
 
-    def test_speech_end_preserves_real_caption_geometry_until_contraction_finishes(self):
+    def test_speech_end_leaves_the_still_button_in_place(self):
         self.enabled = self.speaking = True
         title = "A long but real upcoming song title retained through closing"
         self.presentation = {"state": "speaking", "next_title": title, "token": 2}
         with patch("local.music_surface_window.time.monotonic", return_value=100):
             self.window._sync_owned_playback_mode()
         with patch("local.music_surface_window.time.monotonic", return_value=100.4):
-            old_icon, old_caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.4)
+            old_icon, _old_caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.4)
             self.speaking = False
             self.presentation = {"state": "idle", "next_title": "", "token": 3}
             self.window._sync_personal_dj_state()
-            icon, caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.4)
-            self.assertEqual(icon, old_icon)
-            self.assertEqual(caption, old_caption)
-            self.assertEqual(self.window._dj_next_title, title)
-        with patch("local.music_surface_window.time.monotonic", return_value=100.6):
-            self.window._sync_personal_dj_state()
-            icon, caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.6)
-            self.assertLess(caption.width(), old_caption.width())
-            self.assertGreater(caption.width(), icon.width())
         with patch("local.music_surface_window.time.monotonic", return_value=100.8):
             self.window._sync_personal_dj_state()
             self.assertEqual(self.window._dj_next_title, "")
             icon, caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.8)
             self.assertEqual(icon, caption)
+            self.assertEqual(icon, old_icon)
 
     def test_five_rings_complete_accent_right_left_right_cycle_then_hold_half_second(self):
         first = {identity: (x, height) for identity, x, height, _ in personal_dj_ring_poses(0)}
@@ -519,7 +539,8 @@ class PersonalDjControlTests(unittest.TestCase):
             self.window._update_personal_dj_control(100.1)
         update.assert_called_once()
         self.assertLess(update.call_args.args[0].width(), self.window.width() * .35)
-        self.assertLess(update.call_args.args[0].height(), self.window.height() * .35)
+        # The unit-sized wave button rounds onto the old 35% line.
+        self.assertLessEqual(update.call_args.args[0].height(), self.window.height() * .35)
 
     def test_ripple_excludes_both_speech_ring_and_title_background(self):
         self.enabled = self.speaking = True
@@ -541,22 +562,19 @@ class PersonalDjControlTests(unittest.TestCase):
                 self.assertEqual(bytes(protected_crop.constBits()), bytes(original_crop.constBits()))
             self.assertNotEqual(bytes(image.constBits()), bytes(original.constBits()))
 
-    def test_fully_expanded_speech_has_caption_background_and_only_soft_ring_backdrop(self):
+    def test_speech_corner_paints_one_glass_button_without_a_caption(self):
         self.enabled = self.speaking = True
         self.presentation = {"state": "speaking", "next_title": "A real next song", "token": 4}
         with patch("local.music_surface_window.time.monotonic", return_value=100):
             self.window._sync_owned_playback_mode()
         image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
-        with QPainter(image) as painter, patch("local.music_surface_window.time.monotonic", return_value=100.4), patch(
-            "local.music_surface_window.paint_personal_dj_icon",
-        ):
+        with QPainter(image) as painter, patch("local.music_surface_window.time.monotonic", return_value=100.4):
             self.window._paint_personal_dj_control(painter, QRectF(self.window.rect()))
-        icon, caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.4)
-        ring_center = image.pixelColor(icon.center().toPoint())
-        self.assertGreater(ring_center.alpha(), 40)
-        self.assertLessEqual(ring_center.alpha(), 177)
-        self.assertGreater(image.pixelColor(caption.center().toPoint()).alpha(), 200)
+        icon, _caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.4)
+        self.assertGreater(image.pixelColor(icon.center().toPoint()).alpha(), 0)
+        left_of_button = QPointF(icon.left() - icon.width() * 1.5, icon.center().y())
+        self.assertEqual(image.pixelColor(left_of_button.toPoint()).alpha(), 0)
 
     def test_speech_backdrop_is_feathered_bounded_and_respects_parent_opacity(self):
         self.window._dj_next_title = "A real next song"
@@ -581,7 +599,7 @@ class PersonalDjControlTests(unittest.TestCase):
                     self.assertEqual(image.pixelColor(point).alpha(), 0)
             self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
             self.window._owned_dj_speaking = True
-            self.assertTrue(self.window._personal_dj_damage_rect(region).contains(bounds.toAlignedRect()))
+            self.assertFalse(self.window._personal_dj_damage_rect(region).contains(bounds.toAlignedRect()))
 
             reduced = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
             reduced.fill(Qt.GlobalColor.transparent)
@@ -685,7 +703,7 @@ class PersonalDjControlTests(unittest.TestCase):
         region = QRectF(self.window.rect())
         with patch("local.music_surface_window.time.monotonic", return_value=100.4):
             idle = self.window._personal_dj_damage_rect(region)
-        self.assertLess(idle.height(), region.height() * .35)
+        self.assertLessEqual(idle.height(), region.height() * .35)
         self.speaking = True
         self.presentation = {"state": "speaking", "next_title": "下一首真实歌曲", "token": 2}
         with patch("local.music_surface_window.time.monotonic", return_value=101):
@@ -693,7 +711,10 @@ class PersonalDjControlTests(unittest.TestCase):
         with patch("local.music_surface_window.time.monotonic", return_value=101.4):
             speech = self.window._personal_dj_damage_rect(region)
             self.window._dj_last_damage = speech
-            self.assertTrue(speech.contains(self.window._personal_dj_backdrop_rect(region).toAlignedRect()))
+            cover = self.window._broadcast_indicator_rect(101.4)
+            self.assertEqual(cover, self.window._scaled_cover_rect(
+                self.window._current_cover_rect(101.4), self.window._cover_scale_at(101.4)))
+            self.assertFalse(speech.contains(self.window._personal_dj_backdrop_rect(region).toAlignedRect()))
             self.assertLess(speech.width() * speech.height(), region.width() * region.height() * .22)
         self.speaking = False
         self.presentation = {"state": "idle", "next_title": "", "token": 3}
@@ -703,7 +724,7 @@ class PersonalDjControlTests(unittest.TestCase):
             self.window._update_personal_dj_control(101.8)
         self.assertTrue(any(args.args[0].contains(speech) for args in update.call_args_list))
         with patch("local.music_surface_window.time.monotonic", return_value=101.8):
-            self.assertLess(self.window._personal_dj_damage_rect(region).height(), region.height() * .35)
+            self.assertLessEqual(self.window._personal_dj_damage_rect(region).height(), region.height() * .35)
 
     def test_real_frequency_glow_changes_glyph_without_raster_blur_or_cache_growth(self):
         self.enabled = self.speaking = True

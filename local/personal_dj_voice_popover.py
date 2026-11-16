@@ -148,7 +148,7 @@ class PersonalDjVoicePopover(QWidget):
                 if self._selected >= 0:
                     indicator = QRectF(track.left() + self._indicator_at(time.monotonic()) * width,
                                        track.top(), width, track.height())
-                    accent = self.surface._future_lyric_color(surface_bounds)
+                    accent = self.surface._album_accent_color(surface_bounds)
                     accent = QColor(accent)
                     accent.setAlpha(65)
                     paint_liquid_glass(painter, indicator, base_color=accent, hovered=True,

@@ -20,6 +20,7 @@ class MusicLibraryWindowTests(unittest.TestCase):
 
     def setUp(self):
         self.window = MusicLibraryWindow()
+        self.window.set_library_variant("classic")  # Original folded catalog contract.
         self.account = AccountSnapshot("netease", True, "fixture-id", "布局测试账号", state="verified")
         self.window.set_account(self.account)
         self.catalog = (
@@ -80,6 +81,24 @@ class MusicLibraryWindowTests(unittest.TestCase):
         self.assertTrue(self.window.logout_button.isVisible())
         self.assertEqual([group.title for group in self.window._groups], ["为你精选", "个人歌单"])
         self.assertEqual(self.window._rows, [])
+
+    def test_informational_notice_is_hover_only_without_moving_library(self):
+        geometry = self.window.scroll.geometry()
+        message = "正在核验登录，当前显示本地快照"
+        self.window.set_notice(message)
+        self.window._layout()
+        self.assertEqual(self.window.scroll.geometry(), geometry)
+        self.assertEqual(self.window.scroll.toolTip(), message)
+        self.assertEqual(self.window._error, "")
+        self.window.set_error("请求失败，请重试")
+        # The error floats above the player. It no longer reserves a strip, so the list stays put.
+        self.assertEqual(self.window.scroll.height(), geometry.height())
+        self.window.set_notice("")
+        self.assertEqual(self.window.scroll.toolTip(), "")
+        self.assertEqual(self.window._error, "请求失败，请重试")
+        self.window.set_notice(message)
+        self.window.set_account(AccountSnapshot("qq", True, "other", "另一个账号", state="verified"))
+        self.assertEqual(self.window.scroll.toolTip(), "")
 
     def test_legacy_toolbar_fraction_never_changes_horizontal_collection_cards(self):
         self._show_personal_rows()
@@ -199,7 +218,8 @@ class MusicLibraryWindowTests(unittest.TestCase):
         self.window.set_collections(self.catalog + (LibraryCollection("extra", "playlist", "新歌单", "", "3"),))
         self.assertEqual(self.window._background_frame.cacheKey(), key)
         self.window.set_account(AccountSnapshot("qq", True, "qq-account", "另一个账号", state="verified"))
-        self.assertNotEqual(self.window._background_frame.cacheKey(), key)
+        # No track uses the shared neutral surface scene, independent of platform.
+        self.assertEqual(self.window._background_frame.cacheKey(), key)
 
     def test_clear_search_returns_catalog_once_and_preserves_account(self):
         self.window.search.setText("海")
@@ -436,9 +456,19 @@ class MusicLibraryWindowTests(unittest.TestCase):
                 self.assertTrue(row.rect().contains(row.cover.geometry()))
 
     def test_error_status_has_its_own_space_below_scrolling_content(self):
+        # The old assertion reserved a 44px strip under the list. The toast
+        # now floats, so the scroll view keeps its normal bottom inset.
         self.window.set_error("布局测试 · 播放失败")
-        self.assertLess(self.window.scroll.geometry().bottom(), self.window.height() - 36)
         self.assertEqual(self.window._error, "布局测试 · 播放失败")
+        self.assertGreater(self.window.scroll.geometry().bottom(), self.window.height() - 24)
+        from local.library_error_toast import error_toast_rect
+        from local.playback_entry_window import _entry_font
+        rect = error_toast_rect(
+            self.window.width(), self.window._error_toast_anchor(),
+            self.window._error, _entry_font(13),
+        )
+        self.assertLess(rect.bottom(), self.window._error_toast_anchor())
+        self.assertGreater(rect.center().y(), self.window.height() * 0.5)
         self.assertFalse(self.window.grab().isNull())
 
     def test_collection_cover_emits_default_surface_and_global_artwork_rectangle_directly(self):
@@ -446,14 +476,25 @@ class MusicLibraryWindowTests(unittest.TestCase):
         browse=QSignalSpy(self.window.collectionBrowseRequested)
         self.window._expand_group("for_you");self._finish_sections()
         collection,cover,_=self.window._shelves[0].tiles[0]
+        pages=QSignalSpy(self.window.playlistPageRequested)
         cover.click()
+        if collection.kind in {"playlist","daily"}:
+            # A list opens its page; the page's large cover plays it.
+            self.assertEqual((spy.count(),pages.count()),(0,1))
+            page=self.window.playlist_page
+            page.canvas.resize(600,800)
+            cover=page.canvas
+            QTest.mouseClick(cover,Qt.MouseButton.LeftButton,pos=cover.play_all_rect().center().toPoint())
+            expected=cover.global_rect(cover.cover_rect()).topLeft()
+        else:
+            expected=cover.mapToGlobal(cover.artwork_rect().toAlignedRect().topLeft())
         self.assertEqual(spy.count(),1)
         self.assertEqual(browse.count(),0)
         item,mode,rect=spy.at(0)
         self.assertEqual(item,collection)
         self.assertEqual(mode,"default")
         self.assertTrue(rect.isValid())
-        self.assertEqual(rect.topLeft(),cover.mapToGlobal(cover.artwork_rect().toAlignedRect().topLeft()))
+        self.assertEqual(rect.topLeft(),expected)
 
     def test_opening_rejects_duplicate_selection_until_finished(self):
         self._show_song_results()

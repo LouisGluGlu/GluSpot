@@ -7,6 +7,7 @@ import ctypes
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+from http.client import IncompleteRead
 from ctypes import wintypes
 from dataclasses import replace
 from functools import lru_cache
@@ -23,27 +25,26 @@ from typing import Literal
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QImage
 
-from api.audio_analyzer import LiveAudioAnalyzer
+from api.capture import capture_enabled
+from api.capture.seek import record_seek_decision
+from api.audio_analyzer import LiveAudioAnalyzer, RenderPeakMeter
 from api.audio_routes import AudioRouteSnapshot
 from api.artwork_sources import (
     ARTWORK_USER_AGENT, MusicBrainzArtworkResolver,
-    artwork_duration_matches, artwork_text_key, normalize_artwork_url, read_artwork_response,
+    artwork_duration_matches, artwork_text_key, log_artwork_event, normalize_artwork_url, read_artwork_response,
 )
 from api.lyrics import LocalLyricsStore
 from api.lyric_timeline import has_sufficient_word_timing
-# Compatibility imports for older callers/tests; active providers never
-# construct these retired collectors.
-from api.message_detector import WindowsMessageDetector
 from api.models import AlbumQueueEntry, AudioFrame, ColorToken, IslandVisualData, TrackData
 from api.netease_position import NeteasePositionReader, QQPositionReader
-from api.plugin_provider import RealPluginProvider
 from local.runtime_platform import owned_playback_only
 
 
 PlaybackCommand = Literal["previous", "toggle_play_pause", "next"]
+logger = logging.getLogger(__name__)
 PROJECTED_POSITION_SOURCES = {
     "windows-media",
     "local-estimate",
@@ -180,23 +181,91 @@ class NoMediaSessionProvider(EmptyIslandDataProvider):
         super().__init__(NO_SESSION_VISUAL_DATA)
 
 
+class _PlaybackSourceDispatch(QObject):
+    """Keep automatic source/Qt-player commits on the existing GUI thread."""
+    requested = Signal(object)
+    changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.requested.connect(self._apply, Qt.ConnectionType.QueuedConnection)
+
+    async def call(self, guard, action):
+        if QThread.currentThread() == self.thread():
+            return action() if guard() else False
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        self.requested.emit((guard, action, time.monotonic() + 2.0, loop, future))
+        try:
+            return await asyncio.wait_for(future, 2.0)
+        except asyncio.TimeoutError:
+            return False
+
+    @Slot(object)
+    def _apply(self, request):
+        guard, action, deadline, loop, future = request
+        value = False
+        try:
+            if not future.done() and time.monotonic() < deadline and guard():
+                value = action()
+        except Exception:
+            # Never log third-party metadata, credentials or callback payloads.
+            value = False
+        def complete():
+            if not future.done():
+                future.set_result(value)
+        try:
+            loop.call_soon_threadsafe(complete)
+        except RuntimeError:
+            pass
+
+
 class PlaybackSourceProvider:
     """V2 provider boundary selecting owned playback or enabled system capture.
 
     Owned decoded PCM has its own authenticated input to the shared sender.
     External process capture retains its independent strict identity guards.
     """
-    def __init__(self, system_provider, owned_player, settings_getter):
+    _NETEASE_SUPPLEMENT_DELAY = 0.3
+    def __init__(self, system_provider, owned_player, settings_getter, *, media_classifier=None, interruption_policy=None):
         self.system = system_provider
         self.owned = owned_player
         self.settings_getter = settings_getter
+        from api.capture.interruption import InterruptionPolicy
+        self._interruption_policy = interruption_policy or InterruptionPolicy()
+        self._interruption_classifier = media_classifier
         self._owned_capture_suspended = False
         self._owned_outputs = None
+        self._source_dispatch = _PlaybackSourceDispatch()
+        self.sourceChanged = self._source_dispatch.changed
+        self._interruption_enabled = False
+        self._interruption_generation = 0
+        self._interruption_intent = 0
+        self._interruption_observer = None
+        self._interruption_pin = None
+        self._interruption_capture_data = None
+        self._interruption_owned_playing = False
+        self._interruption_owned_at = 0.0
+        self._interruption_intent_at = 0.0
+        self._interruption_cooldown_until = 0.0
+        self._interruption_candidate = None
+        self._interruption_yield_task = None
+        self._interruption_tasks = set()
+        self._interruption_suspended = False
+        self._interruption_edge = 0
+        self._interruption_last_edge = None
+        self._interruption_result = "off"
+        self._interruption_cdp_once = set()
         from local.owned_audio_bridge import OwnedAudioBridge
         self._owned_audio_bridge = OwnedAudioBridge(owned_player)
         self.owned.changed.connect(self._owned_state_changed)
 
     def _owned_state_changed(self):
+        if self._interruption_enabled:
+            playing = self.owned.interruption_playing()
+            if playing and not self._interruption_owned_playing:
+                self._interruption_owned_at = time.monotonic()
+            self._interruption_owned_playing = playing
         active = self._owned_active()
         if active and not self._owned_capture_suspended:
             self.system.suspend_live_audio()
@@ -207,6 +276,588 @@ class PlaybackSourceProvider:
             self._owned_outputs.stop_cast()
         self._owned_capture_suspended = active
 
+    def _interruption_log(self, **fields):
+        """Decision log. No-op while the setting is off; no titles or page text."""
+        if not self._interruption_enabled:
+            return
+        from api.capture.interruption import log_interruption
+        log_interruption(True, **fields)
+
+    def _interruption_submit(self, coroutine):
+        loop = getattr(self.system, "_loop", None)
+        if loop is None or not loop.is_running():
+            coroutine.close()
+            if self._interruption_enabled:
+                self._interruption_log(phase="submit",
+                                       result="loop-missing" if loop is None else "loop-not-running")
+            return None
+        return asyncio.run_coroutine_threadsafe(coroutine, loop)
+
+    def set_playback_interruption_enabled(self, enabled):
+        """Opt-in only: OFF allocates no observer and makes no native reads."""
+        if not isinstance(enabled, bool):
+            return False
+        enabled = enabled and not owned_playback_only()
+        if enabled == self._interruption_enabled:
+            return True
+        if not enabled:
+            # One transition line, then every later call is a no-op.
+            from api.capture.interruption import log_interruption
+            log_interruption(True, phase="disable")
+        self._interruption_generation += 1
+        generation = self._interruption_generation
+        self._interruption_intent += 1
+        self._interruption_enabled = enabled
+        self.system._interruption_controller_enabled = enabled
+        self._interruption_suspended = False
+        self._interruption_candidate = None
+        self._interruption_last_edge = None
+        self._interruption_intent_at = time.monotonic()
+        self._interruption_result = "baseline" if enabled else "off"
+        self.owned.set_interruption_tracking_enabled(enabled)
+        if enabled:
+            self._interruption_owned_playing = self.owned.interruption_playing()
+            self._interruption_owned_at = self._interruption_intent_at
+            self.owned.playbackIntent.connect(self._owned_interruption_intent)
+            self.owned.playbackStarted.connect(self._owned_interruption_started)
+            loop = getattr(self.system, "_loop", None)
+            loop_state = "missing" if loop is None else "running" if loop.is_running() else "not-running"
+            already = bool(self._interruption_owned_playing)
+            self._interruption_log(phase="enable", owned_playing=int(already), loop=loop_state,
+                                   decision="armed",
+                                   reason="owned-already-playing" if already else "waiting-for-start")
+            self._interruption_submit(self._start_interruption(generation))
+        else:
+            self.owned.playbackIntent.disconnect(self._owned_interruption_intent)
+            self.owned.playbackStarted.disconnect(self._owned_interruption_started)
+            self._set_interruption_route(None)
+            self._interruption_capture_data = None
+            self._interruption_submit(self._close_interruption(generation))
+        return True
+
+    def playback_source_changed(self):
+        if not self._interruption_enabled:
+            return
+        # A manual source selection revokes old edges and pending handoffs.
+        self._interruption_intent += 1
+        self._interruption_intent_at = time.monotonic()
+        self._interruption_suspended = True
+        self._interruption_candidate = None
+        self._set_interruption_route(None)
+
+    def _interruption_valid(self, generation, intent):
+        return (self._interruption_enabled and generation == self._interruption_generation
+                and intent == self._interruption_intent and not self._interruption_suspended)
+
+    def _interruption_manager_current(self, observer):
+        return observer is not None and observer is self._interruption_observer and observer.manager is self.system._manager
+
+    def _interruption_task(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self._interruption_tasks.add(task)
+        def finished(done):
+            self._interruption_tasks.discard(done)
+            if not done.cancelled():
+                try:
+                    done.result()
+                except Exception:
+                    self._interruption_result = "unavailable"
+        task.add_done_callback(finished)
+        return task
+
+    async def _interruption_run_action(self, coroutine):
+        await self._interruption_task(coroutine)
+
+    async def _start_interruption(self, generation):
+        if self._interruption_pin is not None:
+            await self._source_dispatch.call(
+                lambda: generation == self._interruption_generation,
+                lambda: self._set_interruption_route(None))
+        await self._close_interruption(generation, starting=True)
+        if not self._interruption_enabled or generation != self._interruption_generation:
+            return
+        self._interruption_cdp_key = None
+        self._interruption_cdp_log = None
+        from api.capture.interruption import SmtcInterruptionObserver
+        manager = getattr(self.system, "_manager", None)
+        if manager is None:
+            if not _ensure_winsdk_loaded():
+                self._interruption_result = "unsupported"
+                self._interruption_log(phase="observer", result="unsupported")
+                return
+            try:
+                manager = await asyncio.wait_for(MediaManager.request_async(), .8)
+            except Exception:
+                self._interruption_result = "unavailable"
+                self._interruption_log(phase="observer", result="unavailable")
+                return
+            if not self._interruption_enabled or generation != self._interruption_generation:
+                return
+            self.system._manager = manager
+        async def thumbnail(properties, media_key):
+            return await self.system._read_thumbnail(properties, "interruption:" + media_key)
+        observer = SmtcInterruptionObserver(manager, self._external_interruption_changed,
+            thumbnail_reader=thumbnail, classifier=self._interruption_classifier, diagnostics=True)
+        self._interruption_observer = observer
+        await observer.start()
+        if not self._interruption_enabled or generation != self._interruption_generation:
+            self._interruption_log(phase="observer", result="superseded")
+            if self._interruption_observer is observer:
+                self._interruption_observer = None
+            await observer.close()
+        else:
+            self._interruption_log(phase="observer", result="started")
+            await self._arbitrate_enabled_focus(generation)
+
+    async def _close_interruption(self, generation, *, starting=False):
+        # An old OFF job must never close a newer ON generation.
+        if generation != self._interruption_generation:
+            return
+        observer, self._interruption_observer = self._interruption_observer, None
+        for task in tuple(self._interruption_tasks):
+            task.cancel()
+        if self._interruption_tasks:
+            await asyncio.gather(*tuple(self._interruption_tasks), return_exceptions=True)
+        self._interruption_yield_task = None
+        if observer is not None:
+            await observer.close()
+        if generation != self._interruption_generation:
+            return
+        cdp = getattr(self.system, "_netease_cdp_session", None)
+        if cdp is not None and getattr(cdp, "ready", False):
+            observe = getattr(cdp, "set_pause_observation_enabled", None)
+            if callable(observe):
+                for _ in range(2):
+                    if generation != self._interruption_generation:
+                        break
+                    try:
+                        await observe(False, guard=lambda: generation == self._interruption_generation)
+                        break
+                    except Exception:
+                        continue  # Bounded retry of idempotent observer removal only.
+
+    def _owned_interruption_intent(self, event):
+        if not self._interruption_enabled:
+            return
+        self._interruption_intent += 1
+        self._interruption_intent_at = event["at"]
+        self._interruption_candidate = None
+        self._interruption_last_edge = None
+        if event["will_play"]:
+            self._interruption_suspended = False
+            pin = self.__dict__.get("_interruption_pin")
+            if pin is not None:
+                # This play resumes the library. Do not pause the session the
+                # island is currently capturing, and do not let that session's
+                # own SMTC identity count as an earlier external start.
+                self._interruption_preserved_session = getattr(pin, "session", None)
+
+    def _owned_interruption_started(self, event):
+        if not self._interruption_enabled or event["serial"] != self.owned._interruption_serial:
+            return
+        self._interruption_owned_playing = True
+        self._interruption_owned_at = event["at"]
+        from api.capture.interruption import is_self_app, same_session
+        preserved = getattr(self, "_interruption_preserved_session", None)
+        if preserved is not None:
+            # The pause of other players, and a 300 ms CDP supplement, must not
+            # be read as a new external start that pauses the library again.
+            self._interruption_cooldown_until = max(
+                float(self._interruption_cooldown_until or 0.0), time.monotonic() + 1.0)
+        else:
+            self._interruption_cooldown_until = 0.0  # A later external start can still yield.
+        observer = self._interruption_observer
+        snapshots = () if observer is None else observer.snapshots()
+        targets = tuple(
+            item for item in snapshots
+            if item.playing and item.observed_at <= event["at"]
+            and self._interruption_policy.allows(item.kind)
+            and not is_self_app(getattr(item, "app_id", ""))
+            and not (preserved is not None and (
+                item.session is preserved or same_session(item.session, preserved)))
+        )
+        self._interruption_preserved_session = None
+        if observer is None:
+            self._interruption_log(phase="owned-start", decision="skip", reason="observer-missing",
+                                   targets=0, observer="missing")
+        else:
+            chosen = {id(item) for item in targets}
+            for item in snapshots:
+                if id(item) in chosen:
+                    continue
+                if not item.playing:
+                    skip = "not-playing"
+                elif not item.observed_at <= event["at"]:
+                    skip = "observed-after-start"
+                else:
+                    skip = "kind-blocked"
+                self._interruption_log(phase="owned-start", decision="skip", reason=skip,
+                                       app_id=item.app_id, kind=item.kind.value,
+                                       playing=1 if item.playing is True else 0 if item.playing is False else "unknown",
+                                       targets=len(targets), observer="present")
+            self._interruption_log(phase="owned-start",
+                                   decision="pause" if targets else "skip",
+                                   reason="eligible" if targets else "no-eligible-target",
+                                   targets=len(targets), observer="present")
+        self._set_interruption_route(None)
+        self._interruption_submit(self._interruption_run_action(self._pause_external_music(
+            self._interruption_generation, self._interruption_intent, event, targets, self._interruption_edge)))
+
+    def _set_interruption_route(self, observation):
+        if self._interruption_pin is observation:
+            return True
+        if observation is None and self._interruption_pin is not None:
+            # Retain evidence only; the native/runtime identity is rechecked
+            # before it can authorize a CDP fallback after returning to owned.
+            self._interruption_capture_data = getattr(self.system, "_last_data", None)
+        self._interruption_pin = observation
+        self.system._set_interruption_session(None if observation is None else observation.session)
+        self._owned_state_changed()
+        self.sourceChanged.emit()
+        return True
+
+    def _external_interruption_changed(self, observation, edge):
+        if not self._interruption_enabled:
+            return
+        observer = self._interruption_observer
+        if not self._interruption_manager_current(observer):
+            if not getattr(self, "_interruption_manager_logged", False):
+                self._interruption_manager_logged = True
+                self._interruption_log(phase="observer", result="manager-replaced")
+            restart = getattr(self, "_interruption_restart", None)
+            if restart is None or restart.done():
+                self._interruption_restart = asyncio.create_task(self._start_interruption(self._interruption_generation))
+            return
+        self._interruption_manager_logged = False
+        pin = self._interruption_pin
+        if pin is not None and observer is not None and observer.get_session(pin.binding_id) is not pin.session:
+            generation, intent = self._interruption_generation, self._interruption_intent
+            self._interruption_task(self._source_dispatch.call(
+                lambda: self._interruption_valid(generation, intent), lambda: self._set_interruption_route(None)))
+        # Prepare an existing ready CDP channel only; never ensure/start it.
+        # A failed arm must not stick for the rest of this connection: the
+        # next observation retries until observePause actually succeeds.
+        cdp = getattr(self.system, "_netease_cdp_session", None)
+        if cdp is not None and getattr(cdp, "ready", False):
+            key = (id(cdp), getattr(cdp, "generation", None), self._interruption_generation)
+            if key != getattr(self, "_interruption_cdp_key", None):
+                self._interruption_cdp_key = key
+                self._interruption_task(self._observe_cdp_pause(cdp, self._interruption_generation, key))
+        if observation is None or not edge or not self._interruption_owned_playing or self._interruption_suspended:
+            if edge and observation is not None:
+                skip = "suspended" if self._interruption_suspended else "owned-not-playing"
+                self._interruption_log(phase="external-edge", decision="skip", reason=skip,
+                                       app_id=observation.app_id, kind=observation.kind.value,
+                                       playing=1 if observation.playing is True else 0 if observation.playing is False else "unknown")
+            return
+        boundary = max(self._interruption_owned_at, self._interruption_intent_at)
+        if not self._interruption_policy.allows(observation.kind):
+            edge_reason = "kind-blocked"
+        elif observation.started_at is None:
+            edge_reason = "missing-start"
+        elif observation.started_at <= boundary:
+            edge_reason = "not-after-boundary"
+        elif observation.nonplaying_at is None:
+            edge_reason = "missing-nonplaying"
+        elif observation.nonplaying_at < boundary:
+            edge_reason = "nonplaying-before-boundary"
+        else:
+            edge_reason = ""
+        if edge_reason:
+            self._interruption_log(phase="external-edge", decision="skip", reason=edge_reason,
+                                   app_id=observation.app_id, kind=observation.kind.value, playing=1)
+            return
+        self._interruption_edge += 1
+        previous = self._interruption_last_edge
+        self._interruption_last_edge = observation
+        if (previous is not None and previous.binding_id != observation.binding_id
+                and observation.nonplaying_at <= previous.started_at
+                and previous.nonplaying_at <= observation.started_at):
+            self._interruption_candidate = None
+            self._interruption_log(phase="external-edge", decision="skip", reason="overlap",
+                                   app_id=observation.app_id, kind=observation.kind.value, playing=1)
+            return  # Overlapping observation intervals have no proven winner.
+        self._interruption_candidate = observation
+        self._interruption_log(phase="external-edge", decision="yield", app_id=observation.app_id,
+                               kind=observation.kind.value, playing=1)
+        if self._interruption_yield_task is None or self._interruption_yield_task.done():
+            self._interruption_yield_task = self._interruption_task(self._yield_to_external())
+
+    async def _observe_cdp_pause(self, cdp, generation, key):
+        armed = False
+        reason = "absent"
+        try:
+            if not (self._interruption_enabled and generation == self._interruption_generation):
+                reason = "guard-rejected"
+                return
+            observe = getattr(cdp, "set_pause_observation_enabled", None)
+            if not callable(observe):
+                return
+            try:
+                armed = (await observe(
+                    True, guard=lambda: self._interruption_enabled and generation == self._interruption_generation,
+                )) is True
+            except Exception:
+                reason = "error"
+                return
+            reported = getattr(cdp, "pause_diagnostic", "")
+            reason = reported if isinstance(reported, str) and reported else ("armed" if armed else "rejected")
+        finally:
+            if (not armed and getattr(self, "_interruption_cdp_key", None) == key
+                    and self._interruption_enabled and generation == self._interruption_generation):
+                self._interruption_cdp_key = None
+            port = getattr(cdp, "port", None)
+            signature = (armed, reason, port if isinstance(port, int) else None)
+            if signature != getattr(self, "_interruption_cdp_log", None):
+                self._interruption_cdp_log = signature
+                fields = dict(phase="cdp-observe", result="armed" if armed else "failed", reason=reason)
+                if isinstance(port, int):
+                    fields["port"] = port
+                self._interruption_log(**fields)
+
+    async def _yield_to_external(self):
+        while self._interruption_candidate is not None:
+            observation = self._interruption_candidate
+            generation, intent = self._interruption_generation, self._interruption_intent
+            serial = self.owned._interruption_serial
+            edge = self._interruption_edge
+            delay = self._interruption_cooldown_until - time.monotonic()
+            if delay > 0:
+                if not getattr(self, "_interruption_cooldown_logged", False):
+                    self._interruption_cooldown_logged = True
+                    self._interruption_log(phase="yield", decision="wait", reason="cooldown")
+                await asyncio.sleep(delay)
+                continue  # Keep a genuine resume; revalidate after cooldown.
+            self._interruption_cooldown_logged = False
+            self._interruption_candidate = None
+            observer = self._interruption_observer
+            def guard():
+                return (self._interruption_valid(generation, intent) and serial == self.owned._interruption_serial
+                        and self._interruption_manager_current(observer) and edge == self._interruption_edge
+                        and observer.is_current(observation))
+            current = await observer.revalidate(observation) if observer is not None else None
+            allowed = guard()
+            if not allowed or current is None or not current.playing or not self._interruption_policy.allows(current.kind):
+                if not allowed:
+                    yield_reason = "guard-revoked"
+                elif current is None:
+                    yield_reason = "revalidate-stale"
+                elif not current.playing:
+                    yield_reason = "not-playing"
+                else:
+                    yield_reason = "kind-blocked"
+                self._interruption_log(phase="yield", decision="skip", reason=yield_reason,
+                                       app_id=observation.app_id, kind=observation.kind.value)
+                continue
+            paused = await self._source_dispatch.call(
+                lambda: guard() and self._interruption_owned_playing,
+                lambda: self.owned.pause_for_interruption(guard))
+            if not paused or not guard():
+                self._interruption_log(phase="yield", decision="skip",
+                                       reason="owned-pause-failed" if not paused else "guard-revoked",
+                                       app_id=observation.app_id, kind=current.kind.value)
+                continue
+            current = await observer.revalidate(observation)
+            if current is None or not current.playing or not self._interruption_policy.allows(current.kind):
+                if current is None:
+                    yield_reason = "revalidate-stale"
+                elif not current.playing:
+                    yield_reason = "not-playing"
+                else:
+                    yield_reason = "kind-blocked"
+                self._interruption_log(phase="yield", decision="skip", reason=yield_reason,
+                                       app_id=observation.app_id)
+                continue
+            committed = await self._source_dispatch.call(guard, lambda: self._set_interruption_route(current))
+            if committed:
+                self._interruption_result = "owned-paused"
+                self._interruption_cooldown_until = time.monotonic() + 1.0
+                self._interruption_log(phase="yield", decision="owned-paused", app_id=current.app_id,
+                                       kind=current.kind.value, playing=1)
+
+    def _netease_match(self, app_id):
+        from api.capture.interruption import netease_match
+        return netease_match(app_id)
+
+    async def _arbitrate_enabled_focus(self, generation):
+        """When the switch turns on and both sides are playing, keep the later one."""
+        from api.capture.interruption import focus_decision
+        if not self._interruption_enabled or generation != self._interruption_generation:
+            return
+        if not self._interruption_owned_playing:
+            return
+        observer = self._interruption_observer
+        if not self._interruption_manager_current(observer):
+            return
+        music = tuple(item for item in observer.snapshots()
+                      if item.playing and self._interruption_policy.allows(item.kind))
+        if not music:
+            return
+        action, key, reason = focus_decision(
+            self.owned.playback_running_since(),
+            tuple((item.binding_id, item.started_at) for item in music))
+        self._interruption_log(phase="focus", decision=action, reason=reason, targets=len(music))
+        event = {"serial": self.owned._interruption_serial, "at": time.monotonic()}
+        if action == "pause-library":
+            keeper = next(item for item in music if item.binding_id == key)
+            others = tuple(item for item in music if item.binding_id != key)
+            self._interruption_cooldown_until = 0.0
+            self._interruption_candidate = keeper
+            await self._yield_to_external()
+            if others and self._interruption_enabled and generation == self._interruption_generation:
+                await self._pause_external_music(
+                    generation, self._interruption_intent, event, others, self._interruption_edge)
+            return
+        await self._pause_external_music(
+            generation, self._interruption_intent, event, music, self._interruption_edge)
+
+    async def _send_netease_cdp_pause(self, observation, generation, intent, guard, observer, match, *, supplement=False):
+        if intent != self._interruption_intent or generation != self._interruption_generation:
+            self._interruption_log(phase="cdp-fallback", decision="skip", reason="guard-revoked",
+                                   app_id=observation.app_id, match=match)
+            return False
+        once = (generation, intent, observation.binding_id, observation.interval, supplement)
+        if once in self._interruption_cdp_once:
+            self._interruption_log(phase="cdp-fallback", decision="skip", reason="already-sent",
+                                   app_id=observation.app_id, match=match)
+            return False
+        self._interruption_cdp_once.add(once)
+        cdp = getattr(self.system, "_netease_cdp_session", None)
+        native_id = self._netease_pause_binding(observation, cdp)
+        if native_id is None:
+            self._interruption_log(phase="cdp-fallback", decision="skip",
+                                   reason=self._netease_pause_block_reason(observation, cdp) or "cdp-missing",
+                                   app_id=observation.app_id, match=match)
+            return False
+        try:
+            paused = await cdp.pause(
+                native_id, f"gluspot-pause-{generation}-{intent}-{observation.binding_id}-{int(supplement)}",
+                expected_generation=cdp.generation,
+                guard=lambda: guard() and observer.is_current(observation)
+                    and self._netease_pause_binding(observation, cdp) == native_id)
+            self._interruption_result = "cdp-paused" if paused else "cdp-unverified"
+            reported = getattr(cdp, "pause_diagnostic", "")
+            fields = dict(phase="cdp-pause", result="cdp-paused" if paused else "cdp-unverified",
+                          reason=reported if isinstance(reported, str) and reported else (
+                              "paused" if paused else "rejected"),
+                          app_id=observation.app_id, match=match)
+            port = getattr(cdp, "port", None)
+            if isinstance(port, int):
+                fields["port"] = port
+            self._interruption_log(**fields)
+            return paused is True
+        except Exception:
+            self._interruption_result = "uncertain"
+            self._interruption_log(phase="cdp-pause", result="error", reason="error",
+                                   app_id=observation.app_id, match=match)
+            return False
+
+    async def _pause_external_music(self, generation, intent, event, targets, edge):
+        from api.capture.interruption import PauseResult
+        observer = self._interruption_observer
+        def guard():
+            return (self._interruption_valid(generation, intent) and event["serial"] == self.owned._interruption_serial
+                    and self._interruption_manager_current(observer) and self._interruption_edge == edge)
+        for observation in targets:
+            if not guard():
+                self._interruption_log(phase="pause-external", decision="skip", reason="guard-revoked",
+                                       app_id=observation.app_id, kind=observation.kind.value)
+                return
+            current = await observer.revalidate(observation)
+            allowed = guard()
+            if (not allowed or current is None or not current.playing
+                    or not self._interruption_policy.allows(current.kind)):
+                if not allowed:
+                    skip = "guard-revoked"
+                elif current is None:
+                    skip = "revalidate-stale"
+                elif not current.playing:
+                    skip = "not-playing"
+                else:
+                    skip = "kind-blocked"
+                self._interruption_log(phase="pause-external", decision="skip", reason=skip,
+                                       app_id=observation.app_id, kind=observation.kind.value)
+                continue
+            result = await observer.pause(observation, current=guard, request_id=f"{generation}-{intent}")
+            self._interruption_result = result.value
+            self._interruption_log(phase="pause-external", app_id=observation.app_id,
+                                   kind=observation.kind.value, result=result.value)
+            match = self._netease_match(observation.app_id)
+            if result == PauseResult.REJECTED and guard() and match:
+                current = await observer.revalidate(observation)
+                if current is None or not guard():
+                    self._interruption_log(phase="cdp-fallback", decision="skip",
+                                           reason="revalidate-stale" if current is None else "guard-revoked",
+                                           app_id=observation.app_id, match=match)
+                    continue
+                await self._send_netease_cdp_pause(observation, generation, intent, guard, observer, match)
+            elif result == PauseResult.UNCERTAIN and guard() and match:
+                # One CDP Pause if NetEase is still playing after a short readback.
+                # The cooldown blocks that pause from being treated as a new start.
+                self._interruption_cooldown_until = max(
+                    self._interruption_cooldown_until, time.monotonic() + 1.0)
+                self._interruption_log(phase="cdp-fallback", decision="wait", reason="uncertain-wait",
+                                       app_id=observation.app_id, match=match)
+                await asyncio.sleep(self._NETEASE_SUPPLEMENT_DELAY)
+                current = await observer.revalidate(observation) if guard() else None
+                if (not guard() or current is None or not current.playing
+                        or not self._interruption_policy.allows(current.kind)):
+                    self._interruption_log(phase="cdp-fallback", decision="skip", reason="settled",
+                                           app_id=observation.app_id, match=match)
+                    continue
+                await self._send_netease_cdp_pause(
+                    observation, generation, intent, guard, observer, match, supplement=True)
+            elif result == PauseResult.REJECTED:
+                self._interruption_log(phase="cdp-fallback", decision="skip", reason="app-id-mismatch",
+                                       app_id=observation.app_id)
+            elif result != PauseResult.PAUSED:
+                self._interruption_log(phase="cdp-fallback", decision="skip", reason="not-explicit-reject",
+                                       result=result.value, app_id=observation.app_id)
+        if guard() and targets:
+            self._interruption_cooldown_until = time.monotonic() + 1.0
+
+    def _netease_pause_block_reason(self, observation, cdp):
+        """Why an already-ready CDP Pause cannot be bound. Empty means it can.
+
+        Titles are compared and never returned. This does not open a channel.
+        """
+        from api.capture.interruption import same_session
+        runtime = getattr(self.system, "_capture_runtime", None)
+        source = getattr(runtime, "source", None)
+        cef = getattr(runtime, "_cef_source", None)
+        latest = getattr(cdp, "latest", None)
+        data = getattr(self.system, "_last_data", None) or self._interruption_capture_data
+        if cdp is None or cdp is not getattr(self.system, "_netease_cdp_session", None):
+            return "cdp-missing"
+        if not getattr(cdp, "ready", False):
+            return "cdp-not-ready"
+        if not isinstance(latest, dict):
+            return "no-sample"
+        if not same_session(getattr(source, "session", None), observation.session):
+            return "session-unbound"
+        if getattr(cef, "session", None) is not cdp:
+            return "cef-unbound"
+        if getattr(cef, "native_track_id", None) != latest.get("trackId"):
+            return "native-track-mismatch"
+        if getattr(cef, "generation", None) != cdp.generation:
+            return "generation-mismatch"
+        if not getattr(cef, "fresh", False):
+            return "cef-stale"
+        if data is None:
+            return "no-capture-metadata"
+        if ((data.track.source_app_id, data.track.title, data.track.artist)
+                != (observation.app_id, *observation.media_key[:2])):
+            return "metadata-mismatch"
+        if getattr(runtime, "identity", None) != (observation.app_id, data.track.track_id):
+            return "identity-mismatch"
+        return ""
+
+    def _netease_pause_binding(self, observation, cdp):
+        """Reuse the already-bound capture/native identity; never infer a new one."""
+        if self._netease_pause_block_reason(observation, cdp):
+            return None
+        return cdp.latest.get("trackId")
+
     @property
     def settings_setter(self):
         return getattr(self.system, "settings_setter", None)
@@ -215,11 +866,18 @@ class PlaybackSourceProvider:
     def settings_setter(self, value):
         self.system.settings_setter = value
 
+    def _owned_plays_in_companion(self) -> bool:
+        current = getattr(self.owned, "_apple_companion_current", None)
+        try:
+            return bool(callable(current) and current())
+        except Exception:
+            return False
+
     def _owned_active(self):
-        return bool(self.settings_getter("v2_owned_playback_enabled", True)) and self.owned.track is not None
+        return self.__dict__.get("_interruption_pin") is None and bool(self.settings_getter("v2_owned_playback_enabled", True)) and self.owned.track is not None
 
     def _system_enabled(self):
-        return not owned_playback_only() and bool(self.settings_getter("v2_system_capture_enabled", False))
+        return not owned_playback_only() and (self.__dict__.get("_interruption_pin") is not None or bool(self.settings_getter("v2_system_capture_enabled", False)))
 
     def _owned_output_mode(self):
         return self._owned_active() or (bool(self.settings_getter("v2_owned_playback_enabled", True)) and not self._system_enabled())
@@ -243,14 +901,384 @@ class PlaybackSourceProvider:
             data = self.owned.visual_data()
             return replace(data, messages=(), plugins=())
         if self._system_enabled():
-            return replace(self.system.get_visual_data(), messages=(), plugins=())
+            data = replace(self.system.get_visual_data(), messages=(), plugins=())
+            pin = self.__dict__.get("_interruption_pin")
+            title = str(getattr(getattr(data, "track", None), "title", "") or "")
+            if pin is not None and title in {"", "暂无媒体", "暂无播放", "媒体初始化中"}:
+                key = tuple(getattr(pin, "media_key", ()) or ())
+                external_title = str(key[0]).strip() if key else ""
+                if external_title:
+                    artist = str(key[1]).strip() if len(key) > 1 else ""
+                    data = replace(data, track=replace(
+                        data.track,
+                        title=external_title,
+                        artist=artist or data.track.artist,
+                        is_playing=True,
+                        source_app_id=str(getattr(pin, "app_id", "") or data.track.source_app_id),
+                    ))
+            if pin is not None:
+                data = self._apply_external_playback_clock(data, pin)
+            return self._attach_captured_lyrics(data)
         return empty_visual_data("程序内播放", "登录后选择歌单", "GluSpot")
 
+    @staticmethod
+    def _clock_seconds(value):
+        """Seconds from a SMTC TimeSpan, without turning a missing read into a playhead."""
+        if value is None:
+            return 0.0
+        total = getattr(value, "total_seconds", None)
+        try:
+            if callable(total):
+                number = float(total())
+            else:
+                ticks = getattr(value, "duration", None)
+                if ticks is not None and not callable(ticks):
+                    number = float(ticks) / 10_000_000.0
+                else:
+                    number = float(value)
+                    if type(value) is int:
+                        number /= 10_000_000.0
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(number) or number < 0:
+            return None
+        return number
+
+    @staticmethod
+    def _clock_is_playing(playback):
+        try:
+            status = getattr(playback, "playback_status", None)
+        except Exception:
+            return None
+        value = getattr(status, "value", status)
+        if isinstance(value, bool):
+            return None
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return number == 4
+
+    def _provider_loop_is_caller(self):
+        """WinRT timeline reads belong on the media loop, never the UI thread."""
+        loop = getattr(self.system, "_loop", None)
+        if loop is None or not loop.is_running():
+            return True
+        try:
+            return asyncio.get_running_loop() is loop
+        except RuntimeError:
+            return False
+
+    def _record_clock_read(self, source, elapsed_ms, ok, blocked):
+        entry = (source, round(float(elapsed_ms), 2), int(bool(ok)), int(bool(blocked)), threading.get_ident())
+        timings = self.__dict__.setdefault("_external_clock_timings", [])
+        timings.append(entry)
+        if len(timings) > 32:
+            del timings[:-32]
+        logging.getLogger("GluSpot.capture.clock").info(
+            "source=%s elapsed_ms=%.2f ok=%d blocked=%d",
+            source, float(elapsed_ms), int(bool(ok)), int(bool(blocked)),
+        )
+
+    def _external_track_key(self, pin, track):
+        """Identity of the song whose playhead this clock is allowed to project."""
+        title = str(getattr(track, "title", "") or "").strip() if track is not None else ""
+        artist = str(getattr(track, "artist", "") or "").strip() if track is not None else ""
+        if title in {"", "暂无媒体", "暂无播放", "媒体初始化中", "未在播放"}:
+            key = tuple(getattr(pin, "media_key", ()) or ())
+            if key:
+                title = str(key[0]).strip() or title
+                if len(key) > 1:
+                    artist = str(key[1]).strip() or artist
+        return (title, artist)
+
+    def _retain_clock_anchor(self, marker, track_key, raw, duration, playing, sampled_at, now):
+        """Keep one playhead anchor while the song is only moving with time.
+
+        A new timestamp on every poll made the expanded page treat ordinary
+        progress as a seek, so a manual lyric scroll snapped back. A frozen
+        reader and a reader that advances about one poll interval both stay
+        on the original anchor. A real jump starts a new one.
+        """
+        previous = getattr(self, "_external_clock_cache", None)
+        anchor = float(sampled_at)
+        stored_raw = float(raw)
+        if (
+            previous is not None
+            and previous[0] == marker
+            and previous[1] == track_key
+            and bool(playing)
+            and previous[4] is True
+        ):
+            previous_raw = float(previous[2])
+            previous_anchor = float(previous[5])
+            elapsed = float(now) - previous_anchor
+            if elapsed >= -0.05:
+                follows = abs(float(raw) - (previous_raw + max(0.0, elapsed))) <= 1.25
+                frozen = abs(float(raw) - previous_raw) <= 0.25
+                if follows or frozen:
+                    anchor = previous_anchor
+                    stored_raw = previous_raw
+        self._external_clock_cache = (
+            marker, track_key, stored_raw, float(duration), bool(playing), anchor, float(now),
+        )
+        return anchor, stored_raw
+
+    def _project_clock(self, marker, track_key, raw, duration, playing, sampled_at, now):
+        anchor, stored_raw = self._retain_clock_anchor(
+            marker, track_key, raw, duration, playing, sampled_at, now)
+        age = now - anchor
+        if age < -0.05:
+            anchor = float(sampled_at)
+            age = 0.0
+            stored_raw = float(raw)
+        position = stored_raw + age if playing else stored_raw
+        if duration > 0.0:
+            position = min(float(duration), max(0.0, position))
+        return (position, float(duration), bool(playing), anchor, stored_raw)
+
+    def _cached_smtc_clock(self, session, track_key, now):
+        cached = getattr(self, "_external_clock_cache", None)
+        if cached is None or session is None or cached[0] != id(session) or cached[1] != track_key:
+            return None
+        _marker, _key, raw, duration, playing, anchor, confirmed_at = cached
+        if now - confirmed_at > 2.5 or now - confirmed_at < -0.05:
+            return None
+        age = now - anchor
+        if age < -0.05:
+            return None
+        position = raw + age if playing else raw
+        if duration > 0.0:
+            position = min(duration, max(0.0, position))
+        return (position, duration, playing, anchor, raw)
+
+    def _schedule_smtc_clock_read(self, session, track_key):
+        """One timeline read on the media loop at a time, at most twice a second."""
+        loop = getattr(self.system, "_loop", None)
+        if loop is None or not loop.is_running() or session is None:
+            return
+        now = time.monotonic()
+        cached = getattr(self, "_external_clock_cache", None)
+        if cached is None or cached[0] != id(session) or cached[1] != track_key:
+            self._external_clock_read_at = 0.0
+        task = getattr(self, "_external_clock_task", None)
+        if task is not None and not task.done():
+            return
+        if now - float(getattr(self, "_external_clock_read_at", 0.0) or 0.0) < 0.5:
+            return
+        self._external_clock_read_at = now
+
+        async def job():
+            started = time.perf_counter()
+            sample = self._smtc_playback_clock(session, time.monotonic())
+            self._record_clock_read("smtc", (time.perf_counter() - started) * 1000.0, sample is not None, False)
+            if sample is None:
+                current = getattr(self, "_external_clock_cache", None)
+                if current is not None and current[0] == id(session) and current[1] == track_key:
+                    self._external_clock_cache = None
+                return
+            raw, duration, playing, sampled_at = sample
+            if playing is None:
+                cached = getattr(self, "_external_clock_cache", None)
+                playing = bool(cached[4]) if cached is not None else False
+            self._project_clock(id(session), track_key, raw, duration, playing, sampled_at, time.monotonic())
+
+        try:
+            self._external_clock_task = asyncio.run_coroutine_threadsafe(job(), loop)
+        except Exception:
+            self._external_clock_task = None
+
+    def _smtc_playback_clock(self, session, now):
+        if session is None or not callable(getattr(session, "get_timeline_properties", None)):
+            return None
+        try:
+            timeline = session.get_timeline_properties()
+            playback = session.get_playback_info() if callable(getattr(session, "get_playback_info", None)) else None
+        except Exception:
+            return None
+        position = self._clock_seconds(getattr(timeline, "position", None))
+        start = self._clock_seconds(getattr(timeline, "start_time", None))
+        end = self._clock_seconds(getattr(timeline, "end_time", None))
+        if position is None or start is None or end is None:
+            return None
+        duration = max(0.0, end - start)
+        if duration <= 0.0 and position <= 0.0:
+            return None
+        playing = self._clock_is_playing(playback)
+        if duration > 0.0:
+            position = min(duration, position)
+        return (position, duration, playing, now)
+
+    def _cdp_playback_clock(self, pin, track, now):
+        """Reuse an already-ready NetEase progress sample. Never opens a channel."""
+        from api.capture.interruption import netease_match
+        if netease_match(str(getattr(pin, "app_id", "") or "")) is None:
+            return None
+        cdp = getattr(self.system, "_netease_cdp_session", None)
+        if cdp is None or not getattr(cdp, "ready", False):
+            return None
+        latest = getattr(cdp, "latest", None)
+        if not isinstance(latest, dict):
+            return None
+        try:
+            position = float(latest["position"])
+            duration = float(latest.get("duration") or 0.0)
+            received = float(latest.get("received_at") or 0.0)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if (not math.isfinite(position) or position < 0.0
+                or not math.isfinite(duration) or duration < 0.0
+                or (duration <= 0.0 and position <= 0.0)):
+            return None
+        playing = latest.get("playing")
+        if playing is not True and playing is not False:
+            playing = None
+        if playing is not False and (received <= 0.0 or now - received > 2.5):
+            return None
+        native = str(latest.get("trackId") or "").strip()
+        title, artist = self._external_track_key(pin, track)
+        track_key = (native, title, artist) if native else (title, artist)
+        if playing is None:
+            playing = bool(getattr(track, "is_playing", False))
+        return self._project_clock(
+            ("cdp", id(cdp)), track_key, position, duration, playing,
+            received if received > 0.0 else now, now,
+        )
+
+    def _read_external_playback_clock(self, pin, now, track):
+        """CDP is an in-memory sample. SMTC is read on the media loop, then projected.
+
+        A background snapshot that already has a real timeline is kept. Reading
+        the session again on the UI thread was the visible hitch.
+        """
+        cdp = self._cdp_playback_clock(pin, track, now)
+        if cdp is not None:
+            return cdp
+        if self._visual_progress_usable(track):
+            return "keep"
+        session = getattr(pin, "session", None)
+        track_key = self._external_track_key(pin, track)
+        if self._provider_loop_is_caller():
+            started = time.perf_counter()
+            sample = self._smtc_playback_clock(session, now)
+            self._record_clock_read("smtc", (time.perf_counter() - started) * 1000.0, sample is not None, True)
+            if sample is None:
+                current = getattr(self, "_external_clock_cache", None)
+                if current is not None and current[0] == id(session) and current[1] == track_key:
+                    self._external_clock_cache = None
+                return None
+            raw, duration, playing, sampled_at = sample
+            if playing is None:
+                playing = bool(getattr(track, "is_playing", False))
+            return self._project_clock(id(session), track_key, raw, duration, playing, sampled_at, now)
+        cached = self._cached_smtc_clock(session, track_key, now)
+        self._schedule_smtc_clock_read(session, track_key)
+        return cached
+
+    def _apply_external_playback_clock(self, data, pin):
+        """Follow the captured session clock, or withhold progress when it cannot be read."""
+        now = time.monotonic()
+        clock = self._read_external_playback_clock(pin, now, data.track)
+        if clock == "keep":
+            return data
+        track = data.track
+        if clock is None:
+            if self._visual_progress_usable(track):
+                return data
+            return replace(data, track=replace(
+                track,
+                position_source="external-title-only",
+                position_confidence=0.0,
+                position_seconds=0.0,
+                duration_seconds=0.0,
+                position_sampled_at=0.0,
+                position_observed_seconds=None,
+            ))
+        position, duration, playing, sampled_at, raw = clock
+        if duration <= 0.0:
+            duration = max(0.0, float(getattr(track, "duration_seconds", 0.0) or 0.0))
+        return replace(data, track=replace(
+            track,
+            position_seconds=position,
+            duration_seconds=duration,
+            is_playing=playing,
+            position_source="capture-model",
+            position_confidence=0.95,
+            position_sampled_at=sampled_at,
+            position_observed_seconds=raw,
+        ))
+
+    @staticmethod
+    def _visual_progress_usable(track) -> bool:
+        source = str(getattr(track, "position_source", "") or "")
+        if source in {"", "none", "capture-unavailable", "external-title-only"}:
+            return False
+        try:
+            position = float(track.position_seconds)
+            duration = float(track.duration_seconds)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(position) or not math.isfinite(duration) or position < 0.0 or duration < 0.0:
+            return False
+        return duration > 0.5 or position > 0.05
+
+    def _attach_captured_lyrics(self, data):
+        """Publish a finished lyric lookup without waiting for the next media read.
+
+        System capture can keep showing the loading sentinel while the UIA
+        worker or a session refresh is still busy. The lookup itself only
+        needs the title and artist, and the store is already single-flight.
+        """
+        track = getattr(data, "track", None)
+        ensure = getattr(self.system, "_ensure_lyrics_lookup_started", None)
+        if track is None or getattr(self.system, "lyrics_store", None) is None or not callable(ensure):
+            return data
+        if getattr(track, "timed_lyrics", ()):
+            return data
+        title = str(getattr(track, "title", "") or "").strip()
+        if title in {"", "暂无媒体", "暂无播放", "媒体初始化中", "未在播放", "程序内播放"}:
+            return data
+        lyrics = tuple(getattr(track, "lyrics", ()) or ())
+        loading = not lyrics or lyrics in {("暂无歌词",), ("查找歌词中",), ("寻找歌词中",), ("加载歌词中",)}
+        if not loading and not (len(lyrics) == 1 and str(lyrics[0]).strip() in {"暂无歌词", "查找歌词中", "寻找歌词中", "加载歌词中"}):
+            return data
+        try:
+            match, pending, _started = ensure(
+                title, str(getattr(track, "artist", "") or ""), "",
+                float(getattr(track, "duration_seconds", 0.0) or 0.0),
+            )
+        except Exception:
+            return data
+        timed = tuple(getattr(match, "timed_lyrics", ()) or ())
+        lines = tuple(getattr(match, "lyrics", ()) or ()) or tuple(line.text for line in timed)
+        if timed or (lines and lines not in {("暂无歌词",), ("查找歌词中",)}):
+            return replace(data, track=replace(
+                track, lyrics=lines or ("暂无歌词",), timed_lyrics=timed,
+                lyrics_source=str(getattr(match, "source", "") or getattr(track, "lyrics_source", "") or ""),
+            ))
+        if pending and lyrics != ("查找歌词中",):
+            return replace(data, track=replace(track, lyrics=("查找歌词中",), timed_lyrics=()))
+        return data
+
     def get_audio_frame(self):
-        return self.system.get_audio_frame() if self._system_enabled() and not self._owned_active() else None
+        # Owned music is analyzed from its own decoded PCM, never from external capture.
+        if self._owned_active():
+            frame = self._owned_audio_bridge.get_music_audio_frame()
+            if frame is None and self._owned_plays_in_companion():
+                # Apple Music sounds inside its companion page; there is no
+                # decoded PCM here. The system output meter (no loopback
+                # stream unless live analysis is switched on) drives the waves.
+                try:
+                    return self.system.get_audio_frame()
+                except Exception:
+                    return None
+            return frame
+        return self.system.get_audio_frame() if self._system_enabled() else None
 
     def has_live_audio(self):
-        return self._system_enabled() and not self._owned_active() and self.system.has_live_audio()
+        if self._owned_active():
+            return self._owned_audio_bridge.get_music_audio_frame() is not None
+        return self._system_enabled() and self.system.has_live_audio()
 
     def get_audio_route_snapshot(self):
         if self._owned_output_mode():
@@ -261,6 +1289,23 @@ class PlaybackSourceProvider:
         return self.system.get_audio_route_snapshot()
 
     def send_playback_command(self, command):
+        pin = self.__dict__.get("_interruption_pin")
+        if pin is not None and command == "toggle_play_pause":
+            # The in-app play control must not toggle the session we are
+            # capturing. Toggle on a live player pauses it: the capture locks
+            # itself. A newer intent also drops a 300 ms CDP supplement.
+            now = time.monotonic()
+            self._interruption_intent += 1
+            self._interruption_intent_at = now
+            self._interruption_candidate = None
+            self._interruption_cooldown_until = max(
+                float(self._interruption_cooldown_until or 0.0), now + 1.0)
+            self._interruption_preserved_session = getattr(pin, "session", None)
+            if getattr(pin, "playing", None) is True:
+                self._interruption_log(phase="pause-external", decision="skip", reason="self-capture",
+                                       app_id=str(getattr(pin, "app_id", "") or ""))
+                return True
+            return self.owned.send_playback_command(command)
         if self._owned_active():
             return self.owned.send_playback_command(command)
         return self._system_enabled() and self.system.send_playback_command(command)
@@ -365,8 +1410,13 @@ class PlaybackSourceProvider:
 
     def seek_playback_position(self, position_seconds, expected_track_id=None):
         if self._owned_active():
+            record_seek_decision('source', 'owned-active', target=position_seconds, backend='owned')
             return self.owned.seek_playback_position(position_seconds, expected_track_id)
-        return self._system_enabled() and self.system.seek_playback_position(position_seconds, expected_track_id)
+        if not self._system_enabled():
+            record_seek_decision('source', 'system-disabled', target=position_seconds)
+            return False
+        record_seek_decision('source', 'system-selected', target=position_seconds)
+        return self.system.seek_playback_position(position_seconds, expected_track_id)
 
     def _request_immediate_media_refresh(self):
         if self._owned_active():
@@ -413,6 +1463,7 @@ class PlaybackSourceProvider:
         return data
 
     def close_audio_outputs(self):
+        self.set_playback_interruption_enabled(False)
         if self._owned_outputs is not None:
             self._owned_outputs.close()
         self._owned_audio_bridge.close()
@@ -457,8 +1508,10 @@ class WindowsMediaProvider:
     CURRENT_ART_LOOKUP_SIDE = 1200
     CURRENT_ART_PREVIEW_SIDE = 320
     QUEUE_ART_MAX_BYTES = 8 * 1024 * 1024
+    ARTWORK_RETRY_DELAYS = (0.75, 1.5, 5.0)
 
-    def __init__(self, fallback=None, settings_getter=None):
+    def __init__(self, fallback=None, settings_getter=None, *, attach_only=False):
+        self.attach_only = bool(attach_only)
         if fallback is None:
             fallback = EmptyIslandDataProvider()
         self.fallback = fallback
@@ -467,6 +1520,14 @@ class WindowsMediaProvider:
         except OSError:
             self.lyrics_store = LocalLyricsStore(root=Path(__file__).resolve().parents[1] / "lyrics", settings_getter=settings_getter)
         self._loop = None
+        self._capture_runtime = None
+        # NetEase transport-A session is owned by the provider loop.  It is
+        # deliberately separate from CaptureRuntime so a track rebind does
+        # not tear down the CDP connection and so a disabled flag can close it
+        # without touching the SMTC route.
+        self._netease_cdp_session = None
+        self._netease_locator = None
+        self._netease_launch = None
         self._thread = None
         self._manager = None
         self._last_data: IslandVisualData | None = None
@@ -483,17 +1544,24 @@ class WindowsMediaProvider:
         self._queue_art_cache: dict[str, bytes] = {}
         self._queue_art_inflight: set[str] = set()
         self._queue_art_failed_until: dict[str, float] = {}
+        self._queue_art_attempts: dict[str, int] = {}
         self._queue_art_lock = threading.Lock()
         self._queue_art_slots = threading.BoundedSemaphore(3)
+        self._queue_art_worker_slots = threading.BoundedSemaphore(6)
+        self._queue_art_generations = {}
         self._artwork_cache_root = self._queue_art_disk_path("")
         if self._artwork_cache_root is not None:
             self._artwork_cache_root = self._artwork_cache_root.parent.absolute()
         self._current_art_url_by_track_id: dict[str, str] = {}
         self._current_art_lookup_inflight: set[str] = set()
         self._current_art_lookup_failed_until: dict[str, float] = {}
+        self._current_art_lookup_attempts: dict[str, int] = {}
+        self._current_art_first_seen: dict[str, float] = {}
+        self._current_art_queue_urls: dict[str, str] = {}
         self._current_art_lookup_lock = threading.Lock()
         self._current_art_lookup_generations: dict[str, tuple[object, float]] = {}
         self._current_art_lookup_slots = threading.BoundedSemaphore(2)
+        self._current_art_worker_slots = threading.BoundedSemaphore(4)
         self._current_art_lookup_sources: dict[str, str] = {}
         self._current_art_rejected_urls: dict[str, tuple[float, str]] = {}
         self._musicbrainz_artwork_resolver = MusicBrainzArtworkResolver()
@@ -543,11 +1611,6 @@ class WindowsMediaProvider:
         self._audio_analyzer_last_error = ""
         self.netease_position: NeteasePositionReader | None = None
         self.qq_position: QQPositionReader | None = None
-        # Preserve the old accessors for diagnostics/callers without creating
-        # collectors. Retired settings cannot start UIA/notification polling,
-        # weather HTTP threads, timers or agenda-file work.
-        self.plugin_provider = EmptyIslandDataProvider()
-        self.message_detector = self.plugin_provider
         self._audio_route_controller = None
         self._audio_route_init_lock = threading.Lock()
         self._audio_route_closed = False
@@ -618,6 +1681,18 @@ class WindowsMediaProvider:
         return enabled is True and self.start_audio_outputs().set_auto_latency(True)
 
     def close_audio_outputs(self):
+        runtime = getattr(self, "_capture_runtime", None)
+        loop = getattr(self, "_loop", None)
+        self._capture_closed = True
+        self.suspend_live_audio()
+        worker = getattr(self, "_capture_uia_worker", None)
+        if worker is not None:
+            worker.close()
+        if runtime is not None and loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(runtime.close(), loop)
+            self._capture_runtime = None
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._close_netease_cdp(), loop)
         lock = getattr(self, "_audio_route_init_lock", None)
         if lock is None:
             lock = self._audio_route_init_lock = threading.Lock()
@@ -626,6 +1701,330 @@ class WindowsMediaProvider:
             controller = getattr(self, "_audio_route_controller", None)
             if controller is not None:
                 controller.close()
+
+    def _capture_is_enabled(self) -> bool:
+        return capture_enabled(getattr(self, "settings_getter", None))
+
+    def _netease_cef_enabled(self) -> bool:
+        """Read-only discovery stays on; a saved relaunch flag does not start the player."""
+        getter = getattr(self, "settings_getter", None)
+        if not callable(getter) or not self._capture_is_enabled():
+            return False
+        transport = str(getter("netease.transport", "off") or "off").strip().casefold()
+        if getter("netease.cef.enabled", False) is not True or (not getattr(self, "attach_only", False) and transport not in {"attach", "relaunch"}):
+            return False
+        from api.capture.capabilities import capability_for, capture_profile
+        return capture_profile(getter, capability_for("cloudmusic.exe")) != "off"
+
+    async def _close_netease_cdp(self):
+        start_lock = getattr(self, "_netease_start_lock", None)
+        if (getattr(self, "_netease_cdp_session", None) is None
+                and getattr(self, "_netease_restore_task", None) is None
+                and (start_lock is None or not start_lock.locked())):
+            return
+        async with self._netease_lifecycle_lock():
+            await self._close_netease_cdp_locked()
+
+    def _netease_lifecycle_lock(self):
+        lock = getattr(self, "_netease_start_lock", None)
+        if lock is None:
+            lock = self._netease_start_lock = asyncio.Lock()
+        return lock
+
+    async def _close_netease_cdp_locked(self):
+        watch = getattr(self, "_netease_watch_task", None)
+        self._netease_watch_task = None
+        if watch is not None and watch is not asyncio.current_task():
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
+        restore = getattr(self, "_netease_restore_task", None)
+        self._netease_restore_task = None
+        if restore is not None and restore is not asyncio.current_task():
+            restore.cancel()
+            await asyncio.gather(restore, return_exceptions=True)
+        cdp = getattr(self, "_netease_cdp_session", None)
+        self._netease_cdp_session = None
+        if cdp is not None:
+            latest = cdp.latest
+            self._netease_expected_native = latest.get('trackId') if isinstance(latest, dict) else None
+            await cdp.close()
+
+    def netease_capture_health(self):
+        """Immutable status for the settings surface; no native I/O."""
+        cdp = getattr(self, "_netease_cdp_session", None)
+        state = "off"
+        message = "精确进度未启用"
+        ready = cdp is not None and cdp.ready
+        reason = ((getattr(cdp, 'probe', {}).get('reason', '') if cdp is not None else '')
+                  or getattr(self, '_netease_launch_error', ''))
+        if self._netease_cef_enabled():
+            if ready:
+                state, message = "ready", "精确进度已连接"
+                runtime = getattr(self, "_capture_runtime", None)
+                if runtime is not None and not getattr(runtime, "_cef_seek_enabled", True):
+                    state, message = "degraded", "精确进度已连接；精确跳转不可用，暂用系统跳转"
+            elif cdp is not None:
+                state, message = "connecting", "正在连接；暂用系统进度"
+                if reason:
+                    state, message = "degraded", "无法安全监听网易云进度；暂用系统进度"
+            else:
+                if getattr(self, "attach_only", False) or str(self.settings_getter("netease.transport", "off")).strip().casefold() == "attach":
+                    state, message = "degraded", "未发现可连接的网易云进度；播放器保持运行"
+                else:
+                    state, message = "repair", "未连接；可修复并重启网易云"
+        return dict(state=state, message=message, ready=bool(ready),
+                    reason=reason,
+                    restore=getattr(self, "_netease_restore_status", ""))
+
+    def repair_netease_capture(self):
+        """Queue the explicitly requested restart; never block the Qt thread."""
+        loop = getattr(self, "_loop", None)
+        if loop is None or not loop.is_running() or not self._netease_cef_enabled():
+            return False
+        return asyncio.run_coroutine_threadsafe(self._repair_netease_capture(), loop)
+
+    async def _repair_netease_capture(self):
+        runtime = getattr(self, "_capture_runtime", None)
+        executor = getattr(self, "_capture_executor", None) or getattr(runtime, "executor", None)
+        if executor is not None and (executor.busy or executor.uncertain):
+            record_seek_decision('transport', 'previous-request-uncertain' if executor.uncertain else 'busy')
+            return False
+        async with self._netease_lifecycle_lock():
+            cdp = getattr(self, "_netease_cdp_session", None)
+            # A repair trigger joins an existing connection at any age. Native
+            # reconnect belongs to CdpSession and never authorizes another kill.
+            if cdp is None or getattr(cdp, "_closed", False):
+                await self._close_netease_cdp_locked()
+                self._netease_retry_at = 0.0
+                cdp = await self._ensure_netease_cdp_locked(explicit_relaunch=True)
+        self._request_immediate_media_refresh()
+        return cdp is not None
+
+    def disable_netease_capture(self):
+        loop = getattr(self, "_loop", None)
+        if loop is None or not loop.is_running():
+            return False
+        return asyncio.run_coroutine_threadsafe(self._close_netease_cdp(), loop)
+
+    def _netease_explicit_relaunch_allowed(self) -> bool:
+        """Only a confirmed settings repair may restart a player that is already open."""
+        if getattr(self, "attach_only", False):
+            return False
+        getter = getattr(self, "settings_getter", None)
+        transport = str(getter("netease.transport", "off") or "off").strip().casefold() if callable(getter) else "off"
+        return transport == "relaunch"
+
+    async def _ensure_netease_cdp(self):
+        async with self._netease_lifecycle_lock():
+            return await self._ensure_netease_cdp_locked()
+
+    async def _ensure_netease_cdp_locked(self, *, explicit_relaunch=False):
+        if not self._netease_cef_enabled():
+            await self._close_netease_cdp_locked()
+            return None
+        existing = getattr(self, "_netease_cdp_session", None)
+        if existing is not None and not getattr(existing, "_closed", False):
+            return existing
+        if time.monotonic() < getattr(self, "_netease_retry_at", 0.0):
+            return None
+        # Reserve the retry window before any await: a simultaneous settings
+        # repair and media refresh cannot open two sessions. Reconnect itself
+        # belongs to CdpSession and never restarts the player.
+        self._netease_retry_at = time.monotonic() + 10.0
+        from api.capture.cdp import CdpSession
+        from api.capture.netease import NetEaseLocator
+        from api.capture.netease_js import JsAdapterRegistry
+        locator = getattr(self, "_netease_locator", None) or NetEaseLocator()
+        self._netease_locator = locator
+        launch = cdp = None
+        try:
+            adapter = str(self.settings_getter("netease.adapter", "auto") or "auto")
+            JsAdapterRegistry.select(requested=adapter)  # Validate before any player work.
+            installation = await asyncio.to_thread(locator.locate)
+            if installation is None:
+                return None
+            if not self._netease_cef_enabled():
+                return None
+            track = getattr(getattr(self, "_last_data", None), "track", None)
+            # Startup and background refresh only attach, including a saved
+            # relaunch setting. Restart belongs to the confirmed repair call.
+            if explicit_relaunch and self._netease_explicit_relaunch_allowed():
+                launch = await locator.launch(installation, relaunch=True)
+            else:
+                launch = await locator.attach(installation)
+                if launch is None:
+                    self._netease_launch_error = "No existing NetEase debug endpoint; player left running"
+                    logger.info(self._netease_launch_error)
+                    return None
+            self._netease_launch = launch
+            if not self._netease_cef_enabled():
+                await self._recover_netease_player(locator, launch)
+                return None
+            cdp = CdpSession(launch.port, adapter=adapter, version=installation.version)
+            record_seek_decision('transport', 'existing-port-bound' if launch.reused else 'relaunch-port-bound',
+                                 port=launch.port, backend='cef')
+            await cdp.start()
+            self._netease_cdp_session = cdp
+            self._netease_launch_error = ""
+            self._netease_started_at = time.monotonic()
+            self._netease_watch_task = asyncio.create_task(self._watch_netease_startup(cdp, locator, launch))
+            if (not launch.reused and track is not None
+                    and track.source_app_id and track.duration_seconds > 0):
+                self._netease_restore_task = asyncio.create_task(self._restore_netease_position(cdp, track))
+            return cdp
+        except asyncio.CancelledError:
+            if cdp is not None:
+                await cdp.close()
+            if launch is not None:
+                await self._recover_netease_player(locator, launch)
+            raise
+        except Exception as error:
+            self._netease_launch_error = str(error)
+            if "not running" in str(error).casefold():
+                logger.info("NetEase is not running; player left closed")
+            else:
+                logger.warning("NetEase capture startup failed: %s", error)
+            if cdp is not None:
+                await cdp.close()
+            if launch is not None:
+                await self._recover_netease_player(locator, launch)
+            return None
+
+    async def _recover_netease_player(self, locator, launch):
+        if launch.reused:
+            return
+        try:
+            await locator.restore(launch)
+        except Exception as error:
+            self._netease_launch_error = f"Normal NetEase recovery failed: {error}"
+            logger.error(self._netease_launch_error)
+
+    async def _watch_netease_startup(self, cdp, locator, launch):
+        """CDP start only schedules work; its later failure must recover too."""
+        try:
+            if not await cdp.wait_ready(timeout=15.0):
+                self._netease_launch_error = "NetEase capture connection failed; normal playback preserved"
+                logger.warning(self._netease_launch_error)
+                if getattr(self, '_netease_cdp_session', None) is cdp:
+                    self._netease_cdp_session = None
+                await cdp.close()
+                await self._recover_netease_player(locator, launch)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._netease_launch_error = str(error)
+            logger.warning("NetEase capture recovery failed: %s", error)
+
+    async def _restore_netease_position(self, cdp, track):
+        """Best effort only after independent post-restart metadata evidence."""
+        from api.capture.capabilities import capability_for
+        from api.capture.cef import CEF_SEEK_POLICY, CefPositionSource, CefSeekBackend
+        if capability_for(track.source_app_id).service != "netease":
+            return
+        self._netease_restore_status = "pending"
+        source = CefPositionSource(cdp)
+        error_seconds = None
+        try:
+            if not await cdp.wait_ready(timeout=10.0):
+                self._netease_restore_status = "no-connection"
+                return
+            sample = await source.wait_sample(timeout=5.0)
+            if sample is None:
+                self._netease_restore_status = "no-progress"
+                return
+            expected_native = getattr(self, "_netease_expected_native", None)
+            if expected_native is not None and source.native_track_id != expected_native:
+                self._netease_restore_status = "track-changed"
+                return
+            async def current():
+                if cdp is not getattr(self, "_netease_cdp_session", None) or not self._netease_cef_enabled():
+                    return False
+                selected = await self._get_session()
+                return (selected is not None and str(selected.source_app_user_model_id) == track.source_app_id
+                        and await self._seek_session_matches_track(selected, track.title, track.artist, ""))
+            if not await current():
+                self._netease_restore_status = "track-changed"
+                return
+            executor = getattr(self, "_capture_executor", None)
+            if executor is None:
+                from api.capture.seek import SeekExecutor
+                executor = self._capture_executor = SeekExecutor()
+            result = await executor.execute(
+                track.position_seconds, identity=sample.identity,
+                request_id="restore-" + secrets.token_hex(12), smtc=CefSeekBackend(source),
+                fallback=None, guard=current, policy=CEF_SEEK_POLICY, primary_name="cef")
+            self._netease_restore_status = result.reason
+            error_seconds = result.error_seconds
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._netease_restore_status = "unavailable"
+        finally:
+            record_seek_decision('restore', self._netease_restore_status, target=track.position_seconds,
+                                 backend='cef', port=getattr(cdp, 'port', None), error_seconds=error_seconds)
+            source.close()
+
+    async def _bind_capture_session(self, session, track):
+        """Wire opt-in observations on the existing WinRT background loop."""
+        runtime = getattr(self, "_capture_runtime", None)
+        if getattr(self, "_capture_closed", False):
+            return
+        if not self._capture_is_enabled():
+            if runtime is not None:
+                await runtime.close()
+                self._capture_runtime = None
+            await self._close_netease_cdp()
+            return
+        from api.capture.capabilities import capability_for, capture_profile
+        mode = capture_profile(getattr(self, "settings_getter", None), capability_for(track.source_app_id))
+        if mode == "off":
+            if runtime is not None:
+                await runtime.close()
+                self._capture_runtime = None
+            if capability_for(track.source_app_id).service == "netease" or not self._netease_cef_enabled():
+                await self._close_netease_cdp()
+            return
+        capability = capability_for(track.source_app_id)
+        cef_session = None
+        cef_requested = False
+        if capability.service == "netease":
+            cef_requested = self._netease_cef_enabled()
+            if (getattr(self, "_interruption_controller_enabled", False)
+                    or getattr(asyncio.current_task(), "_gluspot_interruption_read", False)
+                    or getattr(self, "_interruption_session", None) is not None):
+                existing = getattr(self, "_netease_cdp_session", None)
+                cef_session = existing if existing is not None and existing.ready else None
+            else:
+                cef_session = await self._ensure_netease_cdp()
+            # Installation discovery can fail on the first refresh and
+            # succeed later (for example while CloudMusic is updating). A
+            # runtime made before that discovery must be rebound so it can
+            # construct its CefPositionSource.
+            if runtime is not None and (getattr(runtime, "cef_session", None) is not cef_session
+                                        or getattr(runtime, "cef_requested", False) != cef_requested):
+                await runtime.close()
+                self._capture_runtime = runtime = None
+        if runtime is None:
+            from api.capture.runtime import CaptureRuntime
+            from api.capture.seek import SeekExecutor
+            from api.capture.uia import StaWorker
+            # Retain uncertainty and the native worker across flag/profile
+            # toggles: disabling capture cannot cancel an in-flight COM write.
+            executor = getattr(self, "_capture_executor", None)
+            if executor is None:
+                executor = self._capture_executor = SeekExecutor()
+            worker = getattr(self, "_capture_uia_worker", None)
+            if worker is None:
+                worker = self._capture_uia_worker = StaWorker()
+            runtime = self._capture_runtime = CaptureRuntime(
+                executor=executor, uia_worker=worker, cef_session=cef_session,
+                cef_requested=cef_requested)
+
+        async def matches(candidate):
+            return (str(getattr(candidate, "source_app_user_model_id", "")) == track.source_app_id
+                    and await self._seek_session_matches_track(candidate, track.title, track.artist, ""))
+
+        await runtime.bind(session, track, matches, mode=mode)
 
     def get_visual_data(self) -> IslandVisualData:
         now = time.monotonic()
@@ -691,6 +2090,8 @@ class WindowsMediaProvider:
                         "_queue_art_inflight", "_current_art_url_by_track_id", "_current_art_lookup_inflight",
                         "_current_art_lookup_failed_until", "_current_art_lookup_generations",
                         "_current_art_lookup_sources", "_current_art_rejected_urls",
+                        "_queue_art_attempts", "_current_art_lookup_attempts", "_current_art_first_seen",
+                        "_current_art_queue_urls", "_queue_art_generations",
                     ):
                         values = getattr(self, name, None)
                         if isinstance(values, (dict, set)):
@@ -704,7 +2105,6 @@ class WindowsMediaProvider:
                             task.get_loop().call_soon_threadsafe(task.cancel)
                         except (RuntimeError, AttributeError):
                             pass
-                    self._netease_art_source_failed_until = 0.0
                     resolver = getattr(self, "_musicbrainz_artwork_resolver", None)
                     if resolver is not None and callable(getattr(resolver, "clear_cache", None)):
                         resolver.clear_cache()
@@ -1111,6 +2511,9 @@ class WindowsMediaProvider:
         return replace(data, track=updated_track)
 
     def _project_visual_position(self, data: IslandVisualData, now: float, anchor_at: float) -> IslandVisualData:
+        runtime = getattr(self, "_capture_runtime", None)
+        if runtime is not None and self._capture_is_enabled():
+            return runtime.project(data, now)
         track = data.track
         if not track.is_playing:
             return data
@@ -1154,7 +2557,7 @@ class WindowsMediaProvider:
     def get_audio_frame(self) -> AudioFrame | None:
         audio_analyzer = self._ensure_audio_analyzer_if_requested()
         if audio_analyzer is None:
-            return None
+            return self._render_peak_frame()
         track = self._last_data.track if self._last_data is not None else None
         try:
             live_audio = audio_analyzer.has_recent_real_frame()
@@ -1162,7 +2565,7 @@ class WindowsMediaProvider:
             self._release_audio_analyzer(f"audio-frame-check-failed: {self._brief_error(exc)}", cooldown=True)
             return None
         if not live_audio:
-            return None
+            return self._render_peak_frame()
         try:
             return audio_analyzer.get_frame(
                 is_playing=True if track is None else track.is_playing,
@@ -1172,9 +2575,21 @@ class WindowsMediaProvider:
             self._release_audio_analyzer(f"audio-frame-read-failed: {self._brief_error(exc)}", cooldown=True)
             return None
 
+    def _render_peak_frame(self) -> AudioFrame | None:
+        # Reading a render meter does not open the optional loopback stream.
+        # Demand comes from the existing wave tick, never metadata auto-hide.
+        if sys.platform != "win32" or bool(getattr(self, "_capture_closed", False)):
+            return None
+        meter = getattr(self, "_render_peak_meter", None)
+        if meter is None:
+            meter = self._render_peak_meter = RenderPeakMeter()
+        return meter.get_frame()
+
     def has_live_audio(self) -> bool:
         audio_analyzer = self._ensure_audio_analyzer_if_requested()
         if audio_analyzer is None:
+            # The visual-only endpoint meter must not change metadata-driven
+            # auto-hide or classify quiet output as active playback.
             return False
         try:
             return audio_analyzer.has_recent_real_frame()
@@ -1245,6 +2660,9 @@ class WindowsMediaProvider:
 
     def suspend_live_audio(self):
         """Detach an optional meter immediately, release its stream off Qt."""
+        meter, self._render_peak_meter = getattr(self, "_render_peak_meter", None), None
+        if meter is not None:
+            meter.stop()
         analyzer, self.audio_analyzer = getattr(self, "audio_analyzer", None), None
         if analyzer is not None:
             def stop():
@@ -1335,6 +2753,9 @@ class WindowsMediaProvider:
                 "sender": (self._audio_route_controller.diagnostics()
                            if getattr(self, "_audio_route_controller", None) is not None else {}),
             },
+            "capture": (self._capture_runtime.diagnostics()
+                        if getattr(self, "_capture_runtime", None) is not None and self._capture_is_enabled()
+                        else {"enabled": False}),
             "provider_status": self._provider_status,
             "winsdk_loaded": MediaManager is not None,
             "winsdk_import_attempted": WINSdk_IMPORT_ATTEMPTED,
@@ -1371,8 +2792,6 @@ class WindowsMediaProvider:
             "audio": self._audio_diagnostics(),
             "netease_position": self.netease_position.diagnostics() if self.netease_position is not None else self._cold_attachment_diagnostics("netease"),
             "qq_position": self.qq_position.diagnostics() if self.qq_position is not None else self._cold_attachment_diagnostics("qq"),
-            "plugins": self.plugin_provider.diagnostics(),
-            "messages": self.message_detector.diagnostics(),
         }
 
     def _music_cache_diagnostics(self) -> dict[str, object]:
@@ -1594,6 +3013,41 @@ class WindowsMediaProvider:
                 break
         return tuple(entries)
 
+    @staticmethod
+    def _artwork_track_key(title: str, artist: str) -> str:
+        # SMTC album and duration often arrive after its first 108px preview.
+        # They remain candidate match filters, never the artwork cache key.
+        return "|".join((artwork_text_key(title), artwork_text_key(artist)))
+
+    def _system_netease_artwork_track(self, title: str, artist: str, duration: float):
+        """Read matching queue artwork only; do not enable a progress adapter."""
+        try:
+            reader = getattr(self, "netease_position", None) or getattr(self, "_netease_artwork_reader", None)
+            if reader is None:
+                reader = self._netease_artwork_reader = NeteasePositionReader()
+            track = reader.track_metadata(title, artist)
+            if (track is not None and self._track_object_matches_metadata(track, title, artist)
+                    and artwork_duration_matches(duration, getattr(track, "duration_seconds", 0.0))):
+                return track
+        except Exception as exc:
+            log_artwork_event("lookup", self._artwork_track_key(title, artist),
+                              "netease-queue", 0, "failed", type(exc).__name__)
+        return None
+
+    def _artwork_retry_after(self, kind: str, key: str) -> float:
+        # Called under the lookup/download's existing lock. Failure on one
+        # song or URL never suppresses another song's NetEase lookup.
+        name = "_current_art_lookup_attempts" if kind == "lookup" else "_queue_art_attempts"
+        attempts = getattr(self, name, None)
+        if not isinstance(attempts, dict):
+            attempts = {}
+            setattr(self, name, attempts)
+        count = min(attempts.get(key, 0) + 1, len(self.ARTWORK_RETRY_DELAYS))
+        attempts[key] = count
+        while len(attempts) > 64:
+            attempts.pop(next(iter(attempts)))
+        return time.monotonic() + self.ARTWORK_RETRY_DELAYS[count - 1]
+
     def _queue_album_art_bytes(self, track) -> bytes:
         epoch = int(getattr(self, "_artwork_cache_epoch", 0))
         data = getattr(track, "album_art_bytes", b"") or getattr(track, "image_bytes", b"") or b""
@@ -1658,7 +3112,7 @@ class WindowsMediaProvider:
                     self._schedule_queue_album_art_prefetch(original_url)
         return self._preferred_album_art_bytes(selected, data) if epoch == int(getattr(self, "_artwork_cache_epoch", 0)) else b""
 
-    def _reject_tiny_queue_art(self, url: str, content: bytes, *, cooldown: float = 30.0) -> bool:
+    def _reject_tiny_queue_art(self, url: str, content: bytes, *, cooldown: float | None = None) -> bool:
         if not 0 < self._album_art_min_side(content) < self.CURRENT_ART_PREVIEW_SIDE:
             return False
         lock = getattr(self, "_queue_art_lock", None)
@@ -1675,7 +3129,8 @@ class WindowsMediaProvider:
             if not isinstance(failures, dict):
                 failures = {}
                 self._queue_art_failed_until = failures
-            failures[url] = max(float(failures.get(url, 0.0) or 0.0), time.monotonic() + cooldown)
+            retry_at = self._artwork_retry_after("download", url) if cooldown is None else time.monotonic() + cooldown
+            failures[url] = max(float(failures.get(url, 0.0) or 0.0), retry_at)
             disk_path = self._queue_art_disk_path(url)
             if disk_path is not None:
                 try:
@@ -1688,6 +3143,10 @@ class WindowsMediaProvider:
         """Keep a known small URL as a preview until its source upgrade arrives."""
         if self._album_art_min_side(content) < self.CURRENT_ART_PREVIEW_SIDE:
             return True
+        # Any completed URL variant can be the source's real original. CDN
+        # responses often exceed their small requested size, or cap at 800px.
+        if getattr(self, "_queue_art_cache", {}).get(url) == content:
+            return False
         normalized = normalize_artwork_url(url, self.CURRENT_ART_TARGET_SIDE)
         if normalized == url:
             return False
@@ -1793,6 +3252,9 @@ class WindowsMediaProvider:
         if slots is None:
             slots = threading.BoundedSemaphore(2)
             self._current_art_lookup_slots = slots
+        worker_slots = getattr(self, "_current_art_worker_slots", None)
+        if worker_slots is None:
+            worker_slots = self._current_art_worker_slots = threading.BoundedSemaphore(4)
         resolver = getattr(self, "_musicbrainz_artwork_resolver", None)
         if resolver is None:
             resolver = MusicBrainzArtworkResolver()
@@ -1820,11 +3282,15 @@ class WindowsMediaProvider:
                     # A valid tiny image is still a preview. Use the same
                     # bounded rejection path as an invalid download, allowing
                     # a strict alternate source and later retry after cooldown.
-                    download_failed_until = max(download_failed_until, now + 45.0)
                     self._reject_tiny_queue_art(
-                        download_url, getattr(self, "_queue_art_cache", {}).get(download_url, b""), cooldown=45.0,
+                        download_url, getattr(self, "_queue_art_cache", {}).get(download_url, b""),
                     )
+                    download_failed_until = float(getattr(self, "_queue_art_failed_until", {}).get(download_url, 0.0) or 0.0)
                 if download_failed_until > now:
+                    # Retry the same authoritative URL before searching for
+                    # another cover. Tiny responses can use fallback now.
+                    if cached_side == 0 and getattr(self, "_queue_art_attempts", {}).get(download_url, 3) < 3:
+                        return False
                     rejected[track_id] = (download_failed_until, existing_url)
                     urls.pop(track_id, None)
                 else:
@@ -1833,45 +3299,65 @@ class WindowsMediaProvider:
                 return False
             if not slots.acquire(blocking=False):
                 return False
+            if not worker_slots.acquire(blocking=False):
+                slots.release()
+                return False
             inflight.add(track_id)
             generations[track_id] = (token, deadline)
             epoch = int(getattr(self, "_artwork_cache_epoch", 0))
 
-        def expire():
+        # Expiry frees a delivery slot while the blocked socket retains one
+        # physical slot. At most two abandoned requests can use the reserve;
+        # repeated retries cannot grow daemon threads without a bound.
+        released = False
+
+        def expire(error="TimeoutError"):
+            nonlocal released
             with lock:
+                if not released:
+                    slots.release()
+                    released = True
                 if generations.get(track_id, (None, 0.0))[0] is token:
                     generations.pop(track_id, None)
                     inflight.discard(track_id)
-                    failed_until[track_id] = time.monotonic() + 45.0
+                    failed_until[track_id] = self._artwork_retry_after("lookup", track_id)
                     while len(failed_until) > 64:
                         failed_until.pop(next(iter(failed_until)))
                     self._last_refresh_at = 0.0
+                    log_artwork_event("lookup", track_id, "metadata", 0, "failed", error)
 
         # A late thread cannot publish an expired attempt into a newer retry.
         # This is a delivery deadline, not cancellation of a blocking socket.
         expiry = threading.Timer(9.0, expire)
         expiry.daemon = True
-        expiry.start()
 
         def lookup():
-            url, source = "", ""
+            nonlocal released
+            url, source, error = "", "", "none"
             try:
                 with lock:
-                    if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
+                    if (epoch != int(getattr(self, "_artwork_cache_epoch", 0))
+                            or generations.get(track_id, (None, 0.0))[0] is not token):
                         return
                 # Artwork retrieval does not require an enabled progress-sync
                 # adapter. A NetEase GSMTC session still has the reference's
                 # cover fallback when its optional UIA reader is disabled.
-                if netease_art_source and float(getattr(self, "_netease_art_source_failed_until", 0.0) or 0.0) <= time.monotonic():
+                if netease_art_source:
                     try:
-                        url = self._resolve_netease_art_url(
+                        # The player's own song ID gives the exact album art.
+                        exact = self._netease_exact_detail(title, artist, min(deadline, time.monotonic() + 3.0))
+                        if exact and exact["picture"]:
+                            url = exact["picture"]
+                    except Exception as exc:
+                        log_artwork_event("lookup", track_id, "netease-id", 0, "failed", type(exc).__name__)
+                    try:
+                        url = url or self._resolve_netease_art_url(
                             title, artist, album_title=album_title,
                             duration_seconds=duration_seconds, deadline=min(deadline, time.monotonic() + 3.0),
                         )
-                    except Exception:
-                        with lock:
-                            if generations.get(track_id, (None, 0.0))[0] is token:
-                                self._netease_art_source_failed_until = time.monotonic() + 45.0
+                    except Exception as exc:
+                        error = type(exc).__name__
+                        log_artwork_event("lookup", track_id, "netease", 0, "failed", error)
                     if url:
                         source = "netease"
                 rejected_until, rejected_url = rejected.get(track_id, (0.0, ""))
@@ -1883,11 +3369,16 @@ class WindowsMediaProvider:
                         source = "cover-art-archive"
                 if url and url == rejected_url and rejected_until > time.monotonic():
                     url = ""
-            except Exception:
+            except Exception as exc:
                 url = ""
+                error = type(exc).__name__
             finally:
                 expiry.cancel()
-                slots.release()
+                with lock:
+                    if not released:
+                        slots.release()
+                        released = True
+                worker_slots.release()
             with lock:
                 if generations.get(track_id, (None, 0.0))[0] is not token:
                     return
@@ -1897,27 +3388,32 @@ class WindowsMediaProvider:
                     urls[track_id] = url
                     sources[track_id] = source
                     failed_until.pop(track_id, None)
+                    getattr(self, "_current_art_lookup_attempts", {}).pop(track_id, None)
                     while len(urls) > 24:
                         removed = next(iter(urls))
                         urls.pop(removed)
                         sources.pop(removed, None)
                 else:
                     url = ""
-                    failed_until[track_id] = time.monotonic() + 45.0
+                    failed_until[track_id] = self._artwork_retry_after("lookup", track_id)
                 while len(failed_until) > 64:
                     failed_until.pop(next(iter(failed_until)))
                 while len(rejected) > 24:
                     rejected.pop(next(iter(rejected)))
+            log_artwork_event("lookup", track_id, source or "metadata", 0,
+                              "ready" if url else "miss" if error == "none" else "failed", error)
             if url:
                 self._schedule_queue_album_art_prefetch(url)
             self._last_refresh_at = 0.0
 
+        log_artwork_event("lookup", track_id, "metadata", 0, "pending")
         try:
+            expiry.start()
             threading.Thread(target=lookup, name="GluSpotCurrentArt", daemon=True).start()
         except RuntimeError:
             expiry.cancel()
-            slots.release()
-            expire()
+            worker_slots.release()
+            expire("RuntimeError")
             return False
         return True
 
@@ -2072,39 +3568,101 @@ class WindowsMediaProvider:
         if not isinstance(failed_until, dict):
             failed_until = {}
             self._queue_art_failed_until = failed_until
+        slots = getattr(self, "_queue_art_slots", None)
+        if slots is None:
+            slots = self._queue_art_slots = threading.BoundedSemaphore(3)
+        worker_slots = getattr(self, "_queue_art_worker_slots", None)
+        if worker_slots is None:
+            worker_slots = self._queue_art_worker_slots = threading.BoundedSemaphore(6)
+        generations = getattr(self, "_queue_art_generations", None)
+        if not isinstance(generations, dict):
+            generations = self._queue_art_generations = {}
+        token, deadline, released = object(), time.monotonic() + 8., False
         with lock:
             if self._is_valid_image_bytes(getattr(self, "_queue_art_cache", {}).get(url, b"")):
                 return False
             if url in inflight or float(failed_until.get(url, 0.0) or 0.0) > time.monotonic():
                 return False
+            if not slots.acquire(blocking=False):
+                return False
+            if not worker_slots.acquire(blocking=False):
+                slots.release()
+                return False
             inflight.add(url)
+            generations[url] = token
             epoch = int(getattr(self, "_artwork_cache_epoch", 0))
+        track_id = next((key for key, value in getattr(self, "_current_art_url_by_track_id", {}).copy().items()
+                         if normalize_artwork_url(value, self.CURRENT_ART_TARGET_SIDE) == normalize_artwork_url(url, self.CURRENT_ART_TARGET_SIDE)), url)
+        try:
+            source = urlsplit(url).hostname or "unknown"
+        except ValueError:
+            source = "unknown"
+        log_artwork_event("download", track_id, source, 0, "pending")
+
+        def expire(error="TimeoutError"):
+            nonlocal released
+            with lock:
+                if not released:
+                    slots.release()
+                    released = True
+                if generations.get(url) is not token:
+                    return
+                generations.pop(url, None)
+                inflight.discard(url)
+                failed_until[url] = self._artwork_retry_after("download", url)
+                while len(failed_until) > 64:
+                    failed_until.pop(next(iter(failed_until)))
+                self._last_refresh_at = 0.0
+            log_artwork_event("download", track_id, source, 0, "failed", error)
+
+        expiry = threading.Timer(8., expire)
+        expiry.daemon = True
 
         def download():
+            nonlocal released
             content = b""
-            slots = getattr(self, "_queue_art_slots", None)
-            if slots is None:
-                slots = threading.BoundedSemaphore(3)
-                self._queue_art_slots = slots
-            with slots:
+            error = "none"
+            try:
                 try:
-                    if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
-                        return
+                    with lock:
+                        if (epoch != int(getattr(self, "_artwork_cache_epoch", 0))
+                                or generations.get(url) is not token):
+                            return
                     request = Request(url, headers={"User-Agent": "GluSpot/1.0"})
                     with urlopen(request, timeout=3.0) as response:
+                        header = getattr(response, "headers", {}).get("Content-Length")
+                        expected = int(header) if header is not None else None
+                        if expected is not None and not 0 < expected <= self.QUEUE_ART_MAX_BYTES:
+                            raise ValueError("artwork size exceeds budget")
                         content = response.read(self.QUEUE_ART_MAX_BYTES + 1)
-                    if len(content) > self.QUEUE_ART_MAX_BYTES:
-                        content = b""
-                    if content and QImage.fromData(content).isNull():
-                        content = b""
-                except Exception:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("artwork delivery deadline expired")
+                    if expected is not None and len(content) != expected:
+                        raise IncompleteRead(content)
+                    if not content or len(content) > self.QUEUE_ART_MAX_BYTES or not self._is_valid_image_bytes(content):
+                        raise ValueError("invalid artwork response")
+                except Exception as exc:
                     content = b""
+                    error = type(exc).__name__
+            finally:
+                expiry.cancel()
+                with lock:
+                    if not released:
+                        slots.release()
+                        released = True
+                worker_slots.release()
             with lock:
-                if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
+                if (epoch != int(getattr(self, "_artwork_cache_epoch", 0))
+                        or generations.get(url) is not token):
                     return
+                generations.pop(url, None)
                 inflight.discard(url)
                 if content:
                     failed_until.pop(url, None)
+                    # A decoded tiny response is usable preview evidence,
+                    # not a successful upgrade that resets retry backoff.
+                    if self._album_art_min_side(content) >= self.CURRENT_ART_PREVIEW_SIDE:
+                        getattr(self, "_queue_art_attempts", {}).pop(url, None)
                     cache = getattr(self, "_queue_art_cache", None)
                     if not isinstance(cache, dict):
                         cache = {}
@@ -2114,14 +3672,152 @@ class WindowsMediaProvider:
                         cache.pop(next(iter(cache)))
                     self._persist_queue_art(url, bytes(content))
                 else:
-                    failed_until[url] = time.monotonic() + 30.0
+                    failed_until[url] = self._artwork_retry_after("download", url)
+                while len(failed_until) > 64:
+                    failed_until.pop(next(iter(failed_until)))
+            side = self._album_art_min_side(content)
+            log_artwork_event("download", track_id, source, side,
+                              "ready" if side >= self.CURRENT_ART_PREVIEW_SIDE else "preview" if content else "failed", error)
             self._last_refresh_at = 0.0
 
-        threading.Thread(target=download, name="GluSpotQueueArt", daemon=True).start()
+        try:
+            expiry.start()
+            threading.Thread(target=download, name="GluSpotQueueArt", daemon=True).start()
+        except RuntimeError as exc:
+            expiry.cancel()
+            worker_slots.release()
+            expire(type(exc).__name__)
+            return False
+        return True
+
+    # --- NetEase desktop: the player's own song ID ---------------------------
+
+    NETEASE_DETAIL_URL = "https://music.163.com/api/song/detail/?id={id}&ids=%5B{id}%5D"
+    NETEASE_LYRIC_URL = "https://music.163.com/api/song/lyric?id={id}&lv=-1&tv=-1&rv=-1&kv=-1"
+
+    def _netease_exact_song_id(self) -> str:
+        """The song NetEase's own player reports (precise capture), or "".
+
+        Its native track id is ``<song id>_<suffix>``. Only a fresh sample
+        counts; the caller still checks the title against the song's details.
+        """
+        runtime = getattr(self, "_capture_runtime", None)
+        cef = getattr(runtime, "_cef_source", None)
+        native = getattr(cef, "native_track_id", None)
+        if not native or not bool(getattr(cef, "fresh", False)):
+            return ""
+        head = str(native).split("_", 1)[0]
+        return head if re.fullmatch(r"[1-9][0-9]{0,19}", head) else ""
+
+    def _netease_song_detail(self, song_id: str, deadline: float) -> dict | None:
+        cache = self.__dict__.setdefault("_netease_detail_cache", {})
+        if song_id in cache:
+            return cache[song_id]
+        request = Request(self.NETEASE_DETAIL_URL.format(id=song_id),
+                          headers={"User-Agent": ARTWORK_USER_AGENT, "Referer": "https://music.163.com/"})
+        payload = self._fetch_current_art_json(request, deadline)
+        songs = payload.get("songs") if isinstance(payload, dict) else None
+        detail = None
+        if isinstance(songs, list) and songs and isinstance(songs[0], dict):
+            song = songs[0]
+            album = song.get("album") or song.get("al") or {}
+            artists = song.get("artists") or song.get("ar") or []
+            detail = {
+                "id": song_id,
+                "title": str(song.get("name") or ""),
+                "artists": tuple(str(a.get("name") or "") for a in artists if isinstance(a, dict)),
+                "picture": str(album.get("picUrl") or "") if isinstance(album, dict) else "",
+                "duration": float(song.get("duration") or song.get("dt") or 0) / 1000.0,
+            }
+        cache[song_id] = detail
+        while len(cache) > 48:
+            cache.pop(next(iter(cache)))
+        return detail
+
+    def _netease_exact_detail(self, title: str, artist: str, deadline: float, song_id: str = "") -> dict | None:
+        """The precise-capture song's details, only when they name this track."""
+        song_id = song_id or self._netease_exact_song_id()
+        if not song_id:
+            return None
+        detail = self._netease_song_detail(song_id, deadline)
+        if not detail or not detail["title"]:
+            return None
+        want, have = artwork_text_key(title), artwork_text_key(detail["title"])
+        if not want or not have or not (want == have or want in have or have in want):
+            return None      # a speech segment, or the capture moved to another song
+        return detail
+
+    def _netease_exact_cached_duration(self, title: str) -> float:
+        """The captured song's length from details already fetched, or 0."""
+        song_id = self._netease_exact_song_id()
+        detail = self.__dict__.get("_netease_detail_cache", {}).get(song_id) if song_id else None
+        if not detail or detail.get("duration", 0) <= 0:
+            return 0.0
+        want, have = artwork_text_key(title), artwork_text_key(detail.get("title", ""))
+        if not want or not have or not (want == have or want in have or have in want):
+            return 0.0
+        return float(detail["duration"])
+
+    def _start_netease_exact_lyrics(self, title: str, artist: str, album_title: str, duration_seconds: float) -> bool:
+        """Fetch this song's official lyrics by its NetEase ID, once per song."""
+        song_id = self._netease_exact_song_id()
+        if not song_id:
+            return False
+        done = self.__dict__.setdefault("_netease_exact_lyric_ids", {})
+        if song_id in done:
+            return done[song_id] == "pending"
+        done[song_id] = "pending"
+        while len(done) > 64:
+            done.pop(next(iter(done)))
+
+        def work():
+            outcome = "miss"
+            try:
+                detail = self._netease_exact_detail(title, artist, time.monotonic() + 4.0, song_id)
+                if detail is None:
+                    outcome = "mismatch"
+                    return
+                payload = None
+                service = getattr(self, "online_music", None)
+                if service is not None:
+                    try:
+                        payload = service.lyrics("netease", song_id)     # word timing when signed in
+                    except Exception:
+                        payload = None
+                if payload is not None and (payload.raw_lrc or payload.raw_yrc):
+                    match = self.lyrics_store.parse_online_lyrics(
+                        raw_lrc=payload.raw_lrc, raw_yrc=payload.raw_yrc, translation=payload.translation,
+                        romanization=payload.romanization, source="netease", raw_netease=payload.raw_netease)
+                else:
+                    request = Request(self.NETEASE_LYRIC_URL.format(id=song_id),
+                                      headers={"User-Agent": ARTWORK_USER_AGENT, "Referer": "https://music.163.com/"})
+                    body = self._fetch_current_art_json(request, time.monotonic() + 4.0)
+                    def text(key):
+                        part = body.get(key) if isinstance(body, dict) else None
+                        return str(part.get("lyric") or "") if isinstance(part, dict) else ""
+                    match = self.lyrics_store.parse_online_lyrics(
+                        raw_lrc=text("lrc"), translation=text("tlyric"), romanization=text("romalrc"),
+                        source="netease") if text("lrc") else None
+                if match is not None and self.lyrics_store.adopt_exact_lyrics(
+                        title, artist, album_title, duration_seconds, match):
+                    outcome = "ready"
+            except Exception:
+                outcome = "error"
+            finally:
+                done[song_id] = outcome
+                self._last_refresh_at = 0.0
+
+        threading.Thread(target=work, name="GluSpotNeteaseExactLyrics", daemon=True).start()
         return True
 
     def _ensure_lyrics_lookup_started(self, title: str, artist: str, album_title: str = "", duration_seconds: float = 0.0, allow_background: bool = True):
+        # NetEase's own player names the song: its official lyrics, by ID,
+        # replace a title search (which can find another version or song).
+        exact_pending = allow_background and self._start_netease_exact_lyrics(
+            title, artist, album_title, duration_seconds)
         lyrics_match = self.lyrics_store.resolve_cached_or_local(title, artist, album_title, duration_seconds)
+        if exact_pending and not (lyrics_match.timed_lyrics or lyrics_match.lyrics):
+            return lyrics_match, True, False
         lyrics_lookup_pending = self.lyrics_store.is_lookup_pending(title, artist, album_title, duration_seconds)
         lookup_started = False
         if allow_background and not lyrics_match.timed_lyrics and not lyrics_match.lyrics and not lyrics_lookup_pending:
@@ -2141,7 +3837,49 @@ class WindowsMediaProvider:
             self.lyrics_store.enrich_in_background(title, artist, album_title, duration_seconds, True)
         return lyrics_match, lyrics_lookup_pending, lookup_started
 
+    def _on_interface_thread(self) -> bool:
+        try:
+            from PySide6.QtWidgets import QApplication
+        except Exception:
+            return False
+        app = QApplication.instance()
+        return app is not None and QThread.currentThread() == app.thread()
+
+    def _wait_for_uia_worker(self, worker, timeout=0.8) -> bool:
+        """Let one in-flight position read finish instead of failing the click.
+
+        Callers on the Qt interface thread must not reach this sleep. One UIA
+        read can hold the slot for the whole timeout.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while getattr(worker, "busy", False) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return not bool(getattr(worker, "busy", False))
+
     def seek_playback_position(self, position_seconds: float, expected_track_id: str | None = None) -> bool:
+        executor = getattr(self, "_capture_executor", None)
+        worker = getattr(self, "_capture_uia_worker", None)
+        runtime = getattr(self, "_capture_runtime", None)
+        uses_uia = getattr(runtime, "seek_uses_uia_worker", None)
+        needs_uia = runtime is None or not callable(uses_uia) or bool(uses_uia())
+        if needs_uia and worker is not None and worker.busy:
+            # The shared worker is usually inside a position read. A background
+            # click can wait for that read, then seek. The interface thread
+            # returns immediately. A fresh CDP seek does not take this slot.
+            on_owner = threading.current_thread() is getattr(self, "_thread", None)
+            if on_owner or self._on_interface_thread() or not self._wait_for_uia_worker(worker):
+                record_seek_decision('provider', 'uia-worker-busy', target=position_seconds)
+                return False
+        reason = ('previous-request-uncertain' if executor is not None and executor.uncertain else
+                  'busy' if executor is not None and executor.busy else '')
+        if reason:
+            # A flag/profile toggle cannot cancel a previous native write.
+            # This gate also protects a return to the legacy SMTC route.
+            record_seek_decision('provider', reason, target=position_seconds)
+            return False
+        if self._capture_is_enabled() and getattr(self, "_capture_runtime", None) is not None:
+            return self._seek_capture_position(position_seconds, expected_track_id)
+        record_seek_decision('provider', 'legacy-route', target=position_seconds, backend='smtc')
         try:
             position = max(0.0, float(position_seconds))
         except (TypeError, ValueError):
@@ -2196,6 +3934,78 @@ class WindowsMediaProvider:
             self._mark_player_anchor_fast_refresh(duration=2.4)
             self._request_immediate_media_refresh()
         return bool(result)
+
+    def _seek_capture_position(self, position_seconds, expected_track_id=None) -> bool:
+        """Wait on the background state machine; UI callers already use a worker."""
+        try:
+            target = float(position_seconds)
+        except (TypeError, ValueError):
+            record_seek_decision('provider', 'invalid-target')
+            return False
+        runtime = getattr(self, "_capture_runtime", None)
+        loop = getattr(self, "_loop", None)
+        data = getattr(self, "_last_data", None)
+        if runtime is None or loop is None or data is None or not math.isfinite(target):
+            record_seek_decision('provider', 'unavailable' if math.isfinite(target) else 'invalid-target', target=target)
+            return False
+        track = data.track
+        if expected_track_id and expected_track_id != track.track_id:
+            record_seek_decision('provider', 'expected-track-mismatch', target=target)
+            return False
+        # A synchronous wait from the owning event loop would deadlock.
+        if threading.current_thread() is getattr(self, "_thread", None):
+            record_seek_decision('provider', 'owning-thread', target=target)
+            return False
+        if not loop.is_running() or loop.is_closed():
+            record_seek_decision('provider', 'loop-unavailable', target=target)
+            return False
+
+        def current_data_reason():
+            current_data = getattr(self, "_last_data", None)
+            return ('capture-disabled' if not self._capture_is_enabled() else
+                    'track-changed' if current_data is None or current_data.track.track_id != track.track_id else
+                    'source-changed' if current_data.track.source_app_id != track.source_app_id else '')
+
+        async def current():
+            selected = await self._get_session()
+            reason = current_data_reason()
+            if not reason:
+                if selected is None:
+                    reason = 'session-unavailable'
+                elif str(getattr(selected, "source_app_user_model_id", "")) != track.source_app_id:
+                    reason = 'session-source-mismatch'
+            if not reason and not await self._seek_session_matches_track(selected, track.title, track.artist, ""):
+                reason = 'metadata-mismatch'
+            if not reason:
+                # Metadata reads also await native I/O. Recheck the provider's
+                # authority after that final await, immediately before return.
+                reason = current_data_reason()
+            if reason:
+                record_seek_decision('provider-guard', reason, target=target)
+            return not reason
+
+        record_seek_decision('provider', 'queued', target=target,
+                             port=getattr(getattr(runtime, 'cef_session', None), 'port', None))
+        coroutine = runtime.seek(max(0.0, target), track.track_id, current)
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except RuntimeError:
+            coroutine.close()
+            record_seek_decision('provider', 'loop-unavailable', target=target)
+            return False
+        try:
+            result = bool(future.result(timeout=5.0))
+        except FutureTimeoutError:
+            future.cancel()
+            record_seek_decision('provider', 'wait-timeout', target=target)
+            return False
+        except Exception:
+            record_seek_decision('provider', 'request-error', target=target)
+            return False
+        record_seek_decision('provider', 'succeeded' if result else 'failed', target=target)
+        if result:
+            self._request_immediate_media_refresh()
+        return result
 
     def _seek_player_position_fallback(self, position_seconds: float, expected_track_id: str = "") -> bool:
         if expected_track_id and not self._seek_track_is_current(expected_track_id):
@@ -2298,6 +4108,8 @@ class WindowsMediaProvider:
 
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)
+        if self._netease_cef_enabled():
+            self._loop.create_task(self._ensure_netease_cdp())
         self._loop.run_forever()
 
     def _run(self, coro):
@@ -2313,6 +4125,36 @@ class WindowsMediaProvider:
             return None
 
     async def _get_session(self):
+        # Time the first session read only. Later refreshes keep the same path.
+        if getattr(self, "_startup_media_session_logged", False):
+            return await self._open_media_session()
+        self._startup_media_session_logged = True
+        started = time.perf_counter()
+        try:
+            return await self._open_media_session()
+        finally:
+            from local.startup_timing import log_startup_phase
+            log_startup_phase("windows_media_session", started)
+
+    async def _open_media_session(self):
+        pinned = getattr(self, "_interruption_session", None)
+        if pinned is not None:
+            # A pin names one retained native instance. Never rerun scoring or
+            # merge same-AUMID instances during a temporary handoff.
+            try:
+                from api.capture.interruption import same_session
+                sessions = list(self._manager.get_sessions() or [])
+                app_id = str(pinned.source_app_user_model_id)
+                matches = [s for s in sessions if str(s.source_app_user_model_id).casefold() == app_id.casefold()]
+                if len(matches) != 1:
+                    return None
+                # A refreshed wrapper of the one pinned app is still that session.
+                # Two live sessions stay unresolved. The retained object is
+                # returned when native equality holds, so callers can keep it.
+                current = matches[0]
+                return pinned if same_session(current, pinned) else current
+            except Exception:
+                return None
         if not _ensure_winsdk_loaded():
             self._provider_status = "missing_winsdk"
             self._reset_media_session_diagnostics("winsdk-missing")
@@ -2349,6 +4191,20 @@ class WindowsMediaProvider:
         if session is None:
             self._provider_status = "no_session"
         return session
+
+    def _set_interruption_session(self, session):
+        """Memory-only route pin; invalidate old in-flight media deliveries."""
+        if getattr(self, "_interruption_session", None) is session:
+            return
+        self._interruption_session = session
+        with self._music_cache_lock:
+            self._music_cache_epoch += 1
+            future, self._refresh_future = self._refresh_future, None
+            if future is not None:
+                future.cancel()
+            self._last_data = None
+            self._last_ready_at = 0.0
+            self._last_refresh_at = 0.0
 
     def _reset_media_session_diagnostics(self, error: str = ""):
         self._media_session_count = 0
@@ -2454,6 +4310,10 @@ class WindowsMediaProvider:
         return score, f"{label_source} / {status or '-'} / {label_title} / {label_artist} / {position_seconds:.1f}s/{max(0.0, duration_seconds):.1f}s"
 
     async def _read_visual_data(self) -> IslandVisualData | None:
+        task = asyncio.current_task()
+        if task is not None:
+            task._gluspot_interruption_read = bool(getattr(self, "_interruption_controller_enabled", False)
+                or getattr(self, "_interruption_session", None) is not None)
         cache_lock = getattr(self, "_music_cache_lock", None)
         if cache_lock is None:
             cache_lock = self._music_cache_lock = threading.RLock()
@@ -2484,7 +4344,8 @@ class WindowsMediaProvider:
         source_app = self._source_app_name(session)
         read_at = time.monotonic()
         # External playback has one authority: the Windows media session.
-        # Never inspect player processes, windows, UIA or saved app profiles.
+        # Artwork may read a matching NetEase queue URL below, independently
+        # of progress. Never inspect player windows/UIA or enable an adapter.
         source_app_foreground = False
         player_adapter = "system"
         player_position_reader = None
@@ -2584,6 +4445,12 @@ class WindowsMediaProvider:
         previous_position = max(0.0, float(previous_track.position_seconds)) if previous_track is not None else 0.0
         previous_duration = max(0.0, float(previous_track.duration_seconds)) if previous_track is not None else 0.0
         preserve_previous_lyrics = bool(same_track_as_previous and previous_track is not None and previous_track.timed_lyrics)
+        art_key = self._artwork_track_key(title, artist)
+        artwork_track = player_window_track
+        netease_artwork = self._is_netease_source(raw_source_app)
+        if artwork_track is None and netease_artwork and title and artist:
+            artwork_track = self._system_netease_artwork_track(title, artist, duration_seconds)
+        queue_url = str(getattr(artwork_track, "album_art_url", "") or "").strip()
         with cache_lock:
             if epoch != int(getattr(self, "_music_cache_epoch", 0)):
                 return None
@@ -2592,15 +4459,38 @@ class WindowsMediaProvider:
             )
             # These cache reads only schedule network work. A refresh from
             # before clear cannot start a download in the new cache epoch.
-            original_album_art = self._queue_album_art_bytes(player_window_track) if player_window_track is not None else b""
-            online_album_art = self._current_online_album_art_bytes(track_key)
+            if queue_url.startswith(("http://", "https://")):
+                lookup_lock = getattr(self, "_current_art_lookup_lock", None)
+                if lookup_lock is None:
+                    lookup_lock = self._current_art_lookup_lock = threading.Lock()
+                with lookup_lock:
+                    urls = self.__dict__.setdefault("_current_art_url_by_track_id", {})
+                    sources = self.__dict__.setdefault("_current_art_lookup_sources", {})
+                    queue_urls = self.__dict__.setdefault("_current_art_queue_urls", {})
+                    changed = queue_urls.get(art_key) != queue_url
+                    if changed:
+                        queue_urls[art_key] = queue_url
+                        urls[art_key], sources[art_key] = queue_url, "netease" if netease_artwork else "player"
+                        getattr(self, "_current_art_lookup_generations", {}).pop(art_key, None)
+                        getattr(self, "_current_art_lookup_inflight", set()).discard(art_key)
+                        getattr(self, "_current_art_lookup_failed_until", {}).pop(art_key, None)
+                    while len(queue_urls) > 64:
+                        queue_urls.pop(next(iter(queue_urls)))
+                    while len(urls) > 24:
+                        removed = next(iter(urls))
+                        urls.pop(removed)
+                        sources.pop(removed, None)
+                if changed:
+                    log_artwork_event("lookup", art_key, "netease-queue", 0, "ready")
+            original_album_art = self._queue_album_art_bytes(artwork_track) if artwork_track is not None else b""
+            online_album_art = self._current_online_album_art_bytes(art_key)
         # The configured player's original-art URL may disappear from its
         # window reader when focus moves away.  Keep the current track's
         # already-decoded source bytes rather than replacing the sharp cover
         # with a smaller Windows media thumbnail on the next refresh.
         retained_album_art = (
             previous_track.album_art_bytes
-            if same_track_as_previous and previous_track is not None
+            if previous_track is not None and self._same_track_metadata(previous_track, title, artist)
             else b""
         )
         album_art = self._preferred_album_art_bytes(original_album_art, retained_album_art)
@@ -2612,11 +4502,13 @@ class WindowsMediaProvider:
         album_art_source = ""
         if album_art:
             if album_art == original_album_art:
-                original_url = str(getattr(player_window_track, "album_art_url", "") or "").strip()
-                album_art_source = "thumbnail" if self._album_art_url_is_preview(original_url, album_art) else "original"
+                original_url = str(getattr(artwork_track, "album_art_url", "") or "").strip()
+                album_art_source = "thumbnail" if self._album_art_url_is_preview(original_url, album_art) else (
+                    "netease-original" if netease_artwork else "original"
+                )
             elif album_art == online_album_art:
-                source = str(getattr(self, "_current_art_lookup_sources", {}).get(track_key, "") or "")
-                online_url = str(getattr(self, "_current_art_url_by_track_id", {}).get(track_key, "") or "")
+                source = str(getattr(self, "_current_art_lookup_sources", {}).get(art_key, "") or "")
+                online_url = str(getattr(self, "_current_art_url_by_track_id", {}).get(art_key, "") or "")
                 album_art_source = "thumbnail" if self._album_art_url_is_preview(online_url, album_art) else (
                     f"{source}-original" if source else "original"
                 )
@@ -2628,22 +4520,51 @@ class WindowsMediaProvider:
                 return None
             if album_art:
                 album_art_source = "thumbnail"
+                smtc_signature = (art_key, hashlib.sha256(album_art).digest())
+                if smtc_signature != getattr(self, "_last_smtc_artwork_log", None):
+                    self._last_smtc_artwork_log = smtc_signature
+                    log_artwork_event("smtc", art_key, "thumbnail", self._album_art_min_side(album_art), "preview")
         if 0 < self._album_art_min_side(album_art) < self.CURRENT_ART_PREVIEW_SIDE:
             album_art_source = "thumbnail"
         # Keep the reference's async 1200-pixel lookup trigger separate from
         # original-source completion. It is neither a decode nor a UI gate.
-        if self._album_art_min_side(album_art) < self.CURRENT_ART_LOOKUP_SIDE:
+        first_seen = self.__dict__.setdefault("_current_art_first_seen", {})
+        first_seen.setdefault(art_key, read_at)
+        queue_grace = netease_artwork and not queue_url and read_at - first_seen[art_key] < 1.0
+        while len(first_seen) > 64:
+            first_seen.pop(next(iter(first_seen)))
+        if self._album_art_min_side(album_art) < self.CURRENT_ART_LOOKUP_SIDE and not queue_grace:
             with cache_lock:
                 if epoch != int(getattr(self, "_music_cache_epoch", 0)):
                     return None
                 self._schedule_current_netease_art_lookup(
-                    track_key, title, artist, album_title=album_title, duration_seconds=duration_seconds,
+                    art_key, title, artist, album_title=album_title, duration_seconds=duration_seconds,
                 )
         album_art_lookup_state = self._current_artwork_lookup_state(
-            track_key, album_art,
+            art_key, album_art,
             eligible=bool(getattr(self, "_online_current_art_lookup_enabled", False) and track_key and title and artist),
             online_art=online_album_art, source=album_art_source,
         )
+        display_signature = (art_key, hashlib.sha256(album_art).digest(), album_art_source, album_art_lookup_state)
+        if display_signature != getattr(self, "_last_display_artwork_log", None):
+            self._last_display_artwork_log = display_signature
+            log_artwork_event("display", art_key, album_art_source,
+                              self._album_art_min_side(album_art), album_art_lookup_state)
+        # A newly recovered original is fresh evidence after both lookups
+        # missed. Reopen only this song's terminal miss, once at this edge.
+        if (same_track_as_previous and previous_track is not None
+                and not previous_track.timed_lyrics and previous_track.lyrics == ("暂无歌词",)
+                and not lyrics_match.timed_lyrics and not lyrics_match.lyrics and not lyrics_lookup_pending
+                and album_art and album_art != previous_track.album_art_bytes
+                and "original" in album_art_source
+                and (not previous_track.album_art_bytes or "original" not in previous_track.album_art_source)):
+            with cache_lock:
+                if epoch != int(getattr(self, "_music_cache_epoch", 0)):
+                    return None
+                _lyrics_lookup_started = self.lyrics_store.resolve_in_background(
+                    title, artist, album_title, duration_seconds, retry_missed=True,
+                )
+                lyrics_lookup_pending = _lyrics_lookup_started
         album_color, secondary_color = self._colors_from_art(album_art, fallback_track.album_color, fallback_track.secondary_color)
         timed_lyrics = lyrics_match.timed_lyrics
         lyrics_source = lyrics_match.source
@@ -2859,6 +4780,9 @@ class WindowsMediaProvider:
             return None
         if epoch != int(getattr(self, "_music_cache_epoch", 0)):
             return None
+        if duration_seconds <= 0.0:
+            # NetEase's SMTC timeline can be empty: use the song's own length.
+            duration_seconds = self._netease_exact_cached_duration(title) or duration_seconds
         self._provider_status = "ready"
         track = TrackData(
             title=title or fallback_track.title,
@@ -2888,6 +4812,7 @@ class WindowsMediaProvider:
             album_art_lookup_state=album_art_lookup_state,
             source_app_id=raw_source_app,
         )
+        await self._bind_capture_session(session, track)
         with cache_lock:
             if epoch != int(getattr(self, "_music_cache_epoch", 0)):
                 return None
@@ -3529,6 +5454,8 @@ class WindowsMediaProvider:
             ("kuwo", "酷我音乐"),
             ("douyin", "汽水音乐"),
             ("qishui", "汽水音乐"),
+            ("applemusic", "Apple Music"),
+            ("apple.music", "Apple Music"),
         )
         for token, name in aliases:
             if token in lowered:

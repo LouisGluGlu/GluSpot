@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from http.client import IncompleteRead
 import unittest
 from unittest.mock import Mock, patch
 from urllib.request import Request
@@ -120,6 +121,16 @@ class OnlineArtworkTests(unittest.TestCase):
             self.assertEqual(fetch_online_artwork(original, raise_errors=True, target_side=320), self.content)
         self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list], [
             "https://p1.music.126.net/cover/x.jpg?param=320y320", original])
+
+    def test_timeout_and_incomplete_upgrade_still_try_exact_original(self):
+        original = "https://p1.music.126.net/cover/x.jpg?param=64y64"
+        for error in (TimeoutError(), URLError(TimeoutError()), IncompleteRead(b"partial", 20)):
+            with self.subTest(error=type(error).__name__):
+                opener = Mock()
+                opener.open.side_effect = [error, ArtworkResponse(self.content, url=original)]
+                with patch("api.online_music_artwork.build_opener", return_value=opener):
+                    self.assertEqual(fetch_online_artwork(original, raise_errors=True), self.content)
+                self.assertEqual(opener.open.call_args_list[-1].args[0].full_url, original)
 
     def test_library_and_search_thumbnail_do_not_download_the_player_original(self):
         original = "https://p1.music.126.net/cover/x.jpg?param=64y64"

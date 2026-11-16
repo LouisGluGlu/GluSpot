@@ -2,9 +2,9 @@
   <img src="assets/brand/gluspot-glu.svg" width="88" height="88" alt="GluSpot 标志" />
   <h1>GluSpot</h1>
   <p><strong>桌面上的一座音乐岛。</strong></p>
-  <p>从小岛到全屏，从耳机到多台音响。<br />让专辑、歌词和正在播放的音乐，融入你的 Windows 桌面。</p>
+  <p>歌在岛上停靠，词随鼓点涨落。<br />小到一枚胶囊，大到整片海。</p>
   <p>
-    <a href="https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.418">下载 6.418 · 安装程序 / 便携版</a>
+    <a href="https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.50">下载 6.50 · 安装程序 / 便携版</a>
     &nbsp; · &nbsp;
     <a href="https://github.com/LouisGluGlu/GluSpot/releases">发行记录</a>
   </p>
@@ -12,98 +12,76 @@
 
 <!-- GIF 01：安装循环动画。将 GIF 上传至仓库后，在此插入图片。 -->
 
-## 一座音乐岛，多种形态
+## 岛
 
-让音乐留在视线里，也给桌面留出空间。
+它可以漂在任何地方，也可以安静地靠岸。
 
-- **Free**：可自由拖动的悬浮岛，放在顺手的位置。
-- **Top**：贴合屏幕顶部，展开查看歌词与播放状态。
-- **沉浸栏**：融入任务栏，或与 MyDockFinder 的 Finder 栏配合显示。
-
-封面、歌词和状态在小岛中呈现，随使用场景切换形态。
+- **Free**：随手拖动，停在顺手的角落。
+- **Top**：贴住屏幕顶端，展开即见歌词。
+- **沉浸栏**：嵌进任务栏的空隙，或靠上 MyDockFinder 的 Finder 栏，从不挡住图标。
 
 <!-- GIF 02：岛模式。建议展示 Free、Top、沉浸栏的展开与收拢。 -->
-<img width="700" height="112" alt="GluSpot-install-loop" src="docs/media/installer-loop.gif" />
+<img width="700" height="112" alt="GluSpot 安装循环" src="docs/media/installer-loop.gif" />
 
+## 海
 
-## 窗口或全屏，四种听歌方式
+点开小岛，便是一整片海。窗口与全屏各有四种版式——**专辑封面**、**封面内歌词**、**封面外歌词**、**播放列表**——随宽度从容收放。
 
-想看封面，或想跟着歌词唱，都可以换一种布局。
+海平面背景从封面取色，光随鼓点起落；歌词逐字读亮，译文与粤拼并行；控件是透光的 Liquid Glass。
 
-
-| 样式 | 展示内容 |
-| --- | --- |
-| **专辑封面** | 把画面留给当前专辑 |
-| **封面内歌词** | 歌词叠映在专辑封面中 |
-| **封面外歌词** | 左侧专辑，右侧歌词 |
-| **播放列表** | 左侧专辑，右侧播放列表 |
-
-四种样式用于窗口与全屏，随可用宽度适配。Liquid Glass 控件搭配专辑取色动态背景，逐词读亮、译文与括号和声也有各自的呈现。
-<img width="960" height="548" alt="GluSpot-install-loop" src="docs/media/player-layouts.gif" />
+<img width="960" height="548" alt="GluSpot 窗口与全屏" src="docs/media/player-layouts.gif" />
 
 <!-- GIF 03：窗口 / 全屏。建议展示四种布局切换、歌词与动态背景。 -->
 
-## 多台设备，一起播放
+## 声
 
-支持**兼容 AirPlay 的 Wi-Fi 音频设备**，也可与电脑本机、有线或蓝牙输出组合，进行多设备同步播放。在设备面板中选择参与播放的设备，分别调整音量。
-
-设备兼容性与实际同步效果因设备组合和网络环境而异。
+本机、耳机、HomePod 与其他兼容 AirPlay 的音箱，可以单独响起，也可以一起合唱，每一台各有自己的音量。
 
 <!-- GIF 04：多设备同步。建议展示设备加入、退出及独立音量调整。 -->
 
-## 选择你的播放来源
+## 源
 
-### 程序内播放
+**在岛上听**：登录后浏览、搜索、收藏与播放。
 
-在 GluSpot 中登录、浏览音乐库、搜索歌曲并播放，目前已支持：
-
-| 音乐平台 | 当前跟进状态 |
+| 平台 | 状态 |
 | --- | --- |
-| **网易云音乐** | 全程跟进测试，持续改进 |
-| **QQ 音乐** | 已支持，后续按需跟进与改进 |
-| **酷狗音乐** | 已支持，后续按需跟进与改进 |
+| **网易云音乐** | 全程跟进，持续打磨 |
+| **QQ 音乐 / 酷狗音乐** | 可用，按需跟进 |
+| **Apple Music** | Windows 11 伴随程序，见 [说明](docs/apple-music-companion.md) |
 
-<!-- Login screenshot omitted: contained an authentication QR code. -->
+<img width="918" height="371" alt="音乐库" src="docs/media/music-library.png" />
 
-<img width="918" height="371" alt="image" src="docs/media/music-library.png" />
+**听你习惯的播放器**：GluSpot 跟随系统媒体会话，为它配上封面、歌词与进度。网易云桌面版可开启**精确进度**，按歌曲 ID 取官方歌词与原图封面，两边拖动进度互相跟随。
 
-
-目前仅网易云音乐经过全程跟进测试，其他平台的实际体验仍需继续验证与完善。
-
-### 系统音频抓取
-
-继续使用你习惯的播放器，由 GluSpot 跟随系统音频与播放信息，展示封面、歌词和播放状态。该模式依赖外部播放器的系统媒体支持，整体体验略逊于程序内播放。
+**内外播放打断**（默认关闭）：后开始的音乐优先，只暂停已确认的音乐，不碰视频与游戏。规则见 [t260](docs/playback-interruption-t260.md)。
 
 <!-- GIF 05：播放来源。建议展示平台选择、登录及音乐库。 -->
 
-## 私人漫游，也有私人 DJ
+## 私人 DJ
 
-<img width="205" height="207" alt="image" src="docs/media/personal-dj-ready.png" />
-<img width="207" height="199" alt="image" src="docs/media/personal-dj-active.png" />
+<img width="205" height="207" alt="私人 DJ" src="docs/media/personal-dj-ready.png" />
+<img width="207" height="199" alt="私人 DJ 播报" src="docs/media/personal-dj-active.png" />
 
-
-**网易云音乐私人漫游已适配私人 DJ 功能。** 开启后，歌曲与播报随漫游播放衔接，让听歌多一点陪伴。
+网易云私人漫游里，歌与歌之间有人轻声说话。播报时，岛上的小脸会眨眼、会笑。
 
 <!-- GIF 06：私人 DJ。建议展示私人漫游中的播报及状态反馈。 -->
 
-## 开始听歌
+## 开始
 
-适用于 **Windows 10 1809+ / Windows 11 x64**。
+**Windows 10 1809+ / Windows 11 x64**
 
-- **安装版**：运行安装程序，支持原目录覆盖升级并保留配置。
-- **便携版**：完整解压后运行 `GluSpot.exe`，配置默认保存在程序旁的 `GluSpot` 文件夹。
+- **安装版**：一路下一步，原目录覆盖升级，配置与账号都在。
+- **便携版**：完整解压后运行 `GluSpot.exe`，配置留在程序旁的 `GluSpot` 文件夹。
 
-[下载 GluSpot 6.418](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.418) · [本版改进与验证记录](docs/homepod-pcm-backpressure-6.418.md) · [历史源码归档](docs/branch-archive-6.417.md)
+[下载 GluSpot 6.50](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.50) · [本版说明](docs/release-6.50.md)
 
-当前为 **6.418 未签名测试版**，已知限制与验证范围见本版记录。
-
-开发与维护信息见下方折叠文档。源码入口为 `local/main.py`；使用 `setup-env.bat` 准备环境、`launch.bat` 启动，完整测试命令为 `python -m unittest discover tests -v`，Windows 构建使用 `build-exe.bat` 和 `packaging/windows/build-installer.ps1`。
+当前为 **6.50 未签名测试版**，已知限制见本版说明。
 
 ## 开源许可
 
-GluSpot 自有代码与文档采用 [MIT License](LICENSE)，允许在保留版权及许可声明的前提下使用、修改和分发。第三方组件、字体与展示素材保留各自授权，详见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+GluSpot 自有代码与文档采用 [MIT License](LICENSE)。第三方组件、字体与展示素材保留各自授权，详见 [第三方声明](THIRD_PARTY_NOTICES.md)；安全问题请按 [SECURITY.md](SECURITY.md) 报告。
 
-公开历史已做个人路径脱敏；[开源准备记录](docs/open-source-2026-10-22.md) 与 [历史提交映射](docs/source-history-map.md) 保留验证和追溯方式。账号配置、日志及原始私有备份不随源码发布。
+开发与维护信息见下方折叠文档。源码入口为 `local/main.py`；使用 `setup-env.bat` 准备环境、`launch.bat` 启动，完整测试命令为 `python -m unittest discover tests -v`，Windows 构建使用 `build-exe.bat` 和 `packaging/windows/build-installer.ps1`。
 
 <details>
 <summary>维护者文档：产品规则、架构、构建与历史验证</summary>
@@ -112,9 +90,115 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
-- 2026-10-23：官网下载入口改为自动跟随 GitHub 最新公开 Windows Release，包含测试版；版本文字和两个下载链接共享结果。跳过草稿、纯源码与附件未传完的版本，查询失败时转到发行列表。当前为 6.418，旧演示素材的 6.417 来源记录保留。网站验证与部署记录见 [website/DEPLOYMENT.md](website/DEPLOYMENT.md)。
+- 2026-11-12: `local/liquid_glass_controls.py` is the reusable liquid-glass plate. One slider amount maps to blur (4 px to 23.5 px) and tint (15% to 60%), the old 0–75% span. The plate interior is an even blur and tint, and the bright edge sits on the bottom. Light tints white with black ink; dark tints black with white ink. The comparison demo calls it and does not replace the live controls. See `_demos/liquid_glass_compare/demo.py`.
+- 2026-11-12: Startup reads the saved `v2_location_mode` again (`finder`, `tasker`, `top`, `free`). `636a4f7` had frozen that key to `top`, and `9cff078` still did. Finder's compact music island stays the Finder bar height, the same rule as `9cff078`. A style-two broadcast whose Lottie view is not actually showing still paints the cover indicator; entering the speaking state is unchanged.
+- 2026-11-12: The Apple lyric switch is gone. Window, narrow and fullscreen lyrics keep the existing float, glow and wrap spring, and always use the Apple line gap plus per-word reading. The blurred neighbor column is not used. The scroll spring is stiffness 220 and damping ratio 1. A hidden style-two Lottie still paints the cover broadcast. Wide and fullscreen covers use the same left and top inset. Island height, cover and lyric size stay on the 9cff078 numbers (expanded music 176u, cover 58u). Finder and Tasker drags show the magnet tile even after the bar sets the mode to Free; Free itself does not. Liquid glass is a runnable comparison in `_demos/liquid_glass_compare/demo.py` and is not wired into the controls yet.
+- 2026-11-11: Window and fullscreen lyrics keep the existing per-word float, word glow and critically damped wrap spring, including when the Apple spacing and lead are on. The wide cover side is `37.8u` again. Transport, back, the top-right group and the heart/add capsule share one flat plate (white or black, thin edge, no candy highlight). Light and dark each store a 控件透明度. Sea level keeps the library dark, with separate sidebar, content and header tones. The magnet tile is only for Finder and Tasker. Narrow and wide windows use the same cover-ratio corner. No button regrouping or playback-mode change.
 
-- 2026-10-23：6.418 修复程序内同步输出的 PCM 拥塞断连。故障诊断确认由本地 `backpressure` 停止同步组，停止前 HomePod 的 34 次保活全部成功。取消与音频字节预算冲突的 64 块限制，采用四秒／705,600 字节有界待发队列；原生命名管道及共享 conditioner 逐级等待容量。最终 Qt 6.12 完整回归 5,775 项／378.497 秒完成（2 项可选截图未配置而跳过），12 项原生测试、215 项包审计和 10 个隔离安装场景通过。180.016 秒连续测试及第 95 秒注入的 2.6 秒 GUI 停顿通过，ZIP 全部 8,401 项通过 CRC／逐文件 SHA-256。安装版与便携包见 [v6.418](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.418)，6.417 保留。物理 HomePod 长时间听感与上游 Finder 卡顿仍待验。见[诊断、修复、文件哈希及验证记录](docs/homepod-pcm-backpressure-6.418.md)。
+- 2026-11-11: Style two plays one Lottie loop (`assets/broadcast/face.json`) through Qt 6 VectorImage: two rings fade outward while the eyes look side to side and blink. The face and rings use the opaque vivid album accent; the eyes stay white. It loops only while a broadcast is active, pauses otherwise, and enters or leaves with `WIDE_NARROW_SPRING` (damping ratio 1). Style one, buttons, glass grouping and playback modes are unchanged. See [_demos/broadcast_motion/README.md](./_demos/broadcast_motion/README.md).
+
+- 2026-11-11: The three visual choices are now the live defaults. Hiding the wide controls grows the side-lyric cover by about 11% (the lane-capped 30% request); the title lane keeps its width and moves down with the artwork, and the glass card stays on the resting boxes. Style two's round face uses the theme-colored body, with white eyes and the existing brightness ceiling. The standalone Apple lyric sample stays at neighboring lines 88%, blur 2.2, and 350 ms lead/scroll. No button, glass, playback-mode, version, or NetEase launch change. See [the adopted values](./_demos/par_decisions/README.md).
+
+- 2026-11-10: Three pending visual decisions now have named alternatives and reproducible real-widget comparison sheets: wide-G hidden cover targets, circular broadcast face bodies, and standalone Apple lyric presets. That note described the opt-in state before the 2026-11-11 choice. No button, glass, playback-mode or version change. See [options, exact values and offscreen renderer](./_demos/par_decisions/README.md).
+
+- 2026-11-10: `歌词与显示 → Apple 风格歌词` adds an opt-in music-page style, default OFF (`v2_music_apple_lyrics_enabled`). Window/fullscreen, external/cover and mounted narrow lyrics share it; compact-island lyrics keep their current renderer. The sheet still changes line at the next sung line's first unit (or line timestamp) minus 350 ms, including across inserted interlude dots. The scroll itself is the wide/narrow spring (mass 1, stiffness 220, damping ratio 1), replacing the old 350 ms smoothstep; `scroll_ms` stays in the knob pack but does not time the spring. The linear wipe retains each source unit's own clock. Window and fullscreen lyric pages stay on the album field in every interface theme; light and dark only recolor control buttons, and sea level keeps those buttons on the dark treatment. Island lyric words stay centered; the band's left edge still follows the album cover. Missing unit ends and equal-character line timing remain display estimates. `local/apple_lyric_style.py:AppleKnobs` holds the replaceable sample parameter pack, and `local/music_lyric_apple.py` reuses the product's layout, resize, seek and animation paths without a new timer or plugin. The standalone Apple sample is unchanged. Linux offscreen proofs and base comparison are recorded in the private integration handoff; Windows real-player/DPI acceptance remains unverified. No version/build, button, glass or playback-mode change.
+
+- 2026-11-10: GluSpot startup and background refresh no longer start, stop or restart NetEase. A saved `netease.transport=relaunch` is treated as attach: GluSpot connects only to a debug port that is already open, including a user-started port such as 4422, and otherwise keeps system-media capture and logs the miss. Restart happens only after the settings enable/repair click and its confirmation, and only when NetEase is already running. A failed explicit repair can still restore the player that restart itself stopped. No version, build, button, glass or playback-mode change.
+
+- 2026-11-10: Motion album covers play inside the existing rounded cover slot for every source. NetEase dynamic cover and Apple Music editorial video are queried together; the first valid video wins, the other is cancelled, and a miss keeps the static cover. Results, including misses, are cached for 12 hours. The 动态封面 setting defaults on. Playback is muted, looped, paused while hidden, and scaled to the slot. Real Windows playback and live catalog hits remain 未验证 in this environment.
+
+- 2026-11-10: Apple Music 用来源页登录、资料库、搜索、正在播放，以及网易云导入到 Apple Music 的歌单同步。播放和资料库走 Windows 11 上的官方页面伴随程序，不需要付费开发者令牌，也不复制 folia-major 的代码。同步先预览，确认后只加歌，不自动删除。反向同步的代码留着，窗口里默认不显示。歌单下拉框用来源页的扁平玻璃。真机上一轮编译通过，启动只返回 runtime 且进程不退出。验收脚本已改成带 BOM 的英文；启动失败会写下异常类型和消息再退出。登录、播放和写入仍未在修好后的版本上验证。后来的真机复测里，网页已登录但来源页停在「暂时无法连接」，登录日志是 `result=runtime`，伴随进程被重新拉起，`apple-music-companion.log` 没有生成。原因是当时只有初始化失败才写那份日志，而且登录等待用了普通请求超时。这一轮让登录单独等待、页面就绪后再发消息、窗口关闭和重新打开时刷新账号，并在伴随进程启动时先写 `started`。这些还没有在那台电脑上重跑。详见 [Apple Music 伴随程序](docs/apple-music-companion.md)。
+
+- 2026-11-04: t260 adds the default-OFF 内外播放打断 setting through the existing provider, capture, owned-player and settings paths. MUSIC classification gates both directions, including browser music; VIDEO/GAME/UNKNOWN stay inert. Automatic Pause uses observed start edges, guarded user intents and a temporary exact-session route without saving source settings or playback modes. NetEase fallback only reuses an already-ready CDP channel and a same-track Pause contract actually observed from the player and independently confirmed. All 82 new fake checks pass. The final Box isolated run covers 361 modules / 6,374 tests in 191.439 s, retaining t258's identical 52 failure / 48 error / 32 skip identities with zero new identities and unchanged source hashes. [Rules, extension points and verification](docs/playback-interruption-t260.md); full evidence is `/workspace/gluspot/handoff/t260/FINAL.md`. Real Windows SMTC/NetEase pausing 未验证; no version/build, push, main-branch or PC operation, plugin requirement or button/glass restyle.
+
+- 2026-11-04: t258/t259 synchronizes control color with the shared artwork/provider-color publication, including prefetched handoffs and same-track originals, and repairs live glass starvation after content-only paints. Current provider tones replace the previous artwork's pending palette; composite tint/refraction refresh only changed sampling regions under the existing 10 Hz budget and stop raster work when static. Button styles/grouping and t254/t256/t257 remain: all 168 island and 430 translation rasters match t257. The final Box isolated run covers 356 modules / 6,292 tests in 178.024 s with t250's identical 52 failure / 48 error / 32 skip identities, zero new identities and unchanged source hashes. [Root causes, timing, CPU and verification](docs/control-color-backdrop-t258.md); per-frame before/after strips and full evidence are `/workspace/gluspot/handoff/t258/compare.png`, `/workspace/gluspot/handoff/t258/backdrop-strip.png` and `/workspace/gluspot/handoff/t258/FINAL.md`. No push, main-branch or PC operation, version/build change or button/glass restyle. PC 未验证.
+
+- 2026-11-04: t257 routes the live narrow player's top-right island control through the existing island lifecycle instead of the study's wide/narrow toggle. Collapse publishes the remembered normal rectangle to the shared library/login/player geometry so island restore preserves a resized narrow or wide window; fullscreen keeps its normal rectangle and presentation preference. All 29 focused checks pass. All 168 island states match t254/t256, including 138 non-radio expanded states matching b4601bd; all 430 translation-toggle/reversal frames exactly match t256 with zero blank primary frames. The final Box isolated run covers 354 modules / 6,277 tests in 209.716 s, with t250's identical 52 failure / 48 error / 32 skip identities, zero new identities and unchanged source hashes; three native-incomplete modules were supplemented individually. [Root causes and verification](docs/window-island-restore-t257.md); before/after renders and full evidence are `/workspace/gluspot/handoff/t257/compare.png` and `/workspace/gluspot/handoff/t257/FINAL.md`. No push, main-branch or PC operation, version/build change or button/glass restyle. PC 未验证.
+
+- 2026-11-04: t256 removes window/fullscreen translation-toggle blank frames by retaining bilingual layouts, animating companion height/opacity for 320 ms with `cubic-bezier(0.28,0,0.72,1)`, and retargeting from the current pose. Same-track companion updates retain primary ink while rebuilding; cold pages reuse ready originals and replacement tracks cannot inherit old translations. All 430 final toggle/reversal frames have continuous primary ink and anchored current lines; eight initial rasters exactly match baseline. All 168 island states match t254, including 138 non-radio expanded rasters/geometry matching b4601bd. The final Box isolated run covers 353 modules / 6,270 tests in 184.448 s, with t250's same 52 failures / 48 errors / 32 skips, zero new identities and unchanged source hashes. [Root causes, frame metrics and verification](docs/translation-toggle-t256.md); full evidence is `/workspace/gluspot/handoff/t256/FINAL.md`. No push, main-branch or PC operation, version/build change or button/glass restyle. PC 未验证.
+
+- 2026-11-04: t254/t255 restores collapsed sea karaoke through the shared reading renderer, limits equal cover insets to collapsed islands and reverts standard/dual-panel/album/DJ-outro expanded geometry to b4601bd. All 138 non-radio expanded rasters exactly match baseline; 18 retained radio-control states use baseline ordinary-expanded slots. Loading and resize skeletons again animate until confirmed no-lyrics/instrumental or actual terminal failure, including explicit same-track reopening; cover-lyrics and instrumental-playlist ink remain continuous and skeletons never cover artwork. All 1,320 t227 mask frames pass. The final Box isolated run covers 352 modules / 6,260 tests in 173.057 s, with t250's same 52 failures / 48 errors / 32 skips, zero new identities and unchanged source hashes. [Root causes, reverts and verification](docs/island-lyrics-layout-t254.md); full evidence is `/workspace/gluspot/handoff/t254/FINAL.md`. No push, main-branch or PC operation, version/build change or button/glass restyle. PC 未验证.
+
+- 2026-11-10: library search keeps the 350 ms debounce, drops queued requests from the previous query, and paints matching library and queue rows before the network returns. Repeated result lists reuse the existing row widgets. Arrow keys move through the current results, Up recalls this session's queries, and matched text is highlighted. An unfinished search says it is still searching; a total failure with nothing to show offers retry. Result grouping for songs, albums, artists and playlists is not chosen; two runnable layouts are in `_demos/search_t110/`. No version, build, button style, glass grouping or play-mode change.
+
+- 2026-11-04: t237/t245 gives collapsed sea_level an opaque black now-playing pill, one bold white lyric/title line and exactly four rounded palette bars driven by existing real FFT data with quiet gating and 55/220 ms attack/decay. The original t245 shared geometry helper also changed expanded layouts; the t254 correction reverses that scope error and limits equal top/bottom/left cover insets to collapsed states; adjacent content avoids the enlarged cover and crowded native slots retain separate cover/play hits. Expanded sea and solid_album/system backgrounds are pixel-identical to HEAD `339ba5e` in 22 DPR 1/2 proofs. All 1,800 t217/t227 frames and 129 focused tests pass. The final Box isolated run covers 351 modules / 6,251 tests in 163.084 s, with 52 failures / 48 errors / 32 skips, zero new identities vs t234 and unchanged source hashes; two obsolete retired-style fallback assertions now follow the new compact plan. Paired full-paint median is 2.0970 → 0.4330 ms/frame; wave/bars 0.4957 → 0.0281. [Design choice and verification](docs/island-compact-bars-t237.md); full evidence, reference comparison and 31 annotated states are in `/workspace/gluspot/handoff/t237/FINAL.md`. No version/build, push, PC operation or unrelated button/glass restyle. PC 未验证.
+
+- 2026-11-04: t244 restores one clean island when MyDockFinder exits: Finder handoffs stop capturing/replaying old composite screenshots, invalidate queued t227 geometry, retire outgoing placement animations and settle the destination shell. Expanded state, existing native-mask restoration, personal-radio controls, idle-work caching, t238 cover-only rules and CLASSIC translation remain. Offscreen before/after exit sequences have zero stray pixels after the fix at DPR 1/2; all 1,320 available/unavailable t227 mask frames pass. The final Box isolated run covers 349 modules / 6,234 tests in 158.330 s, with exactly t234's 54 failure / 48 error / 32 skip identities, zero new identities and unchanged source hashes; two inherited native-incomplete modules were supplemented individually. [Root causes, mask contract and verification](docs/finder-exit-t244.md); full evidence is `/workspace/gluspot/handoff/t244/FINAL.md`. No version/build, push, PC operation or button/glass restyle. PC 未验证.
+
+- 2026-11-04: t243 repairs the prefetched-audio path that skipped current artwork upgrades, publishes one applied provider-selected track to island/window/library presentations, retires old window bitmaps on track publication, and bounds artwork/lyric/preparation delivery with retries and terminal thumbnail/placeholder or t238 cover-only fallback. Final Box isolated coverage is 348 modules / 6,229 tests in 159.775 s, with the same t238 54 failure / 48 error / 32 skip identities, zero new identities and unchanged source hashes; two native-incomplete modules were supplemented individually. Ordinary single-process discovery still native-crashes. [Root causes, offline PC-log interpretation and verification limits](docs/current-track-recovery-t243.md) distinguish reproduced defects from the unproven exact PC trigger; full evidence is `/workspace/gluspot/handoff/t243/FINAL.md`. No version/build, push, PC operation or button/glass restyle. PC 未验证.
+
+- 2026-11-04: t238 reuses the existing cover-only degrade path for terminal no-lyrics/instrumental tracks at every width, limits manual no-lyrics choices to cover/list, restores external lyrics unless list was manually retained, and keeps automatic choices out of settings. Loading is explicit and bounded to 30 seconds; loaded resize frames retain snapshots, and lyric ink/loaders cannot cross the current cover. Effective-layout chrome keys fix stale restore icons. Screenshot-derived classic-background evidence identifies gray domains as extracted neutral petals, with no confirmed palette/frosted bug. The final Box isolated run covers 342 modules / 6,186 tests in 251.835 seconds with the same 54 failure / 48 error / 32 skip identities as t234, zero new identities and unchanged source hashes; native-crashed modules were supplemented individually. [Causes, behavior and evidence limits](docs/music-no-lyrics-t238.md) record the work. No version/build, push or PC operation; PC 未验证.
+
+- 2026-11-04: t234 retains personal-radio ring navigation and expanded transport, correcting two stale test fixtures introduced by `b1095df`. Stable lyric measurement text now uses a bounded content/preparation cache with font/device-aware representative widths; hidden owners keep a low-rate provider/DJ/lyric clock and restore frame cadence on show. The final Box isolated run covers 340 modules / 6,171 tests with the same 54 failure / 48 error / 32 skip identities as t225 round two, zero new identities and unchanged source hashes. [Changes, CPU evidence and verification limits](docs/island-idle-work-t234.md) record the scoped work; wide background/repaint optimizations remain proposals. No version/build, push, PC operation or button/glass restyle; PC 未验证.
+
+- 2026-11-04: t225 round 2 implements the approved moderate sea response (rendered quiet 0.339 px, vocal 16.880 px, six-frame low onset 19.033 px), retaining the refined palette hairline; paired wave-paint CPU is below fee7410 in four offscreen cases. Finder/Tasker capsules now reuse the selected sea/solid/system background and contrast. A reproduced cached-loading-marker fallback after lyric preparation failure now exits the skeleton; this does not diagnose the supplied PC incident. `GLUSPOT_LYRIC_DEBUG=1` logs sanitized provider/preparation/resize/loader state and exit reasons. The final isolated run covers 337 modules / 6,145 tests (54 failures / 48 errors / 32 skips), with zero new identities vs 395d6ed; this is baseline equivalence, not a green suite. The five items are committed separately; [round-two evidence and limits](docs/music-surface-t225-round2.md) records proofs and verification. No version/build, push or PC operation; PC 未验证.
+
+- 2026-11-04: t225 round 2 restores CLASSIC song-page translations for unset, empty and unknown selectors. Explicit `GLUSPOT_TRANSLATION_VARIANT=a|b|c` retains the alternatives. Focused bilingual typography/paint checks and before/after offscreen renders verify the default; PC 未验证.
+
+- 2026-11-04: t225 round 2 / t227 prepares each Finder transition's actual spring geometry before queuing paint, uses that same lyric/layout snapshot for its tight native mask, clears damaged translucent pixels and keeps expanded content inside its shell. Live Finder no longer paints the legacy material cradle behind the music pill. `GLUSPOT_MASK_DEBUG=1` logs window/mask/painted bounds per frame. Focused frame, width-cutoff, material and notch checks pass; native Windows compositor behavior remains 未验证. No version/build, push or PC operation.
+
+- 2026-11-04: t225 restores only the expanded sea's `ebe525e` peak/vocal amplitude (quiet 0.340 px, held bass 7.697 px, vocal 9.583 px), removes the extra low-band punch and restores its original damage strip. A translucent palette hairline stays visible along the crest; rising accents add at most 1.2 logical units to the 1.0-unit base, with smooth endpoint taper and a 160 ms audio-clock EMA. Existing palette glow, shared cover motion and all t205–t222 lyric/layout/library/settings fixes remain. [t225 evidence](docs/island-sea-t225.md) records cover comparisons, measurements, CPU and isolated-suite verification. PC 未验证; no version/build, push or PC operation.
+- 2026-11-04: t229 restores the playing window/fullscreen's animated album-color background by giving that renderer its own `classic` default. Library/login retain `frosted`; explicit backdrop selectors and the other t214–t222 features remain. Exact ec89693/395d6ed offscreen comparisons show that the static default originated in t200, and do not reproduce shared lyric/palette worker suspension or the reported stuck PC lyric skeleton. Production-entry delayed-result/library/preview regressions and the verification limits are recorded in [t229 evidence](docs/music-surface-t229.md). PC 未验证; no version/build, push or PC operation.
+
+- 2026-11-04: t214–t222 embeds the real expanded island across the sidebar library footer, sharing live provider state, glass transport, selected ambience and cover flip; adds shared DPR-aware native/Qt resize edges to player/library/login; migrates immersive `fade` to `capsule` and paints cached settings thumbnails with current artwork and production background painters. Translation A was the default at that checkpoint (restored to CLASSIC in t225 round 2), composed with t205 full-height lyrics and cover compression. Collapsed pill growth reserves its native mask before paint, holds text until ready and shrinks the mask after the shell; exact-base frame proofs reproduce and remove the clipped background/rim/cover. [F–J evidence and limits](docs/music-surface-t214-t222.md) include library CPU overhead and inherited suite failures. PC 未验证; no version/build, push or PC operation.
+
+- 2026-11-04: t205–t211 removes the external lyric viewport's interior top/bottom cuts in both responsive window widths and fullscreen, with full-window ink and DestinationIn edge feathers through the existing glass/transport. Chrome retreats vertically along its own edge; wide cover, metadata and transport share the shrinking width budget with lyrics while retaining the previous breakpoint. Island sea adds low-band onset punches and larger absolute vocal swells, with a bounded one-second history drawing a saturated palette crest only on rising water. Window, fullscreen and island reuse the 640 ms cover projection/reflection; same-track artwork upgrades quietly crossfade. BOX renders, measurements, paired CPU proxies and baseline failure comparison are recorded in [t205–t211 evidence](docs/music-surface-t205-t211.md). PC verification 未验证; parent owns the single Desktop-launcher restart after commit. No version/build, provider, button style or glass grouping change.
+
+- 2026-11-04: `grok/translation-variants` adds `GLUSPOT_TRANSLATION_VARIANT=a|b|c|classic` for song-page bilingual typography and float. A was the default at that checkpoint; t225 round 2 restores CLASSIC for unset, empty and unknown values. A/B/C share existing translation layout, spring and cached paint components with distinct size, alpha, gap, blur and reveal timing; translation karaoke is disabled only in the variants. See [译文风格对比](#译文风格对比) for the offline comparison harness. No version/build or provider change.
+
+- 2026-11-04: t202 strengthens the island ripple with absolute centered 300–3400 Hz energy in every intensity mode, retaining 60/250 ms attack/release and near-calm quiet input. Compact and expanded sea now share the live Xiaomi primary, contrast lift and tinted crest. Track changes flip the visible cover in 640 ms using the existing perspective painter and island timer, with soft traveling crest/under-cover light. Same-track artwork upgrades retain the ongoing pose; hide/show clears it. Box amplitude, palette, transition, CPU and baseline test comparisons are recorded in [t202 evidence](docs/island-t202.md). PC verification 未验证; no version/build or PC operation.
+
+- 2026-11-04: t200 merges library variants `27f238a3` after Item 8 (`1e26cb8`). Library A-refined `sidebar` and shared backdrop variant 2 `frosted` are the defaults without environment flags. Library, A2 login and the main music surface retain the shared `artwork_surface_palette` / AlbumFlow path. Environment selectors retain alternate layouts/backgrounds and `classic` fallback. The t194 palette sea/audio glow, t195 runtime/QR availability and t196 URL-cover/unblur fixes are preserved. Box comparison and six requested proof frames are recorded in [t200 integration evidence](docs/library-sidebar-a-refined.md#t200-integration). No version/build, PC launch, completed login or player restart.
+
+- 2026-11-04: t196 item 8 gives system-capture NetEase artwork a matching queue URL before cloudsearch/CAA fallback, independently of the progress adapter. Downloaded covers of at least 320 px retain original provenance even when the CDN caps their size. Failed/missed previews display sharp; pending previews of at least 96 px stop blurring after 2.5 seconds. Stable title/artist artwork identity, per-track retries and flushed sanitized artwork logs replace the global NetEase cooldown. Source verification and remaining parent PC hi-res count/time-to-hi-res acceptance are recorded in [artwork recovery](docs/artwork-resilience.md#system-capture-url-priority--t196-item-8). No version/build, PC launch, completed login or player restart.
+
+- 2026-11-04: t195 merges `080741d` (`grok/login-variants`) after the t194 sea correction. A2 `sidebar` is the default source/login page, with a labeled wide sidebar, vertical narrow icon rail, green breathing account status dots and shared `GlassPushButton` capsules. The existing `e0ee9ca` runtime preparation, availability and QR begin/poll/cancel paths remain; unavailable sources stay dim and cannot paint armed rings in any layout. `classic`, B `focus` and C `hero` remain selectable as documented under [登录页布局对比](#登录页布局对比). No version/provider change, PC launch, completed login or player restart.
+
+- 2026-11-03: t194 corrects t179 item 7: the expanded island sea again uses the cover-extracted sea/Xiaomi primary, with an audio-thickened soft palette glow and a crisp lighter tinted specular crest. Dark colors receive a documented lightness/chroma lift. Three slowly drifting ripple components, 60/250 ms attack/release, wave-only damage and bounded high-DPI rendering remain. Owned PCM and the read-only output meter retain their provider boundary; resolved lyricless islands retain the cover presentation. Box proofs, paired CPU proxy and native limits are recorded in [Item 7 correction evidence](docs/capture-narrow-t179.md#t194-correction--palette-water-glow-thickness-and-tinted-specular-light). No version/build or PC launch.
+
+- 2026-11-03: t184 completes t179 items 2/6: a recovered original cover can reopen the same song's lyric miss while keeping temporary cover-only presentation without a skeleton or settings write. Wide chrome now releases stale glass after the current backdrop is published and participates in the ten-second drift check. Resting long metadata uses start-aligned right elision with cached rasters; shared lyric ink is neutral while word seeking and DJ accents retain their existing paths. Music-page tooltips use a scoped dark material. Focused checks and offscreen proofs, the parent-supplied all-three-platform QR proof and remaining native/full-suite limits are recorded in [t179 evidence](docs/capture-narrow-t179.md#t184-follow-up-items-2-and-6). No version/build or PC launch.
+
+- 2026-11-03: t179 item 1 redo restores the wide lyric column to its ordinary margins and original active-row anchor. The ink-only alpha mask now fades over one lyric row to the earliest transport/collection/expanded-DJ top, using a stable control envelope through hide/reveal and resize capture. Narrow keeps its existing reservation and veil. Three-panel offscreen comparisons and focused verification are recorded in [t179 evidence](docs/capture-narrow-t179.md#lyric-bottom-clearance-item-1); parent PC interim acceptance is pending.
+
+- 2026-11-03: t179 dims unavailable login tiles and suppresses armed rings, lets runtime preparation retain an explicit missing-Node-license notice after a download failure, synchronizes hidden chrome with artwork/palette changes and checks drift every ten seconds. Owned covers remain pending through bounded retries, with one extra attempt for network/timeout/incomplete transfers. Existing parent PC QR proof, Box checks and remaining limits are recorded in [t179 evidence](docs/capture-narrow-t179.md). No version, build or player restart.
+- 2026-11-04: Library A `sidebar` is refined around the three real catalog groups, section-aware pagination, an A2-sized vertical rail, plain collection content and a fully clickable mini bar. Login receives the library's asynchronously prepared `artwork_surface_palette`; no-track library/login use the music surface's shared neutral fallback. `sidebar` is now the library default following the t200 decision. The nine-frame review sheet, refreshed four backdrop sheets, feature map and 257 focused checks (two existing skips) are recorded in [A-refined evidence](docs/library-sidebar-a-refined.md).
+
+- 2026-11-04: `grok/library-variants` adds shared `GLUSPOT_BACKDROP_VARIANT=classic|flow|frosted|noir`. At that commit, classic remained the pixel-identical default; the three new static fields use saturated HSL palette mixing, a dark luminance envelope and deterministic dither/grain. Library, source/login/account and AlbumFlow music surfaces share the selector. Switching, four warm/red comparison sheets and focused verification are documented under [背景风格对比](#背景风格对比).
+
+- 2026-11-04: `grok/library-variants` adds selectable library A `sidebar`, B `listen`, and C `compact`, with `classic` retained as a fallback. The three layouts share login A2 glass/status icons and the existing catalog/search/playback contracts. Isolated 27-frame contact sheets, switching instructions and focused verification are documented under [音乐库布局对比](#音乐库布局对比); no version, provider, build or player restart.
+
+
+- 2026-11-03: t168/t169/t170 B accepts independently observed CEF seeks within 250 ms, permits a later explicit retry after completed unverified readback, and preserves uncertain-write blocking. Narrow wheel browsing clears only lyric-row blur for 350 ms; routine capture/library/DJ/output status no longer takes over content. Owned unit setup injects both decoders, and login shares dark glass with centered responsive QR/platform cards. Focused results, the native initialization cause, inherited fixture failures and pending PC acceptance are recorded in [B evidence](docs/music-surface-t168-t170-b.md). No version, build, player restart or live playback-mode change.
+
+- 2026-11-03: t173/t168/t171 removes the narrow background veil's repeated Python row/LUT work, bounds its source raster and uses one 33 ms live presentation clock. Resolved lyricless songs temporarily animate to cover while preserving the saved lyric layout; pending lyrics retain their loader. Narrow transport has a 24 px bottom margin, lyrics clear the header, inactive countdown dots disappear and repeat annotations stay below the primary line. Box callback/CPU evidence, focused verification and pending PC acceptance are recorded in [commit A evidence](docs/music-surface-t173-t168-t171.md). No version, provider or capture/seek change.
+
+- 2026-11-03: t165 follow-up lists NetEase/Kugou/QQ real account backends alongside disabled 即将支持 entries for Qishui/Spotify/Apple Music. Back/login follows the current platform even when another account is signed in. Settings reuses its controls under 账号与平台 / 播放与采集 / 歌词与显示 / 窗口与布局 / 高级, with a dark glass palette and no new settings migration. Platform matrix, compatibility and validation limits are recorded in [t165 evidence](docs/narrow-release-skeleton-t165.md).
+
+- 2026-11-03: t165/t166 routes the release music overlay through the same responsive Liquid Glass window as narrow-live, preserving saved layouts and real owner capabilities/lifecycle. Width motion fades lyric/list ink to current-width skeleton bars in 180 ms; after 150 ms quiet and final queued handoff it commits at most one lyric rebuild, then reveals live ink in 180 ms. The width style animation now uses 1.0–0.4 s. Verification and native PC limits are recorded in [t165 evidence](docs/narrow-release-skeleton-t165.md). No version or provider change.
+
+- 2026-11-03: t160 freezes the shared lyric column during live width motion and queued split/merge handoffs. A DPR-aware column snapshot preserves wrapping; after 150 ms quiet, equal wraps reuse their shaped rows and changed wraps rebuild once with a 140 ms column-only blend. Prepared veil and its sharp/tint source stay pinned until the same settle tick. Karaoke progress and lyric clicks pause during the freeze. Dual-DPR focused verification and physical acceptance limits are recorded in [t160 evidence](docs/lyric-resize-freeze-t160.md). No version, provider or transport change.
+
+- 2026-10-30: t156 replaces fixed backdrop shelves with a continuous masked veil, holds chrome visible during edge resize, and synchronizes artwork/lyric geometry through a queued width state machine. The content-derived mark 25, frozen gesture scale, 500–200 ms InOutCubic handoffs, four lyric shaping poses and cheap live-backdrop tint are implemented. Native probe readiness permits degraded attach without lyrics. Both DPRs pass 219 focused tests; full discovery still crashes in the library-header test. PC scripts are prepared and unrun; exact acceptance gaps are recorded in [t156 evidence](docs/narrow-t156.md). No version, provider or transport change.
+
+- 2026-10-29: t151u replaces the all-top chrome slots with independent wide utility circles, wide bottom-right collection/DJ, and two narrow glass capsules. A 420 ms phased resize merges utility outlines, moves collection/DJ through the right edge and grows the top capsule; owned Back stays independent. The t152 override keeps Translation in the right-aligned Device / Layout / Play order / Translation / Window size group, including the same shared narrow capsule, and preserves the dual-line settings path. Focused verification and PC preparation are recorded in [t151 evidence](docs/narrow-mega-t151.md); Windows physical acceptance is pending. No version, provider or transport change.
+
+- 2026-10-29: t149 completes cached chrome slide/stronger blur, shared singer tags, the Chinese popup summary, a font-shaped five-CJK/three-Latin-word breakpoint, and one low-perception reading path with lift fixed to the original 5.2. Exact staged-source tests pass for slide (56), singer (130) and width (65); reading/settings pass 483 focused checks plus 664 render checks at each DPR. The attach-only PC bundle is prepared but not run. Physical acceptance, inherited test failures and two plan inconsistencies remain explicit in [t149 evidence](docs/narrow-mega-t149.md). No version or provider change.
+
+- 2026-10-29: Narrow chrome keeps all controls on top except transport, and narrow/wide share all four content modes without changing selection on resize. With library back unavailable, collection reclaims the left slot and window-mode stays on the right; fixed top-left clicks cannot widen the view. The 46 focused layout/back/runtime tests and eight display-cache checks pass. Full discovery completes 5,792 tests with 26 failures, 36 errors and 31 skips; clean baseline discovery crashes in image decoding, preventing a complete comparison. Native PC checks and t140 breakpoint animation remain pending; see [cause, verification and PC handoff](docs/narrow-layout-back-handoff.md).
+
+- 2026-10-29: Narrow live highlighting switches immediately to the owner's current row, with a 280 ms position lead for CEF/playprogress. The existing provider's cached route also identifies CEF published as `capture-model`. Only fractional scroll eases with 120 ms tau; displacements of one row or more snap. Fifteen new lag regressions pass, including UIA/unavailable-source preservation and shared-clock checks. The unchanged older test requiring interpolation on a full-row change conflicts with this requested behavior; native NetEase ≤150 ms acceptance remains unverified. See [timing and verification evidence](docs/narrow-flicker-v2.md). No provider, packaging or version change.
+
+- 2026-10-29: Narrow flicker v2 caches a canonical static stanza separately from live ink, transforms its prepared veil during scroll, keeps viewport fading/dim fixed, caches opaque intro dots and clips bottom veil below the lyric viewport. Existing transport painting is unchanged. Five new render invariants and all 27 unchanged live checks pass; dual-DPR veil checks pass. The paired 480-frame offscreen capture reduces lyric builds from 128 to 15, but does not meet the requested MAD gates; physical PC acceptance remains unverified. See [implementation and measurement limits](docs/narrow-flicker-v2.md). No version bump or build.
+
+- 2026-10-29: Narrow v4 now settles first capture samples, commits track swaps atomically, reuses shared countdown circles/glass tint and centers the active slot at half height. Box evidence measures 0 px active-ink offset at 640/900, 0 settle interpolation/stale fixture frames, 0 wide countdown pixel differences across 60 frames and a 0.320 s reveal. Acceptance is incomplete: the preserved shared countdown produces 10–11 px dots against the requested 8–10 px gate, and native PC/live/CPU/auto-next/audio checks remain unverified. The 24 passing, three failing and four unverified Box acceptance rows (including active no-op and instrumented CPU misses), attach-only PC scripts and exact limits are recorded in [narrow v4 evidence](docs/narrow-v4.md). No version bump or build.
+
+- 2026-10-29: The shared narrow runtime is implemented with attach-only NetEase discovery and the existing owner, playback and lyric/seek paths. Three offscreen repetitions each passed 261 capture, 2 bootstrap/settings, 26 narrow live, 5 input and 25 layout checks; PC/live playback and physical flicker remain unverified. Initial full discovery reported 5,725 tests, 18 failures, 11 errors and 31 skips, including a subsequently corrected attach validator failure; the final rerun ended in SIGSEGV without a complete summary, so no clean full pass is claimed. See [shared-runtime scope and evidence limits](docs/narrow-shared-runtime.md). No version bump or new build.
+
+- 2026-10-29: Safe `--narrow-live` now discovers and attaches an existing NetEase debug endpoint through the shared `CaptureRuntime`, without relaunching the player. Unavailable progress freezes lyric following with a visible reason; asynchronous partial paints share the narrow window's 33 ms full-frame cadence. Each launch keeps a rotated `logs/NarrowLive-*.log`. Box regressions pass; fresh PC tests, the 30-second live trace and physical flicker/word-seek acceptance remain pending because no PC executor is exposed in this session. See [root cause, evidence and exact limits](docs/narrow-live-flicker.md).
+
+- 2026-10-29: NetEase relaunch incident correction adds a shared OS lock, a durable two-minute cooldown, healthy-port reuse and normal-start recovery for stop/spawn/startup failure or cancellation. Automatic retries cannot authorize another stop; reused players keep their current position. Box capture passes 244 tests; full discovery has the same 17 failures / 11 errors / 31 skips as baseline. Evidence is recorded in [the incident report](docs/netease-relaunch-incident.md). Fresh PC tests and the one approved relaunch/second-trigger check remain pending until the PC executor is connected. For ordinary narrow use, run `local/main.py --narrow-live` without the relaunch flag.
+
+- 2026-10-29: Source-only capture/narrow integration is isolated on `grok/capture-narrow-v4`, preserving `grok/capture` and `grok/narrow-v3`. The real-provider narrow entry is `local/main.py --narrow-live`; no release/version change. Fixture fade CPU passes the 15% gate at both DPRs, but the live performance gate, native PC tests, End/auto-next, real playback screenshots and the absent non-narrow drag target remain pending. The full Linux suite still has inherited failures. See [implementation, branch choice and exact verification limits](docs/capture-narrow4.md).
 
 - 2026-10-22：6.417 发布与主线整理。应用及构建输入保持已验收字节，仅更新发布说明；旧分支与未提交旧源码通过[归档索引](docs/branch-archive-6.417.md)保留 GitHub 记录。分支清理须在 Release 附件完整性和 main／开发分支一致性确认后执行，最终保留 main，版本为 6.417。
 
@@ -133,7 +217,7 @@ This README is the canonical product, implementation, release-readiness, and pen
 - 6.413 improves whole-song source coverage and shared per-row reading, repairs invisible search text and packages all accumulated desktop/playback changes. Final verification passed **5518 Python tests / 297.018 seconds**, 12 native suites, 2447 production-render checks at each DPR 1/2, 401 package checks, frozen EXE diagnostics, 14 offline adapter checks, 19 QRC fallback checks and ten isolated installer scenarios. All 8399 portable entries passed CRC/per-file SHA-256; 594 frozen inputs and previous distribution files remained unchanged. [Download the modern x64 Setup and portable ZIP](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.413); see [source, artifact hashes and verification limits](docs/lyric-word-timing-6.413.md). Real account coverage, physical-display smoothness and hardware listening remain unverified.
 
 - Product name: `GluSpot`.
-- Current test-build version: `6.418`. Its Setup and portable ZIP passed source, package and installer verification; download from [v6.418](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.418). The preceding `6.417` packages and source remain retained. See [the HomePod repair report](docs/homepod-pcm-backpressure-6.418.md).
+- Current test-build version: `6.50`. Its Windows file version is 6.500.0.0, so it sorts after 6.417. See [the 6.50 release notes](docs/release-6.50.md).
 - The October 19 lyric release packages the new credit cleanup, reliable interlude dots, QQ QRC and trusted-ID AMLL fallback in the modern Windows x64 Setup and portable ZIP. A packaging review corrected QQ's fallback to the pinned SDK's real `request` interface and verified it with the actual packaged dependency over loopback. Final verification passed **5443 Python tests / 287.814 seconds**, 12 native suites, 274 package checks, frozen EXE acceptance, 14 offline adapter checks and ten isolated installer scenarios; all 8399 ZIP entries passed CRC and per-file SHA-256. All 421 frozen source/build inputs remained unchanged, and previous dated releases are retained. See [artifacts, verification and usage](docs/windows-release-lyrics-2026-10-19.md). Real account coverage, physical-display smoothness and listening remain unverified.
 - The October 19 lyric-pipeline source follow-up expands evidence-based credit cleanup, adds display-only middle-gap dots from reliable real word endings, and obtains QQ QRC plus bounded trusted-ID AMLL TTML fallback without a new dependency. Raw lyrics, translation/romanization provenance, identity/version guards and existing provider/cache boundaries are retained. Final native Windows verification passed **5442 Python tests in 288.230 seconds**, 904 follow-up checks at each DPR 1/2 and 364 production-renderer frames per scale; all 386 frozen source files remained unchanged. Public fixed-ID QQ and AMLL read-only probes succeeded, while the existing QQ search entry missed the sample; account playback, long-session listening and physical-display smoothness remain unverified. Version and existing packages are unchanged. See [staged implementation, evidence and limits](docs/lyric-pipeline-2026-10-19.md).
 - The October 19 window-visibility release restores a proportionate **960 × 540 (16:9)** first player window, with 4:3 fallback for narrow work areas, while preserving manually resized windows and the **330 × 400** minimum. Completed compression clears inherited fullscreen/bar hiding state and restores the native island before aligning it to the cached preview, including formerly minimized windows. The production-credit cleanup/countdown option is removed and fixed on, including legacy disabled settings. Final verification passed **5310 Python tests in 276.895 seconds**, 542 related tests at each DPR 1/2, and six isolated native window lifecycle scenarios with 14 visible, non-minimized checkpoints. The new dated window-visibility Setup and portable ZIP passed 249 package checks, frozen EXE acceptance, 12 native suites, 14 offline runtime checks, ten isolated installer scenarios and all 8399 ZIP entries' CRC/per-file SHA-256 checks. All 397 frozen Python sources remained unchanged through packaging; the previous window-resize release is preserved. See [fixes, artifacts and verification](docs/window-visibility-and-release-2026-10-19.md).
@@ -215,9 +299,146 @@ For the optional online account adapters, install Node.js 20 or later with npm a
 
 The combined directory has its own Python environment and native HomePod helper under `build/native-airplay/`. Run its own `launch.bat`; the two original part directories are preserved. GluSpot's single-instance lock and user settings retain the normal product namespace, so exit an already running GluSpot before launching another source copy. Rebuilding the helper requires the toolchain documented in [native helper instructions](native/airplay_sender/README.md).
 
+### 译文风格对比
+
+启动前设置 `GLUSPOT_TRANSLATION_VARIANT=a`、`b` 或 `c`（不区分大小写）。未设置、空值或未知值使用 CLASSIC；`classic` 显式使用原有样式；每个音乐窗口创建时读取一次，不写入设置。主歌词仍使用现有布局与弹簧；非焦点双语行按方案轻微缩小。
+
+| 方案 | 译文字号 / 主字号基准 | 焦点 / 非焦点透明度 | 主行下方间距 | 译文模糊倍率 | 入场 / 透明度延迟 |
+| --- | --- | --- | --- | --- | --- |
+| A · Apple-Music-like | 0.50 | 0.30 / 0.18 | 0.30 × 主字号基准 | 1.00 | 0.40 s / 0.25 s |
+| B · NetEase-readable | 0.62 | 0.78 / 0.42 | 8 × 窗口缩放 | 0.50 | 0.32 s / 0 s |
+| C · Synthesis | 0.55 | 0.55 / 0.28 | max(4, 0.22 × 主字号基准) | 0.70 | 0.42 s / 0.08 s |
+
+三种方案均使用 Normal 字重、整行译文，不逐词读亮。字号基准为 `38 × surface_scale`；封面内歌词的主行 0.74 倍缩放不缩小译文字号。Classic 保留 `(38 - 6) × surface_scale × 0.5` 与原有逐词、间距及入场路径。
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_translation_variants.py
+```
+
+工具通过正式解析器与 Qt 绘制路径生成自写中英双语样本，隔离 APPDATA/XDG，使用 offscreen，不启动播放器。默认输出在 `/workspace/gluspot/handoff/translation-variants/`：`baseline.png`、`variant-A.png`、`variant-B.png`、`variant-C.png`、`shots/` 与绘制报告。每张含 433×550 / 960×540 的焦点与非焦点场景，以及 0/80/160/280/480 ms 浮动序列。t225 round 2 按用户选择恢复 CLASSIC 默认；这些是离屏方案比较，实际桌面动画验收另行进行。
+
+当前默认使用 `classic`；A/B/C 保留为显式环境变量选项。与精确 `ec89693` 的窄／宽双语图、A 参数／入场／关闭译文卡拉 OK 检查、旧默认测试的修正与完整 discovery 基线比较，见 [t214–t222 证据](docs/music-surface-t214-t222.md)。整个项目仍有继承的测试失败；PC 未验证。
+
+### 背景风格对比
+
+启动前设置 `GLUSPOT_BACKDROP_VARIANT=classic|flow|frosted|noir`。未设置时，播放窗口/全屏使用动态 `classic`，音乐库与登录页使用静态 `frosted`；空值或未知环境值仍回退到 `frosted`。显式选择对所有页面生效，与布局选择互相独立。
+
+| 风格 | 效果 | 对比图 |
+| --- | --- | --- |
+| `classic` | 原 AlbumFlow 与原有深色遮罩，保持既有像素与动画 | `backdrop-baseline.png` |
+| `flow` | 专辑取色的柔软多团流体渐变，明亮色团之间保留深色空间 | `backdrop-1.png` |
+| `frosted`（音乐库/登录页默认） | 近黑磨砂场，左上方一团柔和取色光晕与细微颗粒 | `backdrop-2.png` |
+| `noir` | 近乎纯黑，仅保留极淡取色暗角，优先文字对比 | `backdrop-3.png` |
+
+音乐库与登录窗口支持 `window.set_backdrop_variant("flow")`，`window.backdrop_variant` 可读取当前风格；renderer 也支持相同 setter，或 `AlbumFlowBackgroundRenderer("flow")`。setter 规范化空白与大小写，无效名称抛出 `ValueError`，`None` 恢复环境变量选择。共享解析函数为 `local.backdrop_variants.resolve_backdrop_variant()`。切换不替换账号、二维码、歌单或播放状态。
+
+三个新风格均为静态：以尺寸、取色／覆盖权重和风格缓存不超过 256×256 的栅格，不使用时间桶、后台像素任务或新时钟；音乐库在这些风格下停止背景动画计时器。登录仍固定 `t=0` / intensity=0，通过 `backgroundPaletteChanged` 接收音乐库已准备的 `artwork_surface_palette`（含 ambient weights）；播放器已有的歌词／界面时钟照常运行并复用静态背景。色团沿最短 HSL 色相弧混合，彩色颜料的饱和度限制为 0.72–0.88，灰度封面保持中性；线性光亮度限制与稳定有序抖动／细微颗粒避免脏灰混色和色带。新风格的库／登录遮罩减轻到 alpha 28，classic 的原遮罩及 `_paint_field_pixels` 保持原样。无歌曲时，登录和音乐库使用共享 `idle_surface_palette()`：与主播放页深色无音频状态相同的 `(44,44,44)` / `(14,14,14)` 来源色；主播放页浅色系统主题仍使用同一 helper 的浅色分支。登录不再另用 onboarding 色板，也不从头像取音乐背景色。
+
+同一 `AlbumFlowBackgroundRenderer` 覆盖全部音乐库布局、来源／登录／账号页，以及 `MusicSurfaceWindow._paint_background` 的窗口、全屏和经过该共享路径的窄屏播放页。首次使用的播放方式二选一页仍单独绘制黑色；岛态 `local/music_background_renderer.py` 的 Solid/Native 背景走另一条路径。演示若调用 AlbumFlow 也会读取环境变量；旧版安装资产导出脚本 `packaging/windows/prepare-installer-assets.py` 同样如此，已有安装资产与安装程序没有重新生成。
+
+`767eecc` 的历史验证：从起始提交 `b15f831652758a7f72f7716549ae6c3f44e7302a` 隔离加载原始 painter／窗口，与当时源码比较：两套取色、两种尺寸共 **4/4 原始栅格及 8/8 完整库／登录截图逐像素一致**。当时 **84 项聚焦测试通过**，涵盖选择解析、classic 冻结参考、静态缓存、颜色／亮度、旧任务拒绝、窗口 setter／生命周期、音乐播放页与已有库／登录布局。按本任务要求不运行全量测试。
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_backdrop_variants.py
+```
+
+交付目录 `/workspace/gluspot/handoff/backdrop-variants/` 包含上表四张 2866×1204 对比图，每张两行（暖棕／琥珀与鲜红封面），四列（音乐库 A 已加载 960×540 / 433×550，登录 A2 已连接 960×540 / 433×550）。只创建本地 `Trippin / Kara Marni` 与 `LouisHerm` 模型夹具；最新 A-refined 对比使用仓库本地 sunset_city 照片的暖／红双色调测试图；库和登录通过产品的 prepared-palette 接口使用同一组提取色与覆盖权重，不再改写登录的 `PALETTES`。这不是 Trippin 的真实发行封面，账号／歌单／曲名均为离线夹具。所有 Qt 设置／缓存目录均为私有临时目录，不创建 provider 或访问网络。
+
+该目录另有 `shots/`、`pixels.json`、`classic-parity.json`、`verification.log`、可重现脚本 `render_backdrop_variants.py` 以及记录最终提交哈希的 `README.md` / `FINAL.md`。源码脚本为 `tools/render_backdrop_variants.py`，支持 `--repo`、`--output` 与 `--variants`。离屏证据不代表原生 Windows 合成器或真实账号验收；本任务不改版本、不构建、不重启播放器、不推送。
+
+### 音乐库布局对比
+
+音乐库默认使用 A-refined `sidebar`；A / B / C 仅替换布局与绘制，继续使用同一账号、歌单、搜索、封面、分页与播放控制器。
+
+| 方案 | 标记 | 布局 |
+| --- | --- | --- |
+| A-refined | `sidebar` | 与登录 A2 共用轨道尺寸；三个真实分区过滤、宽屏稀疏封面／窄屏列表、整条迷你播放条可点；无内容玻璃套层与填充口号 |
+| B | `listen` | 大封面正在播放头图、胶囊搜索、带时间的细进度与分区横向歌单架 |
+| C | `compact` | 分段玻璃标签、紧凑歌单行与标题下细进度；窄屏标签收为图标 |
+
+启动前设置 `GLUSPOT_LIBRARY_VARIANT=sidebar`、`listen`、`compact` 或 `classic`。未设置、空值或未知环境值均回退到 `sidebar`。运行中调用 `window.set_library_variant("sidebar")`，读取 `window.library_variant`；setter 会规范化空白／大小写，无效名称抛出 `ValueError`。切换保留当前账号、歌曲、搜索编辑器、查询、结果与封面缓存。搜索清除／返回仍由控制器取消未完成的播放。
+
+三种方案共用 A2 平台玻璃按钮、22 px 品牌图标与已连接／未登录／错误状态灯；未适配平台无灯。搜索分别融入侧栏、头部胶囊与标签页，进度分别融入迷你播放条、头图与标题下细线。未更改版本、设置文件、provider 或播放器生命周期。
+
+初版离屏对比覆盖每种方案的 960×540 / 433×550 / 391×508，以及已加载／加载中／空音乐库，共 27 张真实 Qt 窗口截图。初版图使用本地渐变测试封面、`AccountSnapshot` / `LibraryCollection` / `TrackData`，临时 APPDATA/XDG，不创建 provider 或访问网络：
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_library_variants.py
+```
+
+证据目录为 `/workspace/gluspot/handoff/library-variants/`：`variant-A.png`、`variant-B.png`、`variant-C.png`（每张三列尺寸、三行状态），单图位于 `shots/`，可独立运行的脚本副本为 `render_variants.py`。离屏证据不代表 Windows 合成器与真实账号验收；本任务未构建发行包。
+
+A-refined 的当前交付为 `variant-A-refined.png`（三列尺寸 × 已加载／加载中／空音乐库），已加载行依次展示 `for_you` / `recommended` / `personal`，各帧保留 `LouisHerm` 与 `Trippin` 迷你条。脚本改用仓库已跟踪的本地照片／音乐图片，未声称它们是 Trippin 的官方封面；产品仍只通过 `artworkNeeded` 接收封面，缺图为平台图标。重现：
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_library_variants.py --refined
+```
+
+当前功能证据、共享色板生命周期、聚焦验证结果及离屏限制见 [A-refined evidence](docs/library-sidebar-a-refined.md)。以下 99 项是初版布局的历史验证。
+
+针对性验证：`tests.test_library_layout_variants` 的 12 项与现有 `test_music_library_window`、`test_music_library_header`、`test_music_library_search`、`test_library_horizontal_catalog`、`test_library_navigation`、`test_music_library_background` 的 87 项合计 **99 项通过 / 7.670 秒**，包含 27 组离屏状态与 classic 往返、搜索返回取消、封面、播放信号和分页检查。编译与 `git diff --check` 通过，完整命令与输出位于证据目录的 `verification.log`。按本任务要求使用针对性测试，不要求全量测试通过。
+
+### 登录页布局对比
+
+`PlaybackEntryWindow` 的音乐来源页默认使用 A2 `sidebar`，并保留 `classic`、`focus`、`hero` 可选。选择只影响登录页，无需写入设置。
+
+| 方案 | 标记 | 布局 |
+| --- | --- | --- |
+| A2（默认） | `sidebar` | 宽屏左侧带名称的平台栏；窄屏左侧垂直图标栏；账号／扫码／错误详情始终在右侧 |
+| B | `focus` | 紧凑图标切换胶囊，居中突出账号或扫码卡片 |
+| C | `hero` | 本地头像柔化色彩背景、平台状态列表与内嵌详情卡片 |
+
+启动前设置 `GLUSPOT_LOGIN_VARIANT=sidebar`、`focus`、`hero` 或 `classic`；未设置、空值或未知环境值均回退为 `sidebar`。运行中调用 `window.set_login_variant("classic")`，读取 `window.login_variant`；无效的 setter 参数抛出 `ValueError`。切换保留当前二维码、账号与信号接口；未适配平台仍不可选择，宽屏显示“即将支持”，窄屏保持垂直暗化图标与完整提示。
+
+支持的平台使用 7 px 状态灯：已登录为柔绿，未登录为暗灰，账号或登录错误／过期为静态柔红；未适配平台没有灯。状态按平台记忆，切换不清除其他账号的已知状态；未知账号默认未登录。绿灯以 2 秒周期在 0.55–1.0 不透明度之间呼吸，独立 90 ms 时钟仅请求按钮内约 11×11 px 的脏区。来源页隐藏、退出或无可见绿灯时停止；背景仍是原有静态有界栅格。侧栏、详情与胶囊操作复用 `paint_liquid_glass` / `GlassPushButton`，账号按钮不再添加品牌色描边样式表。
+
+A2 离屏对比使用真实窗口与本地测试头像、测试二维码图案，覆盖 960×540 / 433×550 / 391×508 的已连接、等待扫码、错误状态。重现命令：
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_login_variants.py --a2
+```
+
+提交的脚本为 `tools/render_login_variants.py`，默认从 `/workspace/gluspot/wt-login-variants` 导入，强制离屏并使用私有临时 APPDATA/XDG 目录；支持 `--repo` 与 `--output`。交付副本为 `/workspace/gluspot/handoff/login-variants/render_variants.py`；不加 `--a2` 仍可重现 A/B/C。截图不纳入 Git：
+
+- A2 三列三行：`/workspace/gluspot/handoff/login-variants/variant-A2.png`
+- A2 绿灯最低／最高相位裁图：`/workspace/gluspot/handoff/login-variants/variant-A2-pulse.png`（直接推进实际绿灯时钟，3 倍最近邻放大）
+- A2 单图：`/workspace/gluspot/handoff/login-variants/shots-a2/sidebar-{960x540|433x550|391x508}-{connected|waiting|error}.png`
+- A2 验证日志：`/workspace/gluspot/handoff/login-variants/focused-a2.log`
+
+A2 的 179 项聚焦测试通过（2 项因固定版本 QQ SDK 不可用而跳过），覆盖来源窗口／控制器、登录恢复与取消、布局和共享玻璃控件。状态灯测试验证两秒相位、仅绿灯变化、其他来源账号记忆、错误优先、脏区更新、静态背景和隐藏生命周期。
+
+- A：`/workspace/gluspot/handoff/login-variants/variant-A.png`
+- B：`/workspace/gluspot/handoff/login-variants/variant-B.png`
+- C：`/workspace/gluspot/handoff/login-variants/variant-C.png`
+- 单图：`/workspace/gluspot/handoff/login-variants/shots/{sidebar|focus|hero}-{960x540|433x550}-{connected|waiting|error}.png`
+
+A/B/C 初版曾通过 112 项来源窗口、控制器、平台与布局测试；当时经典布局在两种尺寸、三种状态下与 `1246878` 基线逐像素一致（6/6）。A2 修改了所有方案的操作按钮材质与状态可访问名称，该历史像素比较不适用于 A2。离屏证据仅验证布局与交互，不代表真实账号登录或原生桌面显示验收。
+
+A/B/C 初版完整发现运行 5,955 项（181.900 秒），54 失败、48 错误、31 跳过，来源／布局测试无失败；18 个受影响模块在 `1246878` 临时源码副本中分组复验（658＋540 项），复现全部 54 失败／48 错误。完整日志为 `/workspace/gluspot/handoff/login-variants/full-suite.log`，后一组基线日志为 `baseline-remaining.log`。完整运行期间新测试的屏幕替身缺少 `geometry()`，曾触发其他遗留窗口的计时回调异常；已补全替身接口并重跑最终 112 项通过，产品代码未因该测试夹具修改。A2 按本次要求运行聚焦验证，不重跑完整发现。
+
+t195 integration onto `f2e1188` merges exact `080741d`, preserving the existing
+runtime preparation, availability and QR controller/bridge files. Unavailable
+source dimming and ring suppression now cover all five paint styles. Python
+compilation and 274 focused login/bridge/runtime/navigation checks complete
+with zero failures/errors and four environment skips (PowerShell, prepared QQ
+runtime and two pinned SDK checks). Evidence is under
+`/workspace/gluspot/handoff/t179/t195-login-focused.json/log`.
+
+Merged full discovery completes 6,013 tests with 55 failures, 48 errors and 32
+skips. Relative to Job A's 54 failures, the extra priority-glow budget case
+reproduces 3/3 on exact `f2e1188` and 3/3 on the merged tree with identical test
+and renderer bytes: real cold tick costs exceed its 3.2 ms budget. All other
+failure/error and skip identities match. This is a known timing-sensitive
+fixture limit; no whole-branch green suite is claimed. See
+`t195-full-final.json/log`, `t195-full-comparison.json` and `t195-glow-reproduction-summary.json`
+under the same handoff directory. Current synthetic UI proofs are in
+`t195-login/`; reproduce with `tools/render_login_variants.py --repo
+/workspace/gluspot/grok-integrate4 --output /workspace/gluspot/handoff/t179/t195-login --a2`.
+No live login, credential operation, NetEase restart or PC launch was performed.
+
 ## Windows Test Build
 
-The 6.418 test packages use the PyInstaller `onedir` build with the preceding release's Qt 6.12 runtime. The dated HomePod PCM Setup and portable ZIP are saved in `release`; download from GitHub Release v6.418. The layout keeps Qt plugins, fonts, icons, data files, licenses, and local lyrics beside the executable.
+The 6.50 test packages use the PyInstaller `onedir` build. The Setup, portable ZIP and source archive are saved in `release` and published in GitHub Release v6.50. The layout keeps Qt plugins, fonts, icons, data files, and local lyrics beside the executable.
 
 The modern runtime targets **Windows 10 1809 or later, x64** (or Windows 11). Its existing packages do not support Windows 7/8.1. A separate **Windows 7 SP1 x64 compatibility candidate** uses Python 3.8 / Qt 5 and program playback only, with unavailable SMTC capture/publication and default local output. Its build, OS-update prerequisites and actual acceptance limits are recorded in the [Windows 7 report](docs/windows-7-compatibility-2026-10-17.md). An installer that opens on an older system does not establish that its application can run there.
 
@@ -230,7 +451,7 @@ Build from the project root:
 Expected output:
 
 ```text
-release\GluSpot-6.418\GluSpot.exe
+release\GluSpot-6.50\GluSpot.exe
 ```
 
 The package is an unsigned internal test build. It does not include Steamworks ownership validation and should not be treated as a public release artifact.
@@ -241,18 +462,174 @@ After building the application, create the custom per-user installer with Inno S
 & packaging/windows/build-installer.ps1
 ```
 
-The build produces `release\GluSpot-6.418-Setup-x64.exe`. It offers a dedicated installation directory and a Windows uninstall entry. Higher-version upgrades preserve settings and accounts in the sibling `GluSpot\` data directory; same/lower versions require overwrite confirmation and are rejected in silent mode. Registered installations upgrade in their original directory. The installer stops only a running executable whose resolved path matches that exact target directory; other copies are preserved. Interrupted upgrades restore the previous binaries. Full uninstall clears owned configuration, accounts and caches while preserving unrelated files. See [the current installer storyboard and acceptance evidence](docs/installer-storyboard-and-song-collection-2026-10-16.md).
+The build produces `release\GluSpot-6.50-Setup-x64.exe`. It offers a dedicated installation directory and a Windows uninstall entry. Higher-version upgrades preserve settings and accounts in the sibling `GluSpot\` data directory; same/lower versions require overwrite confirmation and are rejected in silent mode. Registered installations upgrade in their original directory. The installer stops only a running executable whose resolved path matches that exact target directory; other copies are preserved. Interrupted upgrades restore the previous binaries. Full uninstall clears owned configuration, accounts and caches while preserving unrelated files. See [the current installer storyboard and acceptance evidence](docs/installer-storyboard-and-song-collection-2026-10-16.md).
 
 Fresh frozen copies keep their own data beside the executable and show first-use choices even if another copy has existing AppData settings. Source checkouts retain their established data locations. Both playback choices default on and at least one must remain selected. First use is a black expanded island, accepting the installer's final physical bounds through a checked monitor/DPI handoff. Program playback opens the existing source/login page; closing it returns to the waiting island. A verified active MyFinder bar selects Finder Bar; otherwise the initial waiting placement is Top. Existing configured installations keep their saved playback choices.
 
 The legacy Qt 5 variant always enables program playback and disables system capture, including stale saved selections. Switch local output in Windows; unsupported explicit endpoint actions are disabled in its device list. It is separate from the modern release and still requires real Win7 installation, login and playback acceptance.
 
-The `GluSpot-6.418` directory is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
+The `GluSpot-6.50` directory is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
 
 Known Windows test-build caveats:
 
 - PyInstaller reports optional missing modules from Unix-only Python paths, NumPy/Pillow optional helpers, and setuptools internals; these are expected in a Windows GUI package unless a runtime feature proves otherwise.
 - Existing packages may contain optional UIAutomation dependencies from earlier builds. The current application does not initialize message detection; a future packaging dependency cleanup is separate from this source change.
+
+## Experimental external capture (grok/capture)
+
+The capture PRD is being implemented in isolated steps. `v2_capture_position_enabled`
+defaults to `false`; enabling it is an explicit development opt-in. With it off,
+the established external SMTC path and dormant legacy adapters are unchanged.
+The new platform-neutral `api/capture` contracts separate position observations,
+seek acknowledgements and optional calibration. Only `api/providers.py` wires
+these components into the V2 app. Windows dependencies must remain lazy and
+mockable; no release version or package is changed by this work.
+
+Implementation: steps 1–6 complete behind the flag. Auto capability dispatch
+uses AUMID / exact process basename and requires no saved path. New
+`v2_capture_app_profiles` modes (`auto`, `smtc`, `hybrid`, `off`) isolate rollout
+and preserve explicit overrides; migration happens only after opt-in. Legacy
+false/empty-path defaults migrate to auto; their manual-intent ambiguity and
+the new explicit off override are documented. Verified seek uses independent
+readbacks, optional single-attempt STA UIA fallback, optimistic rollback and
+failure feedback. Diagnostics report event rate/delay, correction and seek/UIA
+metrics. See [architecture, configuration, tests and Windows acceptance limits](docs/capture-position.md).
+Serialized mock timeline traces exercise projection, pause, seek, clock jumps
+and track changes; these are not live Windows recordings. Native player tests
+and multi-hour soak remain pending; this experiment is not a release claim.
+
+The NetEase P0/P1 follow-up adds an independently disabled CEF route using
+**transport A only**: GluSpot starts/restarts `cloudmusic.exe` with a random
+loopback debugging port. Nothing is written into NetEase's install directory.
+NetEase 3.1.42 has one native callback slot per event: the first `appendRegisterCall`
+creates a websdk stub via `registerCallAdapter` and displaces the native UI
+callback. Before injection, `registerCallMap` had no entries for
+`audioplayer.onPlayProgress`, `audioplayer.onPlayState`, `audioplayer.onLoad` or
+`audioplayer.onEnd`. Captured events alone therefore cannot prove safe capture.
+NetEase's UI receives these events through a separate native path. The
+load-time path registers a document-start shim with CDP, reloads the page once,
+and observes the registration method before NetEase registers its UI callbacks. It
+wraps matching event handlers in place, calls NetEase first with `Reflect.apply`,
+and records caught events and the registration path/method for the probe.
+User-supplied document-start discovery on the user's PC (3.1.42) found
+`channel.registerCall` registering PlayProgress, PlayState and End, with no Load
+in an eight-second boot window; `appendRegisterCall` was unused and the map
+stayed empty. **PlayProgress is required for readiness; PlayState, End and Load
+are optional.** Global assignment and `Object.defineProperty`/`defineProperties`
+installation are observed; a boot scan revisits assigned methods/children for
+at most five seconds or 100 ticks. Detach clears only GluSpot forwarding,
+so NetEase's original handler continues to run.
+
+The late fallback adapter must never call `appendRegisterCall` or
+`registerCallAdapter`. It may only chain an existing callback in an already
+populated `registerCallMap` queue with a callable `registerCallStubs` entry.
+The progress queue is required; absent optional queues are skipped, and every
+present queue must pass preflight before any mutation. The original callback
+runs first with the same `this` and arguments, preserving its return value and
+errors; observer errors are swallowed. Close restores the original slot
+descriptor, and reinstall is idempotent. Without an established chain, return
+`api:false` with health reason `native-callback-chain-unavailable` and use the
+existing fallback: a nonzero SMTC timeline, UIA progress, then basic capture.
+
+Ordinary pushed progress stays capped at 10 Hz, with immediate track/state/seek
+events and no progress polling. Ratios 0 or 1 cannot infer duration; an already
+known duration from prior progress or an explicit Load field is retained.
+Seek retains `channel.call('audioplayer.seek', callback, [trackId, uniqueSeekId,
+seconds])` and the existing independent physical-readback state machine.
+The stdlib WebSocket client adds no package dependency. See the [NetEase
+configuration, safety limits and existing-port probe](docs/capture-position.md#netease-cef-experiment-transport-a).
+With an established chain, the probe samples ten seconds, attempts three clamped
+seeks and restoration, and prints a final JSON summary. Reports must include
+original callback counts, whether the chain is intact and whether physical
+playback is advancing; auto-next remains unverified unless checked on device.
+This source experiment changes no release version or package. No live acceptance
+is claimed.
+
+### Current lyric wiring
+
+
+Capture wrap audit (2026-10-29): the user accepted `fbe1afa` precise progress,
+NetEase own seek and GluSpot word-click seek. Fresh Box capture repetitions pass
+**226 × 3 / 11.534, 11.589, 11.713 s**; focused lyric/seek/UI passes
+**25 / 1.347 s**. No playback timeline target exists in the island/music surface
+at this source; the only duration strip is the explicitly excluded display-only
+`LibraryProgress`. Identifying a different control or adding a non-narrow strip
+awaits the user's scope answer. Fresh PC ×3 and End/auto-next remain unverified:
+this session has no PC connector. See the [wrap audit](docs/capture-position.md#capture-wrap-audit--2026-10-29).
+
+
+The October 29 seek investigation hardens the document-start shim and adds
+flushed capture-seek decisions to the normal `GluSpot-*.log`. The relaunch route
+uses its selected random port; `8178` and `39222` are observations from separate
+sessions. The saved `d6818ce` probe on `:8178` moved playback through the native
+seek call, but did not validate NetEase's own UI or GluSpot gestures. The current
+repair still requires PC repetition and all three live checks. See
+[causes, verification limits and restart/re-test steps](docs/capture-position.md#seek-recovery-investigation-2026-10-29).
+Box verification: **226 capture tests × 3** pass (11.620 / 11.480 / 11.415 s),
+plus **68 focused tests / 1.539 s**. Full discovery completes **5,691 / 154.171 s**
+with exactly the same 26 failures, 11 errors and 31 skips as unchanged `d6818ce`
+(5,667 / 154.863 s). The library progress strip has no seek handler; the reported
+drag control remains to be identified. PC/live acceptance is pending.
+
+The existing opt-in flags bind `CaptureRuntime` to the selected NetEase session
+and its load-time CEF source. `CaptureRuntime.project` publishes real progress as
+`capture-model` through the provider and `_apply_visual_data` into the island and
+music-surface line/word clocks, retaining the existing 300 ms lyric hysteresis.
+The surface uses its painted text layout to hit-test source-timed words, including
+uniquely aligned inline backing vocals. Missing or unalignable unit timing keeps
+the line-start fallback. After applying the lyric offset once, a click follows
+`seek_playback_position(seconds, expected_track_id=...)` → capture runtime →
+`CefSeekBackend` with physical readback. Painted/pressed track and source guards
+and the existing provider fence reject stale clicks.
+
+Enable it at **设置 → 媒体控制 → 播放来源 → 网易云精确进度（实验） → 启用并重启网易云**
+after the confirmation. This explicit action enables system capture as part of
+the same opt-in and keeps the transport relaunch-only. Program-owned playback
+keeps priority while it has an active track; turn off **程序内播放** in the
+same playback-source card to follow NetEase. This wiring does not attach to an
+already-running `:39222` session.
+
+Box verification at `3fb11d0`: **206 capture tests × 3** pass
+(10.443 / 10.358 / 10.994 s), and **376 focused tests** pass (14.931 s),
+including fullscreen lyrics and word seek. Ordinary full discovery completes
+**5,667 tests / 158.517 s**, with the same **26 failures, 11 errors and 31 skips**
+as baseline `a3ffe79` (5,656 tests / 156.886 s); failure/error identities match
+exactly. Earlier native GC crashes and corrected fixture/timing races are
+recorded in the [verification notes](docs/capture-position.md#current-lyric-wiring).
+PC verification at `32fee94` on `E:\grok-gluspot\_wt_capture2` with
+`E:\gpt-island\.venv\Scripts\python.exe` (native Windows Qt): capture discovery
+**206 tests × 3** pass (**15.634 / 15.603 / 15.364 s**), then tip `34d1907` /
+`25388d2` re-checks pass **206 / 14.430 s** and focused lyric/seek/UI
+**21 / 1.673 s** (`tests.test_music_lyric_seek`, `tests.test_capture_lyric_integration`,
+`tests.test_capture_netease_ui`). Earlier tip `888bfd5` focused the same three
+modules at **19 / 1.893 s**. Live CDP on existing `:39222` (media-play +
+Page.reload approved; hook `load-time-native-chain-v1`) passed: **77 samples /
+10 s ≈ 7.7 Hz**, seeks readback **6 / 3 / 0 ms**, restore **35 ms**, native
+`PlayProgress` **+614** during sampling, `callback_chain_intact` true. Full
+GluSpot UI lyric follow + click-word was **not** exercised end-to-end here
+(does not write the user's real settings); after enabling the consent path above and
+disabling program-owned playback if it holds the track, watch window/fullscreen
+highlights and click one later timed word.
+
+Non-invasive hook verification (2026-10-28): the final capture suite passed
+**203 tests × 3** on Linux offscreen (9.948 / 10.227 / 10.004 s), with zero failures,
+errors or skips. Tests cover channel installation by definition/assignment,
+no-Load activation, missing-progress refusal, bounded discovery, single-slot
+displacement, safe existing chains, exact restoration and cleanup races.
+PC repetitions and real playback/lyrics/auto-next remain pending; see the
+[offline evidence and device checklist](docs/capture-position.md#non-invasive-hook-verification-2026-10-28).
+
+Recorded Linux offscreen verification (2026-10-28), predating the conservative
+callback-chain requirements above: baseline `a69e740` **5,544
+tests / 149.938 s**; NetEase P0/P1 source `33d4d72` **5,625 tests / 158.407 s**.
+Both report **17 failures, 11 errors and 31 skips**, with all 28 failure/error
+identities unchanged. All **172 capture tests pass / 4.422 s**, including 81
+added for P0/P1. Earlier full attempts encountered a native Qt image-decode
+crash; UI test helper imports now wait for `QApplication`, and the final run
+used the standard discovery command. The precise Qt/Python lifetime cause is
+unproven. Compilation and whitespace checks pass. Inherited failures and
+Windows acceptance limits remain documented in the [capture report](docs/capture-position.md#netease-p0p1-verification-2026-10-28).
+No EXE was built or pushed.
 
 ## Guardrails
 
@@ -298,13 +675,13 @@ GluSpot is a Windows music island with program playback, optional system capture
 
 The music surface should feel like a compact live object: album art, playback controls, lyrics, and album-color ambience remain readable in compact, expanded, Finder, Free, and Tasker placement modes.
 
-Lyrics use a shared per-row display plan: genuine words, genuine multiword segments, display-only estimated words, or whole-line fallback. Actual word and segment anchors remain unchanged; only the interior of a measured phrase or a safe real LRC interval is estimated. Both `金标读字` and `低感知方案` can advance word by word without a fixed half-second whole-line sweep. Synthetic rows and ordinary tail rows without a safe end retain whole-line fallback. Estimates are never persisted or used as reliable interlude/highlight evidence. Window, fullscreen, cover/external lyrics and island consume the same plans and actual playback clock. Gold reading retains its existing gold ripple feedback; no badge or new control is added. See [6.413 source, timing and verification](docs/lyric-word-timing-6.413.md).
+Lyrics use one shared low-perception reading path: genuine word and segment anchors remain unchanged, with the existing safe display-only estimates and whole-line/block fallback. Gold reading and its decorative ripple are removed. Reading lift is fixed to the original `GLYPH_FLOAT_LIFT = 5.2` (former level 4), and per-word click seeking is preserved. Window, fullscreen, cover/external lyrics and island consume the same plans and actual playback clock. Retired strategy/lift settings are filtered by the established loader; this task does not migrate a real settings file. See [t149 source and evidence](docs/narrow-mega-t149.md).
 
 ## Settings Surface
 
 The full-screen and windowed music pages share compact circular controls: audio output, content layout, owned playback mode when applicable, translation and the existing window/island destination. Function buttons and expanded panels use the supplied Liquid Glass direction: the real album-scene crop, Gaussian blur, mild theme tint and a soft rounded rim. All function glyphs and output-panel foreground use one black/white decision from the whole scene's occupied area; song changes interpolate that decision and extracted accents over 0.36 seconds. The infinity sweep uses extracted accent and this decided ink. The output button retains the confirmed device glyph; groups show one or two representative glyphs and their total playback count. Opening the chooser expands that control into its first device row, then the full list, at the same top/right anchor. Closing reverses the spring; adjacent controls stay visible until the menu finishes closing. No confirmed route retains the original output link. Selected or connecting targets sort first, preserving order within both buckets and postponing movement during volume dragging. Translation follows the existing dual-line setting and island view; enabled uses the shared 文/A symbol over the translucent face. Playback mode uses the supplied loop/shuffle/single-song SVGs and saved player state. Dimensions, gaps, idle-hide motion, hit targets and snapshot transitions remain shared. Owned songs also expose top-left music-library navigation.
 
-The layout button between playback mode and devices is single-click only, with no picker or context menu. The available width beside the actual artwork, gutters and readable side-column text determines whether the two-column layouts fit; a fixed 640-pixel cutoff is no longer used. Narrow windows toggle cover only and cover lyrics. Crossing into sufficient space automatically promotes those layouts to cover plus playback queue and external lyrics respectively; once wide, all four layouts can be selected by single click. Shrinking maps external lyrics to cover lyrics and the queue to cover only, with two side-edge flashes. The first player window defaults to 960 × 540 (16:9), fitting smaller work areas proportionately with a 4:3 fallback when needed; saved manual dimensions are retained. Window resizing keeps both dimensions adjustable with a 330 × 400 logical-pixel minimum. At that minimum, further inward dragging previews Free-island compression with white edge gradients; reaching half the minimum width or height commits at the preview position, while an earlier release rebounds. Cover lyrics keep actual timed lyric/translation/seek behavior under a black translucent lower gradient; the queue layout's left cover has no lyrics. Queue rows are fenced by the displayed queue generation; wheel and pixel scrolling retain bounds, and each song change centers the current row. Visible rows request bounded thumbnails after painting through the provider, with current/next artwork priority, retries and a shared compressed-byte cache. Download and decoding stay outside paint. Cover lyrics retain translation through control reveal/hide, while external lyric ink and blur extend to the real window bounds without hard internal side cuts. See [corrected playlist flow, responsive boundaries and verification](docs/library-playlist-and-window-boundaries-2026-10-15.md).
+The layout button between playback mode and devices is single-click only, with no picker or context menu. The available width beside the actual artwork, gutters and readable side-column text determines whether the two-column layouts fit; a fixed 640-pixel cutoff is no longer used. Both narrow and wide windows cycle all four layouts, starting with the current layout's pair; resizing preserves the selected mode without rewriting settings. A resolved no-lyrics/instrumental track automatically uses the existing cover-only layout until the user clicks Layout. During that contiguous no-lyrics run the button toggles only cover and list, and shows the effective mode. A following lyric track restores external lyrics for an automatic or manual cover choice, while a manual list choice stays list. Automatic degradation/restoration never saves a preference; an explicit new or same-track pending lookup restores temporary external lyrics unless playlist was manually retained. An unresolved lyric lookup draws the baseline skeleton after its existing one-second delay, including during drag/resize and on a new track following instrumental music. Unknown/loading is never a terminal miss: provider/preparation retry budgets own that decision, with no separate 30-second visual cutoff. Resolved lyrics retain the baseline finishing cycle; confirmed misses, pure music and exhausted terminal preparation failures stop it immediately. Width motion for lyric tracks restores the baseline lyric/list animated skeleton handoff; terminal no-lyrics playlists retain their snapshot, while loaded cover lyrics stay visible; all external lyric endpoints and skeletons exclude the current painted cover. Cover-only has no lyric column, lyric skeleton or lyric mask. When a side column does not fit, external lyrics and the queue use a stacked arrangement. The narrow live view retains its mounted full-height shared lyric renderer; cover, cover lyrics and queue use the shared surface painters. Narrow chrome keeps navigation, collection, devices, playback mode, layout, translation, window mode and optional DJ on top, with only previous/play/next below. The shared breakpoint now shapes a five-CJK/three-Latin-word requirement with a font-scaled deadband; artwork and chrome animate while lyrics reflow live. Native PC drag acceptance remains pending (t149). The first player window defaults to 960 × 540 (16:9), fitting smaller work areas proportionately with a 4:3 fallback when needed; saved manual dimensions are retained. Window resizing keeps both dimensions adjustable with a 330 × 400 logical-pixel minimum. At that minimum, further inward dragging previews Free-island compression with white edge gradients; reaching half the minimum width or height commits at the preview position, while an earlier release rebounds. Cover lyrics keep actual timed lyric/translation/seek behavior under a black translucent lower gradient; the queue layout's left cover has no lyrics. Queue rows are fenced by the displayed queue generation; wheel and pixel scrolling retain bounds, and each song change centers the current row. Visible rows request bounded thumbnails after painting through the provider, with current/next artwork priority, retries and a shared compressed-byte cache. Download and decoding stay outside paint. Cover lyrics retain translation through control reveal/hide, while external lyric ink and blur extend to the real window bounds without hard internal side cuts. See [corrected playlist flow, responsive boundaries and verification](docs/library-playlist-and-window-boundaries-2026-10-15.md).
 
 Title and artist automatically start a scrolling round trip every 15 seconds when they overflow their current slot. When pointer movement reveals controls, a field that still overflows scrolls once after reveal settles; a field now fitting waits until controls hide and scrolls if it then overflows. Both fields are independent; ordinary pointer movement does not repeatedly restart a trip. Window corners use the artwork radius with physical-pixel alpha coverage at fractional display scaling.
 
@@ -316,13 +693,13 @@ Private DJ belongs exclusively to NetEase personal FM; its saved toggle defaults
 
 Genuine introductions accompany automatic continuation and manual Next/Previous when supplied; single-song repeat repeats only music. The associated song's cover, metadata and lyrics switch immediately, with music playing at 20% of its prior gain beneath normal-gain speech. The cover alone stays visually small; speech end releases it and smoothly restores music gain over 1 second. Manual Next resumes a paused song. Current introduction loading/readiness or a bounded failure indicator reveals DJ independently of hidden controls. After successful final narration EOF, window/fullscreen DJ contracts to its compact icon over 0.32 seconds, stays independently visible for two complete idle cycles (5 seconds), then uses the existing hiding animation. Its status reports the immediate next song's actual introduction preparation; only complete valid unexpired cached parts qualify as ready. Pause, multipart loading, failure, cancellation and official auditions cannot trigger this completion outro.
 
-Island speech uses larger independent hollow rings with the title and artist directly on the existing ambience, growing the island to 112 logical units without a nested card or ball; Tasker retains its physical taskbar bounds. Visible genuine completion morphs rings and metadata into the normal expanded artwork/title/artist positions over 0.32 seconds, holds for 2 seconds, then collapses. Hidden surfaces do not replay an old completion on return. Island DJ color comes from the shared artwork characteristic role with contrast-aware neutral handling; side lightening is bounded against light/gray flat backgrounds so black/white/gray covers remain readable without an invented accent hue. Actual frequency energy drives the ring motion. Manual lyric browsing clears visible-row blur until selection or automatic focus returns. Both surfaces share the same provider/source identity, and whole-row horizontal lyrics use their own playback clock. See [latest behavior, verification and limits](docs/dj-outro-and-island-return.md), [voices and ducking](docs/dj-voices-hover-and-ducking.md) and [verified client contract](docs/personal-dj-client-contract.md).
+Collapsed island speech uses larger independent hollow rings with the title and artist directly on the existing ambience, growing the island to 112 logical units without a nested card or ball; Tasker retains its physical taskbar bounds. The rings reuse the normal artwork hover entry to the player window/fullscreen. Manual expansion retains the selected ambience and uses the normal expanded title/artist slots and transport controls. NetEase personal FM supports play/pause and Next; Previous appears only when its existing ordinary-song queue has history, including during narration. QQ/Kugou personal-radio equivalents are not currently implemented. Visible genuine completion morphs rings and metadata into the normal expanded artwork/title/artist positions over 0.32 seconds, holds for 2 seconds, then collapses. Hidden surfaces do not replay an old completion on return. Island DJ color comes from the shared artwork characteristic role with contrast-aware neutral handling; side lightening is bounded against light/gray flat backgrounds so black/white/gray covers remain readable without an invented accent hue. Actual frequency energy drives the ring motion. Manual lyric browsing clears visible-row blur until selection or automatic focus returns. Both surfaces share the same provider/source identity, and whole-row horizontal lyrics use their own playback clock. See [latest behavior, verification and limits](docs/dj-outro-and-island-return.md), [voices and ducking](docs/dj-voices-hover-and-ducking.md) and [verified client contract](docs/personal-dj-client-contract.md).
 
 The settings window has four pages:
 
 - Basic: light/dark/system/scheduled theme, startup, custom app icon and shared animation/lyric frame-rate and speed controls.
 - Media: persisted program/system sources and login, SMTC-only external listening with one global system lyric offset, the three island backgrounds and three lyric styles, music-page preload and secondary-content source/conversion. MyDockFinder exposes one monitoring switch for `dock.exe` / `Dock_64.exe`, separate read-only Dock/MyFinder status and current placement selection. The shared “沉浸栏样式” setting offers album with no background, fading background or colored capsule for both Finder Bar and Tasker Bar. Its preview follows the actual available owner; without an enabled Finder in a Dock environment the selector is disabled and its saved style is retained. “隐藏时跟随” defaults to enabled. Legacy executable/process fields remain migration data and cannot broaden detection.
-- Full-screen lyrics: gold/low-perception reading, lift, gradient width, the fixed 0.8-second sparse-highlight threshold and Cantonese secondary priority. Intro/production-credit cleanup and its existing three-dot countdown are always enabled, with no settings toggle; legacy disabled values migrate to enabled. These reading rules remain shared with the established music surfaces; gold mode is indicated only by the existing gold ripple.
+- Full-screen lyrics: one low-perception reading path, fixed original lift, gradient width, the fixed 0.8-second sparse-highlight threshold and Cantonese secondary priority. Intro/production-credit cleanup and its existing three-dot countdown are always enabled, with no settings toggle; legacy disabled values migrate to enabled. These reading rules remain shared with the established music surfaces. Gold and lift controls are removed; word-click seeking remains available.
 - About: provider diagnostics, local project location and background cache cleanup. Cover cleanup preserves playback, settings and device state. Online lyric cleanup preserves manual lyrics and offsets.
 
 Island typography, shell/expanded layout, global placement geometry/defaults, empty-bar geometry, album-cover sizes/spacing, background intensity/reactivity and bilingual/second-line-size settings are fixed to `DEFAULT_SETTINGS`. Older custom values migrate to those defaults and later visual-state exports cannot overwrite them. Current placement can be changed through the Media selector and established drag gestures; the mode is a runtime choice and is not persisted. The three immersive bar styles share the existing saved `v2_finder_bar_style` value across Finder/Tasker placement changes; Finder's horizontal drag ratio keeps its dedicated saved setting. These exceptions do not reopen global typography or geometry controls. The song-page translation button still changes the current session; the next launch starts with its fixed default. Playback sources, saved playback mode, login records, reading choices and MyDockFinder configuration remain configurable. Settings search indexes only the surviving widgets.
@@ -374,7 +751,7 @@ Legacy data classes, independent provider modules, assets and unit fixtures rema
 - The library keeps account identity beside a separate current album rotating once per 20 seconds during playback; pausing stops rotation, and clicking the album opens window mode without restarting music. Playlist selection keeps the last playback surface. Library/player navigation moves a separate cover and enlarges the background over 560 ms, reversing into the library album on return; bounded transparent UI snapshots avoid repeated scenery and per-frame capture. A playlist starts preparing its first valid catalog page immediately and fills remaining pages only after authorized audio is ready, preserving paused playback and listener queue insertions.
 - Search starts as the rightmost icon beside an independent playback progress bar. Its original editor expands left, reserving one 44-pixel progress ring; placeholder, input, selection and caret fade in after geometry settles. Clicking the ring reverses the same animation and preserves query, cursor, selection and undo. Hover does not replace search/progress content; Ctrl+F, Enter and existing clear-search cancellation remain. See [current behavior and evidence](docs/lyric-continuity-and-queue-artwork-2026-10-15.md).
 
-- Source selection, login/account and the signed-in library use blurred, refractive Liquid Glass, retaining their existing dark appearance. Source/login uses a frozen in-app backdrop. The library follows the current song's actual cover pigments with the shared bounded AlbumFlow renderer, smooth palette changes and existing animation settings; pause, hide, minimize, close and zero intensity stop its background timer. Without a song it returns to the static platform canvas. Clicking the selected source preserves the current login; Back cancels that login before returning to source selection. QR/state/actions remain contained on short displays. Current-platform library search supports Ctrl+F and a clear/return action that retires pending playback through the existing controller. DJ loading/readiness/failure messages share one rounded glass prompt with the existing right-side ring icon, following the song page's theme policy; clicking its text opens voice choices. Previous/play/next remain bare glyphs. See [home flow and DJ prompt](docs/home-liquid-glass-2026-10-15.md) and [current library, layouts and verification](docs/library-playlist-and-window-boundaries-2026-10-15.md).
+- Source selection, login/account and the signed-in library use blurred, refractive Liquid Glass, retaining their existing dark appearance. Source/login uses a frozen in-app backdrop. The library follows the current song's actual cover pigments with the shared bounded AlbumFlow renderer. The optional `classic` preserves smooth palette changes and existing animation settings; pause, hide, minimize, close and zero intensity stop its background timer. Default `frosted` (variant 2) and optional `flow` / `noir` fields are static and fully cached; see [背景风格对比](#背景风格对比). Without a song, library/login use the music surface’s shared static neutral palette. Clicking the selected source preserves the current login; Back cancels that login before returning to source selection. QR/state/actions remain contained on short displays. Current-platform library search supports Ctrl+F and a clear/return action that retires pending playback through the existing controller. DJ loading/readiness/failure messages share one rounded glass prompt with the existing right-side ring icon, following the song page's theme policy; clicking its text opens voice choices. Previous/play/next remain bare glyphs. See [home flow and DJ prompt](docs/home-liquid-glass-2026-10-15.md) and [current library, layouts and verification](docs/library-playlist-and-window-boundaries-2026-10-15.md).
 - The library starts with nonplayable folded cover groups for daily/FM picks, recommended playlists and personal playlists. Expanding a group reveals horizontal playlist covers; clicking a playlist starts its first song using the last exited island/window/fullscreen surface. The saved expand-all switch opens all groups without fetching their song lists. A selected group stays above smaller side-by-side folded peers; switching first collapses its row, then moves the new group upward and rearranges its peers. Wheel input moves playlist covers under a fixed group title. Search songs can still be inserted as the immediate next song while preserving current playback and the original queue. The three old library presentation selectors and duplicate source-switch/back icons are removed visibly. NetEase personalized and QQ hot recommended playlists use the pinned provider/bridge interfaces, with independent pagination, retry and stale-source fencing. Source/library handoffs use cancellable native snapshots and exclusive island visibility ownership.
 - Real media state comes from `WindowsMediaProvider`.
 - Program-owned playback publishes a GluSpot Windows SMTC session with title/artist/album/artwork, play state and the real song timeline. Windows media-panel/headset Previous, Next, Play and Pause commands reuse the existing owned transport; supported position requests use guarded seek. The session closes on stop, source disable and exit, and is excluded from external-player capture. The source-less muted WinRT session publishes controls only; Qt remains the audio/output authority. See [native interface evidence and verification](docs/windows-smtc-owned-playback.md).
@@ -386,9 +763,9 @@ Legacy data classes, independent provider modules, assets and unit fixtures rema
 - Production credits use explicit-field evidence and conservative leading-block expansion. Long bilingual roles and old NetEase JSON headers are cleaned without treating arbitrary colon prose, singer labels or unrelated JSON as credits. Window/fullscreen, cover/external lyrics and the island share display-only cleanup; a fully removed metadata payload uses the existing no-lyrics state.
 - Intro dots retain the existing 5-second rule. Middle gaps appear only when retained, genuinely timed vocals prove more than 3 seconds of silence, including sustained overlaps, duets and backing vocals. Ordinary LRC and unknown ends do not create estimated middle/tail gaps. Dots follow the actual playback position through pause, seek and song changes, and are rebuilt after display-preference changes without touching raw rows or persistent caches.
 - QQ now obtains and independently decodes online QRC through the existing verified platform path, retaining LRC fallback. AMLL TTML is a bounded exact-platform-ID fallback after existing sources; manual lyrics retain precedence. Owned playback publishes official lyrics before a low-priority backup lookup. Identity/version/duration checks and request generations reject unrelated or obsolete results, while failures preserve established lyrics. Cross-source companions require compatible original text and clocks; raw QRC/TTML/NetEase variants and bounded companion provenance survive cache reload and translation/romanization changes. No new runtime dependency or bundled lyric database is introduced. See [staged changes, source conditions and verification](docs/lyric-pipeline-2026-10-19.md).
-- External playback uses Windows SMTC only, without player-window, UIA, progress-plugin or app-path listening. The visible settings retain one global system lyric offset. Legacy adapter helpers remain dormant compatibility code; program-owned source providers remain independent.
+- Default external playback uses Windows SMTC for metadata and timing, without player-window, UIA, progress-plugin or app-path listening. NetEase artwork alone can read the existing queue metadata reader for a matching title/artist URL; it starts no progress reader or polling loop. The experimental capture flag described above separately enables the new hybrid path. The visible settings retain one global system lyric offset. Legacy adapter helpers remain dormant compatibility code; program-owned source providers remain independent.
 - Program-owned playback and external SMTC share the provider boundary. The global external offset never changes an `owned:` track.
-- Owned album artwork retries transient download/decoder-image/worker failures twice at bounded delays, independently of surface visibility. A failed known NetEase size upgrade falls back to the exact supplied URL; a valid thumbnail remains visible while larger artwork is retried. HTTP declared lengths and complete Windows thumbnail streams are validated before caching. See [failure evidence, Folia/Mineradio source references and verification](docs/artwork-resilience.md).
+- Owned album artwork retries network/timeout/incomplete transfers three times and decoder-image/worker failures twice at bounded delays, independently of surface visibility. The cover remains pending until its retry budget ends. A failed known NetEase size upgrade falls back to the exact supplied URL; a valid thumbnail remains visible while larger artwork is retried. HTTP declared lengths and complete Windows thumbnail streams are validated before caching. See [failure evidence, Folia/Mineradio source references and verification](docs/artwork-resilience.md).
 
 Source checkouts keep downloaded artwork in `%LOCALAPPDATA%/GluSpot/cache/album_art` (or `GLUSPOT_ALBUM_ART_CACHE_DIR`) and generated online lyrics in `%LOCALAPPDATA%/GluSpot/lyrics-cache`. Frozen builds use the executable's sibling `GluSpot\` data directory through the shared branding paths. Artwork is keyed by the full image URL. The settings cleanup removes only owned, direct cache files; it does not recurse or follow redirected directories or file links. Legacy online-source markers are recognized in the separate generated directory. When a configured generated directory shares the manual library, only files carrying `[re:GluSpot generated cache v1]` are disposable; unmarked imports are preserved. Source statistics are retained. Lyric cache contexts now isolate known album/duration conflicts while tolerating ordinary duration jitter; generated files without requested recording metadata are refreshed and manual lyrics remain authoritative. A GUI media read uses the immutable snapshot's time projection while cleanup owns the cache lock; it does not wait for disk deletion or launch another refresh during that interval.
 
@@ -411,6 +788,15 @@ The Apache-2.0 sender is pinned with provenance and notices; restricted AirSonic
 - Music island background styles should remain available in Free, Finder, and Tasker.
 - On this experimental branch, full-screen and windowed music pages use album-color flow: up to six supported cover pigments keep distinct cores inside large irregular regions with broad soft boundaries. The cover's dominant pigment determines the light/dark base; neutral covers preserve gray order, and dark chromatic covers retain their real hue over a quiet dark base. Regions stretch, rotate, drift beyond the viewport and return. Supported color coverage controls occupied size, while light bases carry broader bands. Palette and coverage changes ease from the displayed frame, including original-art upgrades and interrupted song changes. This is a GluSpot implementation of the requested visual direction; it does not claim to reproduce Apple's private renderer. The existing island ambience styles retain their rendering.
 - Current island backgrounds are `sea_level`, `solid_album`, and `system`. Saved `duotone_full`, `yaoguang`, and `bilateral_diffraction` migrate to `sea_level`; saved `pure_black` and `pure_white` migrate to `system`. Removed modes have no selectable controls.
+- Collapsed sea-level islands use the opaque black pill, a single white lyric/title line with shared timed word reading, and four rounded audio bars. Equal top/bottom/left cover insets apply only when collapsed. Expanded islands preserve b4601bd cover, metadata, lyric and transport geometry across all backgrounds and placements; retained personal-radio controls use those ordinary expanded slots. Expanded sea-level islands use the live cover-extracted sea/Xiaomi primary and lighter tinted crest, fading to black. `_sea_level_colors` lifts dark/muted primary lightness and chroma without inventing a hue. The expanded ripple combines absolute peak with gated centered 300–3400 Hz energy in every intensity mode; three superimposed sine components retain slow phase drift. Its expanded amplitude uses `.20 + 12.5 * level + 10 * max(0, level - .02)^1.5 + 9.5 * beat`, with the restrained absolute low-onset envelope described in [t225 round 2](docs/island-sea-t225-round2.md). Amplitude, brightness and soft glow thickness follow 60 ms attack / 250 ms release; real silence settles near flat, and unavailable input gently breathes. The expanded crest blends sea pigment with tinted specular light at partial alpha: a 1.0-unit hairline plus at most 1.2 units of rising-only thickness, smoothed by a 160 ms EMA and tapered to zero at rise boundaries. Owned music supplies decoder PCM; system playback reuses an already requested loopback analyzer or a read-only `IAudioMeterInformation` peak from the default multimedia render endpoint. Peak-only input retains peak response without inventing vocal energy. The meter opens no audio stream, installs no plugin, stays off Qt, refreshes its endpoint every two seconds and parks after one second without demand. Endpoint metering precedes master gain and can report zero for unsupported exclusive playback. The four compact bars use real spectrum regions with quiet gating and 55/220 ms attack/decay; the standalone sea preview retains its separate spectrum/intensity shaping. Visible island covers flip old-out/new-in on track changes, with soft traveling reflections at the crest and beneath the cover; the existing controls and glass grouping retain their layout.
+- The standalone sea preview response uses per-band automatic gain, a noise gate, 50 ms attack / 220 ms release half-lives and a damped low-frequency onset swell. `GLUSPOT_SEA_INTENSITY` selects `gentle`, `medium` (default), `strong`, or `vocal`. The isolated `tools/sea_live.py` preview accepts `--audio`, `--log`, and `--intensity`; Q/W/E change intensity live and R selects `vocal` (also available through `--intensity vocal`). Vocal drive estimates centered 300–3400 Hz energy using mid/side spectral subtraction; it is not voice separation and can react to centered instruments. `tools/sea_stats.py` summarizes its JSON-lines log. These are preview and environment controls, not persisted UI settings.
+- The sea preview defaults to a 24-band log-frequency surface with a damped 4 Hz onset vibration; T switches to the earlier travelling-wave surface. Q/W/E select intensity and R selects the 200–4000 Hz center-channel vocal spectrum. The log records spectrum and vibration; `sea_stats.py` reports shape and onset correlations. Spectrum extraction and capture timing remain approximations, not source separation.
+
+- Sea-level validation on Linux/offscreen used ffmpeg-decoded `clip.mp3`, the owned PCM bridge, and a simulated 60 Hz clock against baseline `65bdd02`. Water-center ranges (px, 440 × 200): baseline 97.56–104.12, gentle 75.72–101.89, medium 66.44–101.99, strong 52.35–102.00. Medium's five-point amplitude p95 was 32.23 px versus 4.30 px baseline; correlation with low-frequency input was 0.742. Upward displacement is softly limited to 49 px and downward to 3 px at 200 px height. This does not replace Windows playback and lyric-clearance validation.
+- Vocal-drive offscreen validation on the same 60 Hz PCM timeline: medium center rise correlated 0.053 with center-band energy and 0.270 with bass; vocal drive correlated 0.692 and 0.379 respectively. Vocal center range was 65.15–94.10 px, five-point amplitude p95 34.95 px, and center jump p99 3.23 px. These correlations validate the feature response, not that every center-band sound is singing.
+
+
+
 - `system` reads Windows AppsUseLightTheme independently of GluSpot's forced or scheduled app theme. It resolves to the existing light/dark island painters and matching text/control colors. Native theme events refresh immediately; the existing refresh loop checks at most once every two seconds. Explicit selection clears the optional theme/taskbar-follow restoration marker.
 - `solid_album` fills the entire island with the cover's occupied primary source tone, without brightness reduction, diagonal sheen or reactive overlays. Bright, dark and low-saturation covers retain their source colors; unavailable artwork uses the fixed default fallback. Read and unread lyrics use the higher-contrast black or white ink, with the shared reading opacity/lift behavior.
 - `wave_stream` and `gelv_songscatter` share scrolling, visual-line springs, real-unit reading, whole-line low-perception behavior, compact/expanded layout, bilingual display, cover visibility and the common settings. Only the fixed lyric font differs: embedded Alibaba PuHuiTi Bold for Wave, Noto Serif SC ExtraBold with Alibaba fallback for Gelv. Retired Gelv effect knobs do not affect either renderer.
@@ -442,6 +828,8 @@ Steam release requirements still pending:
 - Add crash reporting or at least structured runtime diagnostics suitable for support.
 
 ## Implementation History
+
+These historical entries describe earlier source states. The current t149 single reading scheme and fixed original lift above supersede the earlier strategy/lift behavior.
 
 - October 4 multiple Windows outputs / 6.411 is isolated on `codex/multiple-windows-outputs` from `4c4c8fd`. Wired and Bluetooth outputs can remain selected together with two independent AirPlay receivers; all renderers share final music PCM and a presentation epoch, with independent device clocks and drift correction. Every selected playback endpoint is excluded from source routing; an available unselected source is required, and a missing source fails explicitly. Existing UI design, background and single-receiver computer-wide scope are preserved. All 3068 Python tests passed in 100.804 seconds, all 11 native suites passed in a final 49.92-second rerun after stopping local workers before network teardown, and dependency, compilation, whitespace and frozen 6.411 package checks passed. Physical four-device playback remains unverified. See [implementation, source requirements and verification](docs/multiple-windows-outputs.md).
 - October 4 lyric continuity / 6.410 is isolated on `codex/lyrics-output-modes` from `f6749ab`. Small source-clock corrections and batched automatic compensation now advance continuously; stale early OBO focus is retired after paused delay changes or a confirmed backward same-row seek. Apple-style checkboxes explicitly show one receiver’s computer-wide scope and multiple outputs’ music-only scope, and durable route recovery fences single startup. The menu reuses the displayed background raster and unchanged snapshots. All 3045 Python tests passed in 82.451 seconds; compilation, dependency/whitespace checks, native Qt fixtures and frozen 6.410 acceptance passed. The verified 6.409 native helper is unchanged; this is not a new physical synchronization/listening run. See [implementation and verification](docs/lyrics-output-modes.md).
@@ -555,7 +943,7 @@ Steam release requirements still pending:
 - Continue diagnosing MyDockFinder listener reliability on real installed paths.
 - Finish Tasker outer-frame material sampling and animation smoothness against real Windows 10 and Windows 11 taskbars.
 - Verify third-party Windows SMTC session clocks, metadata and transport commands on real players; private player sync settings cannot be inferred from an absent session.
-- Audit dormant legacy adapter dependencies in packaging; current external listening must remain SMTC-only.
+- Audit dormant legacy adapter dependencies in packaging; default external timing and transport remain SMTC-only, with the documented NetEase queue-artwork exception.
 - Add screenshot or visual regression coverage once the PySide screenshot harness is stable.
 - Measure the music surface on real 60/120/144 Hz and high-DPI desktops while switching songs and hiding/restoring controls; move first-use font/blur work away from visible animation frames if measured spikes remain.
 - Exercise long real-player sessions, repeated A → B → A track changes, slow lyric lines, and live 0–30 gradient adjustments to validate lyric continuity and perceived frame pacing. The synthetic QImage benchmark cannot establish on-screen FPS, and Windows/Qt first-use font initialization can still stall the first visible lyric frame.
@@ -663,3 +1051,5 @@ git diff --check
 ```
 
 </details>
+
+- The compact/preview sea surface keeps a slow music-driven water-level lift (about 380 ms half-life) and places travelling waves around it, so troughs remain visible instead of flattening at the original waterline. The 17-point preview log reports `flat_fraction` and `crest_count`; the latest offscreen `clip.mp3` run measured flat fractions 0.003/0.003/0.002/0.000 and crest counts 2.066/2.535/3.081/2.510 for gentle/medium/strong/vocal. Rendering clamps inter-frame point movement to 3.5 px for the 4 px p99 target.

@@ -3,8 +3,15 @@ export const RELEASES_API = "https://api.github.com/repos/LouisGluGlu/GluSpot/re
 // If GitHub is unavailable, show the release list instead of pinning an old build.
 export const RELEASE_FALLBACK = { version: null, url: `${REPO}/releases` };
 
+// GluSpot minors are thousandths: 6.418, then 6.50 (= 6.500, the Windows file
+// version). Read the minor that way so 6.50 ranks after 6.418.
+function versionParts(version) {
+  const [major, minor = "0", ...rest] = version.split(".");
+  return [Number(major), Number(minor.padEnd(3, "0")), ...rest.map(Number)];
+}
+
 function compareVersions(left, right) {
-  const a = left.split(".").map(Number), b = right.split(".").map(Number);
+  const a = versionParts(left), b = versionParts(right);
   for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
     const difference = (a[i] ?? 0) - (b[i] ?? 0);
     if (difference) return difference;

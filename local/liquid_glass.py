@@ -22,15 +22,98 @@ from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPainterPat
 from PySide6.QtWidgets import QPushButton, QStyle, QStyleOptionButton
 from local.control_hover import install_control_hover
 from local.settings_store import MUSIC_GLASS_DEFAULT_LEVEL, normalize_music_glass_level
+from local.theme_tokens import glass_edge_boost, glass_face_opacity, glass_fill_rgba, glass_scene_opacity
 
 GLASS_FACE_OPACITY = .80
-GLASS_MATERIAL_MAX_EDGE = 160
+GLASS_MATERIAL_MAX_EDGE = 224
+# Shared chrome faces need a wider padded sample at DPR 2; retain the small
+# circle budget and the existing refresh cadence for all other controls.
+GLASS_CAPSULE_MATERIAL_MAX_EDGE = 384
 GLASS_MATERIAL_CACHE_MAX_BYTES = 4 * 1024 * 1024
 GLASS_MATERIAL_CACHE_MAX_ENTRIES = 64
 GLASS_MATERIAL_FRAME_SECONDS = .1
 _glass_material_cache: OrderedDict[tuple, QImage] = OrderedDict()
 _glass_material_slots: OrderedDict[tuple, tuple[tuple, float]] = OrderedDict()
 _glass_material_cache_bytes = 0
+
+
+def music_control_fill_color(ink, alpha=24):
+    """The shared island/surface button face; alpha retains its 0–255 meaning."""
+    alpha = max(0, min(255, int(alpha)))
+    return QColor(246, 247, 248, alpha) if ink.lightness() < 128 else QColor(18, 20, 24, alpha)
+
+
+# Reused by the GUI-thread sampler. Sampling reads pixels directly and never
+# allocates/copies a QImage or rebuilds the frozen blur material.
+_chrome_luma_scratch = [0.] * 16
+
+
+class ChromeBackdropTint:
+    """Live backdrop colour under each face, sampled every frame.
+
+    Sixteen pixels per face give its mean colour and luma. A named face
+    (``role``) eases toward them with a ~0.12 s time constant, the way a
+    material that samples its backdrop every frame follows it: no 10 Hz
+    steps, no jump when a light or a colour change passes behind. The
+    blurred texture under it still refreshes on its own slower budget; this
+    colour layer is what keeps the face in step with the scene.
+
+    Returns ``(luma, fill, border, colour)``: the light/dark wash and rim as
+    before, plus the scene's own colour to lay under them.
+    """
+    SMOOTH_SECONDS = .12
+    COLOUR_ALPHA = .26
+
+    def __init__(self):
+        self.samples = OrderedDict()
+
+    def clear(self):
+        self.samples.clear()
+
+    def _measure(self, scene, scene_bounds, rect):
+        red = green = blue = 0.
+        for row in range(4):
+            y = rect.top() + (row + .5) * rect.height() / 4.
+            py = min(scene.height() - 1, max(0, int((y - scene_bounds.top()) * scene.height() / scene_bounds.height())))
+            for column in range(4):
+                x = rect.left() + (column + .5) * rect.width() / 4.
+                px = min(scene.width() - 1, max(0, int((x - scene_bounds.left()) * scene.width() / scene_bounds.width())))
+                pixel = scene.pixel(px, py)
+                r, g, b = (pixel >> 16) & 255, (pixel >> 8) & 255, pixel & 255
+                red += r
+                green += g
+                blue += b
+                _chrome_luma_scratch[row * 4 + column] = (.2126 * r + .7152 * g + .0722 * b) / 255.
+        return sum(_chrome_luma_scratch) / 16., (red / 16., green / 16., blue / 16.)
+
+    def sample(self, scene, scene_bounds, rect, now, *, role=None):
+        if scene is None or scene.isNull() or scene_bounds.isEmpty():
+            return None
+        key = (scene.cacheKey(), rect.getRect(), scene.devicePixelRatioF(),
+               scene.size().width(), scene.size().height(), scene_bounds.getRect())
+        slot = role if role is not None else rect.getRect()
+        previous = self.samples.get(slot)
+        if previous is not None and previous[0] == key and previous[1] == now:
+            return previous[2:6]
+        luma, rgb = self._measure(scene, scene_bounds, rect)
+        if role is not None and previous is not None and 0. < now - previous[1] < .5:
+            import math
+            k = 1. - math.exp(-(now - previous[1]) / self.SMOOTH_SECONDS)
+            luma = previous[2] + (luma - previous[2]) * k
+            rgb = tuple(a + (b - a) * k for a, b in zip(previous[6], rgb))
+        alpha = round(max(14., min(42., 14. + 40. * abs(luma - .5))))
+        fill = music_control_fill_color(QColor('white' if luma >= .5 else 'black'), alpha)
+        border = QColor(18, 20, 24, round(alpha * 1.2)) if luma >= .5 else QColor(246, 247, 248, round(alpha * 1.2))
+        colour = QColor.fromRgbF(*(max(0., min(1., c / 255.)) for c in rgb))
+        hue, saturation, lightness, _a = colour.getHslF()
+        if hue >= 0.:
+            colour = QColor.fromHslF(hue, min(1., saturation * 1.15), lightness, 1.)
+        colour.setAlphaF(self.COLOUR_ALPHA)
+        self.samples[slot] = (key, now, luma, fill, border, colour, rgb)
+        self.samples.move_to_end(slot)
+        while len(self.samples) > 64:
+            self.samples.popitem(last=False)
+        return luma, fill, border, colour
 
 
 @contextmanager
@@ -96,12 +179,22 @@ def clear_glass_cache() -> None:
 def glass_material_tint(*, light: bool = False, hovered: bool = False,
                         pressed: bool = False, active: bool = False,
                         material_level: int = MUSIC_GLASS_DEFAULT_LEVEL) -> QColor:
-    """A neutral theme veil, shared with callers choosing foreground contrast."""
-    # Hover light is composed above the face below. Raising a dark veil's
-    # alpha here would darken the very control the pointer should brighten.
-    alpha = 42 if pressed else 88 if active else 58
-    alpha = min(230, round(alpha * normalize_music_glass_level(material_level) / 50.))
-    return QColor(255, 255, 255, alpha) if light else QColor(20, 22, 27, alpha)
+    """Clear-to-tinted fill. Hover light is painted above this colour."""
+    from local.ui_theme import theme_transition
+
+    transition = theme_transition()
+    if transition.active:
+        red, green, blue, alpha = transition.current().glass_fill
+    else:
+        red, green, blue, alpha = glass_fill_rgba(not bool(light), material_level)
+    if pressed:
+        alpha = min(255, alpha + 22)
+        red, green, blue = max(0, red - 10), max(0, green - 10), max(0, blue - 10)
+    elif active:
+        alpha = min(255, alpha + 14)
+    elif hovered:
+        alpha = min(255, alpha + 8)
+    return QColor(red, green, blue, alpha)
 
 
 def widget_glass_level(widget) -> int:
@@ -121,13 +214,18 @@ def widget_glass_level(widget) -> int:
     return MUSIC_GLASS_DEFAULT_LEVEL
 
 
-def glass_backdrop_opacity(material_level: int = MUSIC_GLASS_DEFAULT_LEVEL) -> float:
-    level = normalize_music_glass_level(material_level)
-    return .78 * level / 50. if level <= 50 else .78 + .18 * (level - 50) / 50.
+def glass_backdrop_opacity(material_level: int = MUSIC_GLASS_DEFAULT_LEVEL, *, light: bool = False) -> float:
+    """Scene strength inside glass: high when clear, gone when tinted solid."""
+    from local.ui_theme import theme_transition
+
+    transition = theme_transition()
+    if transition.active:
+        return 0.94 * (1.0 - transition.current().glass_amount)
+    return glass_scene_opacity(material_level, light=light)
 
 
 def glass_blur_scale(material_level: int = MUSIC_GLASS_DEFAULT_LEVEL) -> float:
-    return normalize_music_glass_level(material_level) / 50.
+    return 1.45 * normalize_music_glass_level(material_level) / 50.
 
 
 def _sample_rgba(pixels: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -336,7 +434,8 @@ def paint_liquid_glass(painter: QPainter, rect: QRectF, *, radius: float | None 
     if refractive:
         painter.save()
         painter.setClipPath(shape, Qt.ClipOperation.IntersectClip)
-        if material_level > 0 and isinstance(backdrop, QImage) and not backdrop.isNull():
+        scene_opacity = glass_backdrop_opacity(material_level, light=light)
+        if scene_opacity > 0.02 and isinstance(backdrop, QImage) and not backdrop.isNull():
             sample = QRectF(backdrop_rect) if backdrop_rect is not None else QRectF(backdrop.rect())
             if sample.isValid() and not sample.isEmpty():
                 live_layer = (material_layer and isinstance(painter.device(), QImage)
@@ -350,7 +449,7 @@ def paint_liquid_glass(painter: QPainter, rect: QRectF, *, radius: float | None 
                     material = _glass_material(backdrop, sample, rect, radius, cache_token, material_level)
                 if material is not None:
                     painter.save()
-                    painter.setOpacity(painter.opacity() * glass_backdrop_opacity(material_level))
+                    painter.setOpacity(painter.opacity() * scene_opacity)
                     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
                     painter.drawImage(rect, material)
                     painter.restore()
@@ -375,10 +474,9 @@ def paint_liquid_glass(painter: QPainter, rect: QRectF, *, radius: float | None 
     # no gradient wash; icons, captions and selected state remain independent.
     strength = .68 if pressed else 1.18 if hovered else 1.
     if refractive:
-        # Glass already has a scene edge. Keep one quiet reflection inside
-        # its contour, especially on thin transport glyphs; an outward,
-        # double white stroke reads as an outline rather than glass.
-        strength *= (.32 if path is not None else .50) * (.35 + .65 * material_level / 100.)
+        # Clear glass keeps one bright hairline. Tinted glass quiets it.
+        # The stroke width stays the same, so the control shape does not change.
+        strength *= (.32 if path is not None else .55) * glass_edge_boost(material_level, light=light)
         painter.setClipPath(shape, Qt.ClipOperation.IntersectClip)
     rim = QLinearGradient(rect.topLeft(), rect.bottomRight())
     for stop, rgb, alpha in ((0., 255, 132), (.27, 255, 45), (.53, 0, 45 if light else 23),
@@ -395,6 +493,28 @@ def paint_liquid_glass(painter: QPainter, rect: QRectF, *, radius: float | None 
         reflection.setColorAt(1., QColor(255, 255, 255, round(13 * strength)))
         painter.setPen(QPen(reflection, .9))
         painter.drawRoundedRect(inner, max(0., radius - 1.5), max(0., radius - 1.5))
+    painter.restore()
+
+
+def paint_flat_liquid_plate(painter: QPainter, rect: QRectF, radius: float, *,
+                            dark: bool, opacity: float) -> None:
+    """Translucent flat plate and one thin edge. No specular or candy wash."""
+    if rect.isEmpty() or opacity <= 0:
+        return
+    from local.theme_tokens import control_plate_rgba, glass_edge_rgba
+    radius = max(0.0, min(float(radius), min(rect.width(), rect.height()) / 2.0))
+    red, green, blue, alpha = control_plate_rgba(dark, opacity)
+    edge = glass_edge_rgba(dark, 0)
+    path = QPainterPath()
+    path.addRoundedRect(rect, radius, radius)
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(red, green, blue, alpha))
+    painter.drawPath(path)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(*edge), 1.0))
+    painter.drawPath(path)
     painter.restore()
 
 
@@ -436,7 +556,7 @@ class GlassPushButton(GlassCaptureMixin, QPushButton):
                                    material_level=level,
                                    opacity=1. if self.isEnabled() else .35)
             painter.save()
-            painter.setOpacity(min(1., GLASS_FACE_OPACITY * level / 50.))
+            painter.setOpacity(min(1., glass_face_opacity(level, light=bool(light))))
             self.style().drawControl(QStyle.ControlElement.CE_PushButtonBevel, option, painter, self)
             painter.restore()
             if not refractive:

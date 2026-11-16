@@ -23,20 +23,25 @@ def is_structured_lyric_metadata(text: str) -> bool:
         row = json.loads(value)
     except (ValueError, RecursionError):
         return False
-    if not isinstance(row, dict) or set(row) != {"t", "c"}:
+    # The row may arrive with or without its "t" marker (a timed parser can
+    # already have taken it), and a fragment can also carry a link ("li")
+    # or an app route ("or") beside its text; those used to leak through
+    # as visible JSON lyrics.
+    if not isinstance(row, dict) or "c" not in row or not set(row) <= {"t", "c"}:
         return False
-    timestamp = row["t"]
-    if (
-        isinstance(timestamp, bool)
-        or not isinstance(timestamp, (int, float))
-        or isinstance(timestamp, float) and not math.isfinite(timestamp)
-    ):
-        return False
+    if "t" in row:
+        timestamp = row["t"]
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, (int, float))
+            or isinstance(timestamp, float) and not math.isfinite(timestamp)
+        ):
+            return False
     fragments = row["c"]
     return bool(fragments) and isinstance(fragments, list) and all(
         isinstance(fragment, dict)
-        and set(fragment) == {"tx"}
-        and isinstance(fragment["tx"], str)
+        and isinstance(fragment.get("tx"), str)
+        and set(fragment) <= {"tx", "li", "or"}
         for fragment in fragments
     )
 

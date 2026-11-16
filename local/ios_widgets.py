@@ -86,7 +86,8 @@ class IosSwitch(QWidget):
         super().changeEvent(event)
 
     def paintEvent(self, event):
-        dark = app_dark_mode()
+        dark_override = self.property("darkMode")
+        dark = app_dark_mode() if dark_override is None else bool(dark_override)
         enabled = self.isEnabled()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)

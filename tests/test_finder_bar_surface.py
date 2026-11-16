@@ -411,7 +411,9 @@ class FinderBarSurfaceTests(unittest.TestCase):
         with patch("local.island_stack_visual.time.monotonic", return_value=100.), QPainter(image) as painter:
             self.visual._paint_music(painter, QRectF(0, 0, width, height), False)
         self.assertEqual(self.visual.finder_bar_style, "transparent")
-        self.assertEqual(image.pixelColor(round(width/2), 0).alpha(), 0)
+        # Invisible (alpha 1) but present, so clicks on the island are not
+        # passed through to the Finder bar behind it.
+        self.assertEqual(image.pixelColor(round(width/2), 0).alpha(), 1)
         self.assertGreater(image.pixelColor(9, 12).alpha(), 0)
         self.assertTrue(self.visual.music_cover_rect.height() <= height)
         self.assertEqual(self.visual.music_button_rects, {})
@@ -420,6 +422,8 @@ class FinderBarSurfaceTests(unittest.TestCase):
         self.presence()
         for style in ("capsule", "fade", "transparent"):
             self.visual.set_finder_bar_style(style, notify=False)
+            # Saved gradient bars migrate to the retained album/background face.
+            self.assertEqual(self.visual.finder_bar_style, "capsule" if style == "fade" else style)
             width, height = self.visual._finder_bar_music_size()
             region = QRectF(0, 0, width, height)
             image = QImage(round(width), round(height), QImage.Format.Format_ARGB32_Premultiplied)
@@ -429,7 +433,7 @@ class FinderBarSurfaceTests(unittest.TestCase):
             self.assertTrue(region.contains(self.visual.music_cover_rect))
             self.assertEqual(self.visual._hit_test(self.visual.music_cover_rect.center()), "music:open_surface")
             if style != "transparent":
-                self.assertGreater(image.pixelColor(round(width/2), 0 if style == "fade" else 1).alpha(), 180)
+                self.assertGreater(image.pixelColor(round(width/2), 1).alpha(), 180)
 
     def test_unknown_screen_does_not_fallback_to_primary_finder(self):
         self.bar["monitor_name"] = "unmatched"

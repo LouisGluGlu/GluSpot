@@ -19,6 +19,12 @@ GLYPH_FLOAT_LIFT = 5.2
 READING_LIFT_FULL_BANDS = 16
 READING_LIFT_SAMPLES_PER_BAND = 10
 SPARSE_MIN_SECONDS_PER_UNIT = 0.8
+SPARSE_LINE_SECONDS_PER_UNIT = 1.2
+SPARSE_LINE_MIN_SECONDS = 4.0
+# The highlight is a lift with a little light, not a pop: 5% growth and the
+# halo at 60% of the wave level.
+SPARSE_GROWTH = 0.05
+SPARSE_GLOW = 0.60
 # Kept as migration aliases for old settings/callers. The product threshold is
 # fixed; an old persisted value must not change how the same song is rendered.
 SPARSE_MIN_SECONDS_PER_UNIT_SETTING = SPARSE_MIN_SECONDS_PER_UNIT
@@ -203,7 +209,9 @@ def lyric_emphasis_plan(
     duration = max(0.0, duration)
     seconds_per_unit = duration / len(units)
     threshold = normalize_sparse_seconds_per_unit(min_seconds_per_unit)
-    if duration < 3.0 or seconds_per_unit + 1e-9 < threshold:
+    # Line-timed lyrics only estimate the voice, so the bar is higher here:
+    # a long line (4 s+) with at least 1.2 s per word.
+    if duration < SPARSE_LINE_MIN_SECONDS or seconds_per_unit + 1e-9 < max(threshold, SPARSE_LINE_SECONDS_PER_UNIT):
         return LyricEmphasisPlan(
             unit_count=len(units), duration=duration, seconds_per_unit=seconds_per_unit,
         )
@@ -348,7 +356,7 @@ def sparse_glyph_frame(
     # letters start rising while their predecessor is still moving; the
     # existing eight-stage growth/shine envelope remains independent.
     lift = GLYPH_FLOAT_LIFT * continuous_read_lift(progress, index, count)
-    return SparseGlyphFrame(1.0 + 0.125 * shine, lift, read, shine, True)
+    return SparseGlyphFrame(1.0 + SPARSE_GROWTH * shine, lift, read, SPARSE_GLOW * shine, True)
 
 
 @dataclass(frozen=True)
@@ -480,8 +488,9 @@ class LogicalLineSpringChain:
     Initial content and explicit ``animate=False`` are the anchoring events.
     """
 
-    STIFFNESS = 188.0
-    DAMPING = 25.5
+    # The wide/narrow Apple curve: mass 1, stiffness 220, damping ratio 1.
+    STIFFNESS = 220.0
+    DAMPING = 2.0 * math.sqrt(220.0)
     FOLLOW_STIFFNESS_STEP = 13.0
     STAGGER_SECONDS = 0.028
     MAX_STAGGER_ROWS = 5
@@ -726,7 +735,8 @@ class WrappedLineSpringChain:
     """
 
     SPRING = 220.0
-    DAMPING = 22.0
+    # Damping ratio 1: c = 2 * sqrt(k) for unit mass.
+    DAMPING = 2.0 * math.sqrt(220.0)
     FOLLOW_SPRING = 460.0
     FOLLOW_DAMPING = 4.0
     IMPULSE = 5.2

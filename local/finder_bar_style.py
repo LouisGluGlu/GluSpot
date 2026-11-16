@@ -9,7 +9,14 @@ def finder_fade_positions(rect: QRectF, unit=1.0):
     return start, min(.58, start + 24.0 * unit / max(1.0, rect.width()))
 
 
+# Invisible but present: a layered window lets clicks through pixels whose
+# alpha is 0, so a "transparent" bar sent clicks on the island to the Finder
+# bar behind it (which hid the island). Alpha 1 looks the same and is hit.
+HIT_FLOOR = QColor(0, 0, 0, 1)
+
+
 def paint_finder_background(painter, rect, style, pigment, unit=1.0):
+    painter.fillRect(rect, HIT_FLOOR)
     if style == "transparent":
         return
     color = QColor(pigment)

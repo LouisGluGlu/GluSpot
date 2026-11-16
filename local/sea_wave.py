@@ -1,0 +1,340 @@
+"""Sea-only audio envelopes, travelling waves, and local ripple propagation."""
+from __future__ import annotations
+
+import math
+import os
+from collections import deque
+
+SEA_WAVE_INTENSITY = "medium"
+# Product default chosen by the user: spectrum-shaped water (the travelling-wave look stays available as "wave").
+SEA_SHAPE_MODE = "spectrum"
+INTENSITIES = {"gentle": 1.0, "medium": 1.55, "strong": 3.6, "vocal": 1.0}
+INTENSITY_LABELS = {"gentle": "柔和", "medium": "适中", "strong": "强烈", "vocal": "人声"}
+
+
+def sea_intensity(value=None):
+    value = value or os.environ.get("GLUSPOT_SEA_INTENSITY", SEA_WAVE_INTENSITY)
+    return value if value in INTENSITIES else SEA_WAVE_INTENSITY
+
+
+def _follow(current, target, dt, half_life):
+    return current + (target - current) * (1.0 - 2.0 ** (-dt / half_life))
+
+
+class SeaWaveState:
+    """A small one-dimensional water surface updated at the audio tick."""
+
+    def __init__(self, point_count=49):
+        self.point_count = point_count
+        self.peaks = [0.0] * 3
+        self.bands = [0.0] * 3
+        self.average = 0.0
+        self.impulse = 0.0
+        self.updated_at = None
+        self.vocal_peak = 0.0
+        self.vocal = 0.0
+        self.vocal_average = 0.0
+        self.vocal_impulse = 0.0
+        self.swell = 0.0  # compatibility diagnostic; surface is now a chain
+        self.surface = [0.0] * point_count
+        self.velocity = [0.0] * point_count
+        self._onset_at = -10.0
+        self._onset_index = point_count // 2
+        self._time = 0.0
+        self.water_level_lift = 0.0
+        self.water_level_target = 0.0
+        self.spectrum = [0.0] * 24
+        self.spread_spectrum = [0.0] * 24
+        self.spectrum_peak = 0.01
+        self.sensitivity = 1.0
+        self.vibration = 0.0
+        self.vibration_velocity = 0.0
+        self.onset_strength = 0.0
+        self._vibration_at = -10.0
+        self.ripple_level = 0.0
+        self.ripple_beat = 0.0
+        self._ripple_low_average = 0.0
+        self._ripple_amplitude = .20
+        self._ripple_drift = 0.0
+        self.ripple_updated_at = None
+        self.ripple_time = 0.0
+        self._ripple_history = deque(maxlen=34)
+        self._ripple_edge_smoothed = (0.,) * 49
+        self._ripple_edge_rises = (0.,) * 49
+        self._ripple_edge_widths = (0.,) * 49
+
+    def update_ripple(self, peak, now, *, is_playing=True, vocal=0.0, low=0.0):
+        """Absolute level, independent of the experimental spectrum's AGC.
+
+        A real zero is silence. Only an unavailable meter gets idle breathing.
+        Attack/release are exponential time constants of 60/250 ms.
+        """
+        dt = 1 / 30 if self.ripple_updated_at is None else max(0.0, min(.25, now - self.ripple_updated_at))
+        self.ripple_updated_at = now
+        self.ripple_time += dt
+        if not is_playing:
+            target = 0.0
+        elif peak is None:
+            target = .045 + .018 * math.sin(self.ripple_time * .65)
+        else:
+            target = math.sqrt(max(0.0, min(1.0, float(peak)))) if math.isfinite(float(peak)) else 0.0
+            # The analyzer's absolute centered 300–3400 Hz energy contributes
+            # in every intensity mode. Gate its noise floor; never use the
+            # preview's AGC, which would turn a quiet voice into a loud one.
+            vocal = float(vocal)
+            if math.isfinite(vocal):
+                target = min(1.0, target + 1.4 * max(0.0, min(1.0, vocal) - .02))
+        tau = .060 if target > self.ripple_level else .250
+        self.ripple_level += (target - self.ripple_level) * -math.expm1(-dt / tau)
+        # The low-band envelope follows absolute energy, without the preview
+        # AGC. Keep the earlier onset timing, with a restrained displacement.
+        low = float(low)
+        low = max(0., min(1., low)) if is_playing and math.isfinite(low) else 0.
+        onset = max(0., low - self._ripple_low_average * 1.15 - .02)
+        self._ripple_low_average = _follow(self._ripple_low_average, low, dt, .45)
+        beat_target = min(1., onset * 2.5)
+        beat_tau = .020 if beat_target > self.ripple_beat else .110
+        self.ripple_beat += (beat_target - self.ripple_beat) * -math.expm1(-dt / beat_tau)
+        # Preserve the quiet floor and add a moderate absolute swell. Derive
+        # scalars once on the audio clock; every paint reuses this same pose.
+        self._ripple_amplitude = (.20 + 12.5 * self.ripple_level
+                                  + 10. * max(0., self.ripple_level - .02) ** 1.5
+                                  + 9.5 * self.ripple_beat)
+        self._ripple_drift = .22 * math.sin(self.ripple_time * .17)
+        sample = (float(now), tuple(self.ripple_displacement(i / 48) for i in range(49)))
+        if self._ripple_history and now <= self._ripple_history[-1][0]:
+            if now < self._ripple_history[-1][0]:
+                self._ripple_history.clear()
+                self._ripple_edge_smoothed = (0.,) * 49
+                self._ripple_edge_rises = (0.,) * 49
+                self._ripple_edge_widths = (0.,) * 49
+            else:
+                self._ripple_history.pop()
+        self._ripple_history.append(sample)
+        self._update_ripple_edge(dt)
+        if is_playing:
+            # Resume from the live sample. The paused spring is only a bridge.
+            self._ripple_shown = None
+            self._ripple_shown_velocity = None
+        else:
+            self._follow_paused_ripple(dt)
+
+    def _follow_paused_ripple(self, dt: float) -> None:
+        """Ease the visible crest with the shared width spring. The first sample matches."""
+        from local.spring_motion import WIDE_NARROW_SPRING
+        raw = self._ripple_history[-1][1]
+        shown = getattr(self, "_ripple_shown", None)
+        velocity = getattr(self, "_ripple_shown_velocity", None)
+        if shown is None or velocity is None or len(shown) != len(raw):
+            self._ripple_shown = raw
+            self._ripple_shown_velocity = (0.0,) * len(raw)
+            return
+        omega = WIDE_NARROW_SPRING.omega
+        decay = math.exp(-omega * max(0.0, dt))
+        nxt = []
+        nvel = []
+        for current, speed, target in zip(shown, velocity, raw):
+            x0 = current - target
+            slope = speed + omega * x0
+            nxt.append(target + (x0 + slope * dt) * decay)
+            nvel.append((speed - omega * slope * dt) * decay)
+        self._ripple_shown = tuple(nxt)
+        self._ripple_shown_velocity = tuple(nvel)
+
+    def ripple_displacement(self, pos):
+        """Three long ripples with independent, slowly drifting phases."""
+        t = self.ripple_time
+        drift = self._ripple_drift
+        shape = (.58 * math.sin(pos * math.tau * 1.10 - t * .72 + drift)
+                 + .29 * math.sin(pos * math.tau * 2.25 + t * .49 - drift)
+                 + .13 * math.sin(pos * math.tau * 3.65 - t * .31 + .8))
+        return self._ripple_amplitude * shape
+
+    def _update_ripple_edge(self, dt):
+        """Smooth extra crest thickness on the audio clock, never in paint."""
+        history = self._ripple_history
+        if len(history) < 2 or history[-1][0] - history[0][0] < 1.:
+            return
+        target = history[-1][0] - 1.
+        before, after = history[0], history[1]
+        for first, second in zip(history, list(history)[1:]):
+            if first[0] <= target <= second[0]:
+                before, after = first, second
+                break
+        phase = max(0., min(1., (target - before[0]) / max(1e-9, after[0] - before[0])))
+        rises = []
+        widths = []
+        gated = []
+        alpha = -math.expm1(-dt / .160)
+        for index, current in enumerate(history[-1][1]):
+            previous = before[1][index] + (after[1][index] - before[1][index]) * phase
+            signed_rise = current - previous
+            rises.append(signed_rise)
+            ramp = max(0., min(1., signed_rise / 4.))
+            ramp = ramp * ramp * (3. - 2. * ramp)
+            old = self._ripple_edge_smoothed[index]
+            width = old + (1.2 * ramp - old) * alpha
+            widths.append(width)
+            gated.append(width * ramp)
+        self._ripple_edge_smoothed = tuple(widths)
+        self._ripple_edge_rises = tuple(rises)
+        self._ripple_edge_widths = tuple(gated)
+
+    def ripple_edge_widths(self, *, minimum=None, maximum=None, include_rises=False):
+        """At most 1.2 extra units, feathered to zero at every rise boundary.
+
+        The 160 ms EMA lives on the existing audio clock. A smooth rise gate
+        tapers its residual at falling intervals; repeated paints are pure.
+        Optional visible limits retain the existing plateau-query contract.
+        """
+        rises = self._ripple_edge_rises
+        if minimum is None and maximum is None:
+            widths = self._ripple_edge_widths
+            return (widths, rises) if include_rises else widths
+        def visible(value):
+            return min(maximum if maximum is not None else math.inf,
+                       max(minimum if minimum is not None else -math.inf, value))
+        # Clipping can only shorten a rise; the displacement itself stays
+        # unclamped, as in the original small-amplitude sea.
+        if self._ripple_history:
+            rises = tuple(min(rise, visible(current) - visible(current - rise))
+                          for current, rise in zip(self._ripple_history[-1][1], rises))
+        result = []
+        for width, rise in zip(self._ripple_edge_smoothed, rises):
+            ramp = max(0., min(1., rise / 4.))
+            result.append(width * ramp * ramp * (3. - 2. * ramp))
+        return (tuple(result), rises) if include_rises else tuple(result)
+
+    def update(self, bands, now, vocal=0.0, intensity=None, spectrum=(), vocal_spectrum=()):
+        dt = 1 / 60 if self.updated_at is None else max(0.0, min(0.25, now - self.updated_at))
+        self.updated_at = now
+        self._time += dt
+        for i, raw in enumerate(bands):
+            raw = max(0.0, min(1.0, float(raw)))
+            self.peaks[i] = max(raw, self.peaks[i] * 2 ** (-dt / 3.0))
+            target = min(1.0, raw / max(self.peaks[i], 0.008)) if raw > 0.003 else 0.0
+            self.bands[i] = _follow(self.bands[i], target, dt, 0.05 if target > self.bands[i] else 0.22)
+        vocal = max(0.0, min(1.0, float(vocal)))
+        self.vocal_peak = max(vocal, self.vocal_peak * 2 ** (-dt / 3.0))
+        vocal_target = min(1.0, vocal / max(self.vocal_peak, 0.008)) if vocal > 0.003 else 0.0
+        self.vocal = _follow(self.vocal, vocal_target, dt, 0.06 if vocal_target > self.vocal else 0.30)
+        excess_vocal = max(0.0, self.vocal - self.vocal_average * 1.1 - 0.06)
+        self.vocal_average = _follow(self.vocal_average, self.vocal, dt, 0.4)
+        self.vocal_impulse = max(excess_vocal, self.vocal_impulse * 2 ** (-dt / 0.13))
+        low = self.bands[0]
+        excess = max(0.0, low - self.average * 1.15 - 0.08)
+        self.average = _follow(self.average, low, dt, 0.45)
+        self.impulse = max(excess, self.impulse * 2 ** (-dt / 0.16))
+
+        active_vocal = intensity == "vocal"
+        mode_drive = vocal if active_vocal else low
+        extra = (self.vocal * 8.0 + self.vocal_impulse * 4.0) if active_vocal else self.impulse * 7.0
+        self.water_level_target = max(0.0, min(32.0, mode_drive * 24.0 + extra))
+        self.water_level_lift = _follow(self.water_level_lift, self.water_level_target, dt, 0.09)
+
+        # Cava-inspired global automatic gain and fast attack / slower fall.
+        incoming = vocal_spectrum if active_vocal else spectrum
+        if incoming and len(incoming) == 24:
+            peak = max(incoming)
+            self.spectrum_peak = max(peak, self.spectrum_peak * 2 ** (-dt / 3.0), 0.0001)
+            for i, value in enumerate(incoming):
+                target = min(1.0, math.sqrt(max(0.0, value / self.spectrum_peak)))
+                self.spectrum[i] = _follow(self.spectrum[i], target, dt, .04 if target > self.spectrum[i] else .20)
+        else:
+            self.spectrum = [_follow(v, 0.0, dt, .20) for v in self.spectrum]
+        # Keep nearby band peaks distinct instead of spreading one peak across the surface.
+        self.spread_spectrum = [max(self.spectrum[j] * (0.30 ** abs(i-j))
+                                    for j in range(max(0, i-2), min(24, i+3)))
+                                for i in range(24)]
+        # Relative onset against recent mean, exciting an underdamped 4 Hz mode.
+        relative = vocal / max(self.vocal_peak * .5, .008) if active_vocal else low / max(self.average, .05)
+        self.onset_strength = max(0.0, min(1.0, (relative - 1.25) * .45))
+        if self.onset_strength > .12 and self._time - self._vibration_at > .18:
+            self.vibration_velocity += min(1.0, self.onset_strength) * 75.0
+            self._vibration_at = self._time
+        omega = math.tau * 4.0
+        substeps = max(1, math.ceil(dt / .004))
+        h = dt / substeps
+        for _ in range(substeps):
+            self.vibration_velocity += (-omega * omega * self.vibration - 2 * .4 * omega * self.vibration_velocity) * h
+            self.vibration += self.vibration_velocity * h
+
+        # A new onset drops a local disturbance into alternating positions. The
+        # refractory period is short enough for syllables, but prevents chatter.
+        drive = self.vocal_impulse if active_vocal else self.impulse
+        if drive > 0.055 and self._time - self._onset_at > 0.12:
+            self._onset_index = (self._onset_index + (13 if self._onset_index % 2 else -17)) % self.point_count
+            self.velocity[self._onset_index] -= 2.0 * drive
+            self._onset_at = self._time
+
+        # Damped spring chain. Neighbor spread makes the disturbance travel;
+        # substeps keep the result stable and independent of display cadence.
+        steps = max(1, math.ceil(dt / 0.006))
+        step = dt / steps
+        for _ in range(steps):
+            old = self.surface
+            next_surface = old[:]
+            for i in range(self.point_count):
+                left = old[i - 1] if i else old[1]
+                right = old[i + 1] if i + 1 < self.point_count else old[-2]
+                acceleration = (-18.0 * old[i] - 3.8 * self.velocity[i]
+                                + 30.0 * (left + right - 2.0 * old[i]))
+                self.velocity[i] += acceleration * step
+                next_surface[i] = old[i] + self.velocity[i] * step
+            self.surface = next_surface
+
+    def spectrum_displacement(self, pos, phase, intensity):
+        mode = sea_intensity(intensity)
+        values = self.spectrum
+        # Smooth max-spread similar to cava's monstercat filter.
+        smooth = self.spread_spectrum
+        x = max(0.0, min(1.0, pos)) * (len(smooth) - 1)
+        i = int(x); f = x - i
+        a, b = smooth[i], smooth[min(i + 1, len(smooth) - 1)]
+        # cosine interpolation has zero slope at band centers
+        shape = a + (b-a) * (0.5 - 0.5 * math.cos(math.pi*f))
+        strength = {'gentle': 1.15, 'medium': 1.75, 'strong': 3.0, 'vocal': 1.0}[mode]
+        wave = 3.35 * math.sin(pos * math.tau * 3.0 - self._time * 2.5) * max(values)
+        vibration = self.vibration * (0.75 + .25 * math.cos(pos * math.tau))
+        motion = (shape * 25.0 + wave + vibration) * strength
+        return (48.0 * math.tanh(motion / 48.0) if motion >= 0.0
+                else 3.0 * math.tanh(motion / 3.0))
+
+    def displacement(self, pos, phase, intensity):
+        mode = sea_intensity(intensity)
+        if mode == "vocal":
+            low, mid, high = self.bands
+            envelope = self.vocal
+            onset = self.vocal_impulse
+            amplitudes = (18.0 * envelope, 12.0 * envelope, 4.0 * envelope)
+        else:
+            low, mid, high = self.bands
+            strength = INTENSITIES[mode]
+            amplitudes = (11.0 * low * strength, 7.0 * mid * strength, 2.8 * high * strength)
+            onset = self.impulse
+        # Long waves run faster than short waves: a compact dispersion-inspired
+        # set of phase speeds creates visible horizontal motion.
+        travelling = (
+            amplitudes[0] * math.sin(pos * math.tau * 0.85 - self._time * 2.5 + phase * 0.4)
+            + amplitudes[1] * math.sin(pos * math.tau * 1.75 - self._time * 3.8 - phase * 0.3)
+            + amplitudes[2] * math.sin(pos * math.tau * 3.7 - self._time * 5.5 + phase * 0.2)
+        )
+        point_index = int(round(max(0.0, min(1.0, pos)) * (self.point_count - 1)))
+        ripple = self.surface[point_index]
+        local_onset = onset * 1.0 * math.exp(-((point_index - self._onset_index) / 5.0) ** 2)
+        # Only a small mean lift is shared by all points; the spring chain and
+        # travelling waves provide the visible surface motion.
+        travelling += ripple * (1.0 + 0.35 * onset) + local_onset
+        if mode == "vocal":
+            travelling += onset * 5.0 * math.sin(pos * math.tau * 1.45 - self._time * 3.2)
+        # Strong travelling waves already carry more energy; restrain their shared lift.
+        lift = self.water_level_lift * (0.4 if mode == "strong" else 1.0)
+        if mode == "vocal":
+            lift = max(lift, self.vocal * 20.0)
+        else:
+            lift = max(lift, low * 16.0 * INTENSITIES[mode] * (0.25 if mode == "strong" else 0.55))
+        total = lift + travelling
+        if total >= 0.0:
+            limit = 49.0 if mode != "vocal" else 44.0
+            return limit * math.tanh(total / limit)
+        return max(-3.0, lift + 3.0 * math.tanh(travelling / 3.0))

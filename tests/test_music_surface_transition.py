@@ -190,7 +190,9 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
         self.window._mode_animation.stop()
 
         self.assertFalse(self.window._geometry_transition_snapshot.isNull())
-        self.assertEqual(self.window.geometry(), origin)
+        # The surface starts at the island; the window is the morph's canvas.
+        self.assertEqual(self.window._mode_visual_geometry(), origin)
+        self.assertTrue(self.window.geometry().contains(origin))
         self.assertEqual(self.window._island_origin_snapshot.cacheKey(), island_frame.cacheKey())
         self.assertFalse(self.window._pending_fullscreen)
 
@@ -227,8 +229,8 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
                 with patch("local.music_surface_window.time.monotonic", return_value=100.0 + milliseconds / 1000.0):
                     self.window._on_animation_tick()
                 self.assertEqual(self.window._mode_animation.currentTime(), milliseconds)
-                self.assertGreater(self.window.width(), 960)
-                self.assertLess(self.window.width(), 1280)
+                self.assertGreater(self.window._mode_visual_geometry().width(), 960)
+                self.assertLess(self.window._mode_visual_geometry().width(), 1280)
             shape.assert_not_called()
             blur.assert_not_called()
         self.assertLessEqual(self.window._timer.interval(), 6)
@@ -404,9 +406,10 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
         with patch.object(self.window, "_capture_transition_snapshot", return_value=self._snapshot()):
             self.window.toggle_presentation_mode()
             self.window._mode_animation.setCurrentTime(100)
+            title = self.window._mode_surface_rect().topLeft() + QPointF(100.0, 10.0)
             event = SimpleNamespace(
                 button=lambda: Qt.MouseButton.LeftButton,
-                position=lambda: QPointF(100.0, 10.0),
+                position=lambda: title,
                 accept=lambda: None,
             )
             self.window.mouseDoubleClickEvent(event)

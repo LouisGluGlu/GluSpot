@@ -57,7 +57,6 @@ class IslandLyricFollowGeometryTests(unittest.TestCase):
         visual.media_position_observed_seconds = 0.0
         visual.media_duration_seconds = 12.0
         visual.media_is_playing = True
-        visual.music_surface_reading_strategy = "gold"
         visual._effective_lyric_offset_seconds = lambda: 0.0
         visual._should_paint_album_island = lambda: False
         visual._is_instrumental_track = lambda: False
@@ -69,31 +68,28 @@ class IslandLyricFollowGeometryTests(unittest.TestCase):
 
     def test_first_island_paint_uses_current_source_when_owner_tick_is_old(self):
         for style in ("wave_stream", "gelv_songscatter"):
-            for strategy in ("gold", "low_perception"):
-                with self.subTest(style=style, strategy=strategy):
-                    visual = self._visual(style)
-                    visual.music_surface_reading_strategy = strategy
-                    visual._lyric_phase(100.0)
-                    # The owner timer still holds row 0 when a visible paint
-                    # arrives after returning from a different music surface.
-                    phase = visual._lyric_phase(105.0)
-                    self.assertEqual(visual.lyric_index, 0)
-                    self.assertEqual(phase["active_index"], 1)
-                    self.assertEqual(phase["visual_focus_index"], 1)
-                    image = QImage(500, 100, QImage.Format.Format_ARGB32_Premultiplied)
-                    image.fill(0)
-                    with patch.object(visual, "_paint_live_lyric_text") as paint:
-                        with patch("local.island_stack_visual.time.monotonic", return_value=105.0):
-                            with QPainter(image) as painter:
-                                visual._paint_compact_lyric_viewport(painter, QRectF(0, 0, 490, 90))
-                    self.assertEqual(paint.call_args.args[2], "Next words")
-                    self.assertGreater(paint.call_args.args[7]["progress"], 0.0)
-                    if strategy == "low_perception":
-                        painted_phase = paint.call_args.args[7]
-                        self.assertFalse(painted_phase["whole_row"])
-                        self.assertNotIn("whole_block_progress", painted_phase)
-                        self.assertEqual(painted_phase["timing_quality"], "estimated")
-                        self.assertAlmostEqual(painted_phase["timed_position"], 5.0)
+            with self.subTest(style=style):
+                visual = self._visual(style)
+                visual._lyric_phase(100.0)
+                # The owner timer still holds row 0 when a visible paint
+                # arrives after returning from a different music surface.
+                phase = visual._lyric_phase(105.0)
+                self.assertEqual(visual.lyric_index, 0)
+                self.assertEqual(phase["active_index"], 1)
+                self.assertEqual(phase["visual_focus_index"], 1)
+                image = QImage(500, 100, QImage.Format.Format_ARGB32_Premultiplied)
+                image.fill(0)
+                with patch.object(visual, "_paint_live_lyric_text") as paint:
+                    with patch("local.island_stack_visual.time.monotonic", return_value=105.0):
+                        with QPainter(image) as painter:
+                            visual._paint_compact_lyric_viewport(painter, QRectF(0, 0, 490, 90))
+                self.assertEqual(paint.call_args.args[2], "Next words")
+                self.assertGreater(paint.call_args.args[7]["progress"], 0.0)
+                painted_phase = paint.call_args.args[7]
+                self.assertFalse(painted_phase["whole_row"])
+                self.assertNotIn("whole_block_progress", painted_phase)
+                self.assertEqual(painted_phase["timing_quality"], "estimated")
+                self.assertAlmostEqual(painted_phase["timed_position"], 5.0)
 
     def test_island_and_large_surface_share_validated_source_progress_after_hidden_time(self):
         visual = self._visual()
@@ -161,7 +157,6 @@ class IslandLyricFollowGeometryTests(unittest.TestCase):
         visual.lyrics[1] = "Next words"
         visual.timed_lyric_timing_kinds[1] = "unit"
         visual.timed_lyric_units[1] = (TimedLyricUnit(4.0, 5.0, "Next "), TimedLyricUnit(5.0, 6.0, "words"))
-        visual.music_surface_reading_strategy = "low_perception"
         visual._lyric_phase(100.0)
         phase = visual._lyric_phase(104.5)
         self.assertEqual(phase["active_index"], 1)

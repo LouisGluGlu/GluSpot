@@ -1,4 +1,4 @@
-"""True no-media state follows Windows without recoloring retained songs."""
+"""No-media state follows the interface theme without recoloring retained songs."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -42,12 +42,17 @@ class IdleNeutralPaletteTests(unittest.TestCase):
             self.assertEqual(color.red, color.green)
             self.assertEqual(color.green, color.blue)
 
-    def test_idle_overrides_only_effective_style_and_follows_actual_system(self):
+    def test_idle_follows_the_saved_theme_and_windows_only_for_system(self):
         self.visual.music_ambience_style = "sea_level"
-        self.visual.settings_getter = lambda key, default=None: "dark" if key == "v2_theme_mode" else default
-        for dark, style in ((False, "pure_white"), (True, "pure_black")):
-            with self.subTest(dark=dark), patch("local.island_stack_visual.system_dark_mode", return_value=dark):
-                self.visual._refresh_music_system_theme(force=True)
+        cases = (
+            ("dark", False, "pure_black"),
+            ("light", True, "pure_white"),
+            ("system", True, "pure_black"),
+            ("system", False, "pure_white"),
+        )
+        for mode, windows_dark, style in cases:
+            self.visual.settings_getter = lambda key, default=None, mode=mode: mode if key == "v2_theme_mode" else default
+            with self.subTest(mode=mode, windows_dark=windows_dark), patch("local.ui_theme.system_dark_mode", return_value=windows_dark):
                 self.assertTrue(self.visual.media_no_audio)
                 self.assertEqual(self.visual._effective_music_ambience_style(), style)
                 self.assertEqual(self.visual.music_ambience_style, "sea_level")
@@ -55,10 +60,40 @@ class IdleNeutralPaletteTests(unittest.TestCase):
                     self.assertEqual(color.red(), color.green())
                     self.assertEqual(color.green(), color.blue())
 
+    def test_dark_theme_paints_the_idle_bar_dark_even_when_windows_is_light(self):
+        self.visual.music_ambience_style = "sea_level"
+        self.visual.settings_getter = lambda key, default=None: "dark" if key == "v2_theme_mode" else default
+        image = QImage(360, 120, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        with patch("local.ui_theme.system_dark_mode", return_value=False), QPainter(image) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            self.visual._paint_music(painter, QRectF(8, 8, 344, 104), True)
+        color = image.pixelColor(180, 60)
+        self.assertLess(color.lightness(), 48)
+        self.assertEqual(color.alpha(), 255)
+        self.assertEqual(self.visual._music_lyric_text_color().getRgb()[:3], (255, 255, 255))
+
+    def test_library_footer_idle_bar_matches_a_dark_interface(self):
+        from local.music_library_window import MusicLibraryWindow
+        window = MusicLibraryWindow()
+        try:
+            window.set_background_context(lambda key, default=None: "dark" if key == "v2_theme_mode" else default)
+            window.now_playing_island.set_track(None)
+            with patch("local.ui_theme.system_dark_mode", return_value=False):
+                self.assertTrue(window.now_playing_island._no_audio_visual_active())
+                self.assertEqual(window.now_playing_island._effective_music_ambience_style(), "pure_black")
+                image = QImage(320, 100, QImage.Format.Format_ARGB32_Premultiplied)
+                image.fill(Qt.GlobalColor.transparent)
+                with QPainter(image) as painter:
+                    window.now_playing_island._paint_music(painter, QRectF(4, 4, 312, 92), True)
+            self.assertLess(image.pixelColor(160, 48).lightness(), 48)
+        finally:
+            window.close()
+            window.deleteLater()
+
     def test_empty_cover_placeholder_is_grayscale_in_both_system_themes(self):
         for dark in (False, True):
-            with self.subTest(dark=dark), patch("local.island_stack_visual.system_dark_mode", return_value=dark):
-                self.visual._refresh_music_system_theme(force=True)
+            with self.subTest(dark=dark), patch("local.ui_theme.system_dark_mode", return_value=dark):
                 image = QImage(84, 84, QImage.Format.Format_ARGB32_Premultiplied)
                 image.fill(Qt.GlobalColor.transparent)
                 with QPainter(image) as painter:
@@ -84,8 +119,7 @@ class IdleNeutralPaletteTests(unittest.TestCase):
         window = MusicSurfaceWindow(self.visual)
         try:
             for dark in (False, True):
-                with self.subTest(dark=dark), patch("local.island_stack_visual.system_dark_mode", return_value=dark):
-                    self.visual._refresh_music_system_theme(force=True)
+                with self.subTest(dark=dark), patch("local.ui_theme.system_dark_mode", return_value=dark):
                     palette = window._art_palette()
                     for color in (palette.primary, palette.secondary, *palette.ambient_colors):
                         self.assertEqual(color.red(), color.green())

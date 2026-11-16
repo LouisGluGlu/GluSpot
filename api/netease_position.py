@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import time
@@ -77,6 +78,13 @@ class NeteasePositionReader:
         self._last_error = ""
         self._last_progress_probe: dict[str, object] = {}
         self._last_physical_seek_attempted = False
+        self._last_capture_seek_attempted = False
+        # Capture's dedicated STA owns these wrappers. A hit still validates
+        # native process and track identity; the TTL never extends on a read.
+        self._capture_window_cache: tuple[object, ...] = ()
+        self._capture_window_cache_key: tuple[str, str] | None = None
+        self._capture_window_cache_at = 0.0
+        self._capture_window_cache_thread: int | None = None
         self._pywinauto_available: bool | None = None
         self._last_track_key = ""
         self._last_track_duration = 0.0
@@ -357,6 +365,186 @@ class NeteasePositionReader:
                 return True
         self._last_error = "uia seek did not confirm actual player progress"
         return False
+
+    def read_progress_position(
+        self, title: str, artist: str, duration_seconds: float
+    ) -> NeteasePositionSample | None:
+        """Synchronously read fresh, identity-checked progress for capture.
+
+        The caller must supply its own background COM apartment and deadline.
+        Unlike :meth:`read`, this never starts a worker, returns a cached
+        sample, or substitutes a coarse lyric-row anchor for player progress.
+        """
+        try:
+            duration = float(duration_seconds)
+        except (TypeError, ValueError):
+            return None
+        if not str(title or "").strip() or not math.isfinite(duration) or duration < 0.0:
+            return None
+        for window in self._capture_progress_windows(title, artist):
+            try:
+                sample = self._position_from_progress_windows((window,), duration)
+            except Exception as exc:
+                self._invalidate_capture_windows()
+                self._last_error = f"capture progress read failed: {exc}"
+                return None
+            if sample is not None and self._seek_window_matches_track(window, title, artist):
+                self._last_error = ""
+                return sample
+            self._invalidate_capture_windows()
+        return None
+
+    def seek_playback_position_once(
+        self,
+        position_seconds: float,
+        duration_seconds: float,
+        title: str = "",
+        artist: str = "",
+    ) -> bool:
+        """Attempt at most one identity-checked UIA mutation for capture.
+
+        A writable RangeValue takes priority over the verified NetEase strip.
+        Once a mutation is reserved, exceptions and missing progress readback
+        fail closed: no second control, window, or mouse fallback is tried.
+        The caller owns serialization, COM initialization, and timeout fencing;
+        timing out a Python future cannot interrupt an in-flight COM write.
+        """
+        self._last_capture_seek_attempted = False
+        try:
+            duration = float(duration_seconds)
+            position = float(position_seconds)
+        except (TypeError, ValueError):
+            return False
+        if (
+            not str(title or "").strip()
+            or not math.isfinite(duration)
+            or not math.isfinite(position)
+            or duration <= 0.0
+        ):
+            return False
+        target = max(0.0, min(duration, position))
+        fraction = target / duration
+        windows = self._capture_progress_windows(title, artist)
+        for window in windows:
+            for control in self._progress_seek_controls(window):
+                try:
+                    interface = control.iface_range_value
+                    minimum = float(interface.CurrentMinimum)
+                    maximum = float(interface.CurrentMaximum)
+                    if bool(interface.CurrentIsReadOnly) or not maximum > minimum:
+                        continue
+                    if not all(math.isfinite(value) for value in (minimum, maximum, maximum - minimum)):
+                        continue
+                    write = interface.SetValue
+                except AttributeError:
+                    # A progress-only element may have no RangeValue pattern.
+                    continue
+                except Exception as exc:
+                    self._invalidate_capture_windows()
+                    self._last_error = f"capture range unavailable: {exc}"
+                    return False
+                if not self._seek_window_matches_track(window, title, artist):
+                    self._invalidate_capture_windows()
+                    return False
+                self._last_capture_seek_attempted = True
+                try:
+                    write(minimum + (maximum - minimum) * fraction)
+                    confirmed = self.verify_playback_position(
+                        target, duration, title, artist, window=window
+                    )
+                except Exception as exc:
+                    self._invalidate_capture_windows()
+                    self._last_error = f"capture range seek uncertain: {exc}"
+                    return False
+                if not confirmed:
+                    self._invalidate_capture_windows()
+                self._last_error = "" if confirmed else "capture seek did not confirm actual player progress"
+                return bool(confirmed)
+
+        if self._service_name != "netease" or not windows:
+            return False
+        # The legacy reveal-and-seek wrapper retries ranges. Reuse only its
+        # visibility guard and the strip helper that issues one mouse click.
+        try:
+            with self._temporarily_reveal_player_window(windows[0], title, artist) as visible_window:
+                if visible_window is None or not self._seek_window_matches_track(visible_window, title, artist):
+                    self._invalidate_capture_windows()
+                    return False
+                self._last_capture_seek_attempted = True
+                confirmed = self._click_visible_verified_progress_strip(
+                    visible_window, fraction, target, duration, title, artist
+                )
+        except Exception as exc:
+            self._invalidate_capture_windows()
+            self._last_error = f"capture strip seek uncertain: {exc}"
+            return False
+        if not confirmed:
+            self._invalidate_capture_windows()
+        self._last_error = "" if confirmed else "capture seek did not confirm actual player progress"
+        return bool(confirmed)
+
+    @property
+    def last_capture_seek_attempted(self) -> bool:
+        """Whether capture reserved its one possible range write or click."""
+        return bool(self._last_capture_seek_attempted)
+
+    def _capture_progress_windows(self, title: str, artist: str) -> tuple[object, ...]:
+        """Reuse trusted wrappers for at most 10 s on their original COM thread.
+
+        Every hit rechecks live native process and title/artist identity. An
+        invalid hit fails this operation closed; a later operation may resolve
+        fresh elements. This never retries a mutation after an uncertain write.
+        """
+        current_thread = threading.get_ident()
+        owner = self._capture_window_cache_thread
+        if owner is not None and owner != current_thread:
+            self._last_error = "capture wrappers belong to another COM thread"
+            return ()
+        key = (self._normalize_text(title), self._normalize_text(artist))
+        now = time.monotonic()
+        cached = self._capture_window_cache
+        if (
+            cached
+            and key == self._capture_window_cache_key
+            and 0.0 <= now - self._capture_window_cache_at < 10.0
+        ):
+            try:
+                if all(self._seek_window_matches_track(window, title, artist) for window in cached):
+                    return cached
+                self._last_error = "capture cached window identity changed"
+            except Exception as exc:
+                self._last_error = f"capture cached progress unavailable: {exc}"
+            self._invalidate_capture_windows()
+            return ()
+        self._invalidate_capture_windows()
+        try:
+            from pywinauto import Desktop
+        except Exception as exc:
+            self._pywinauto_available = False
+            self._last_error = f"pywinauto unavailable: {exc}"
+            return ()
+        self._pywinauto_available = True
+        try:
+            windows = self._netease_windows(Desktop(backend="uia"), title, require_title=True)
+            trusted = tuple(
+                window for window in list(windows)[:3]
+                if self._seek_window_matches_track(window, title, artist)
+            )
+            if trusted:
+                self._capture_window_cache = trusted
+                self._capture_window_cache_key = key
+                self._capture_window_cache_at = now
+                self._capture_window_cache_thread = current_thread
+            return trusted
+        except Exception as exc:
+            self._last_error = f"capture progress unavailable: {exc}"
+            return ()
+
+    def _invalidate_capture_windows(self) -> None:
+        """Drop wrappers on their owning thread without resetting legacy data."""
+        self._capture_window_cache = ()
+        self._capture_window_cache_key = None
+        self._capture_window_cache_at = 0.0
 
     @property
     def last_physical_seek_attempted(self) -> bool:

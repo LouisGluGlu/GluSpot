@@ -40,6 +40,152 @@ def personal_dj_ring_poses(elapsed: float):
     return tuple(sorted(poses, key=lambda item: item[1]))
 
 
+def personal_dj_icon_ellipses(rect: QRectF, *, bands=None, elapsed: float = 0.0):
+    """One ellipse per visible speech ring, in the same place the icon paints them."""
+    values = (bands.low, bands.mid, bands.high) if bands is not None else (0.0, 0.0, 0.0)
+    levels = tuple(max(0.0, min(1.0, float(level) * 4.0)) for level in values)
+    ellipses = []
+    for identity, x, height_fraction, opacity in personal_dj_ring_poses(elapsed):
+        energy = levels[(0, 1, 2, 1, 0)[identity]]
+        # Voice and beats read clearly: up to 22% taller and 11% wider rings.
+        height = rect.height() * min(1.0, height_fraction + energy * .22)
+        width = rect.width() * (.15 + height_fraction * .13 + energy * .11)
+        ellipse = QRectF(rect.left() + rect.width() * x - width / 2,
+                         rect.center().y() - height / 2, width, height)
+        ellipses.append((identity, x, opacity, energy, ellipse))
+    return tuple(ellipses)
+
+
+def personal_dj_icon_bounds(rect: QRectF, *, bands=None, elapsed: float = 0.0) -> QRectF:
+    """Tight box around the waveform, not the round button behind it."""
+    bounds = QRectF()
+    for _identity, _x, opacity, _energy, ellipse in personal_dj_icon_ellipses(
+            rect, bands=bands, elapsed=elapsed):
+        if opacity <= 0.001:
+            continue
+        bounds = QRectF(ellipse) if bounds.isNull() else bounds.united(ellipse)
+    return bounds
+
+
+# The previous dot was 6–10 px and centered on the waveform corner, so half of
+# it sat outside the round glass. The light is now about 60% of that size.
+STATUS_DOT_PREVIOUS_SCALE = 0.60
+
+
+def personal_dj_legacy_status_dot_diameter(button_side: float) -> float:
+    side = max(0.0, float(button_side))
+    return max(6.0, min(10.0, side * 0.22))
+
+
+def personal_dj_status_dot_diameter(button_side: float) -> float:
+    return personal_dj_legacy_status_dot_diameter(button_side) * STATUS_DOT_PREVIOUS_SCALE
+
+
+def _status_corners_inside(outer: float, dot: float, limit: float) -> bool:
+    if dot < 0.0 or limit < 0.0:
+        return False
+    points = ((outer, outer), (outer - dot, outer), (outer, outer - dot), (outer - dot, outer - dot))
+    limit_sq = limit * limit + 1e-8
+    return all(x * x + y * y <= limit_sq for x, y in points)
+
+
+def _status_outer_corner(dot: float, limit: float) -> float | None:
+    """Bottom-right corner of a square that stays inside a circle of radius ``limit``."""
+    if limit <= 0.0:
+        return 0.0 if dot <= 0.0 else None
+    hi = limit / math.sqrt(2.0)
+    if _status_corners_inside(hi, dot, limit):
+        return hi
+    if not _status_corners_inside(0.0, dot, limit):
+        return None
+    low, best = 0.0, 0.0
+    for _ in range(28):
+        mid = (low + hi) / 2.0
+        if _status_corners_inside(mid, dot, limit):
+            best = mid
+            low = mid
+        else:
+            hi = mid
+    return best
+
+
+def _max_status_dot(limit: float) -> float:
+    if limit <= 0.0:
+        return 0.0
+    low, high, best = 0.0, limit * math.sqrt(2.0), 0.0
+    for _ in range(28):
+        mid = (low + high) / 2.0
+        if _status_outer_corner(mid, limit) is not None:
+            best = mid
+            low = mid
+        else:
+            high = mid
+    return best
+
+
+def personal_dj_status_margin(radius: float) -> float:
+    """Gap between the light and the glass edge, in the same units as the button."""
+    if radius <= 0.0:
+        return 0.0
+    return min(radius * 0.18, max(1.0, radius * 0.12))
+
+
+def personal_dj_status_badge(button: QRectF, dot: float | None = None) -> QRectF:
+    """Place the whole light inside the round glass, inner bottom-right."""
+    side = min(max(0.0, float(button.width())), max(0.0, float(button.height())))
+    radius = side / 2.0
+    center = button.center()
+    if radius <= 0.0:
+        return QRectF(center.x(), center.y(), 0.0, 0.0)
+    margin = min(personal_dj_status_margin(radius), radius * 0.35)
+    limit = max(0.0, radius - margin)
+    requested = personal_dj_status_dot_diameter(side) if dot is None else max(0.0, float(dot))
+    dot = min(requested, _max_status_dot(limit))
+    outer = _status_outer_corner(dot, limit)
+    if outer is None:
+        dot = 0.0
+        outer = 0.0
+    return QRectF(center.x() + outer - dot, center.y() + outer - dot, dot, dot)
+
+
+def personal_dj_status_badge_inside(button: QRectF, badge: QRectF) -> bool:
+    """True when every corner of the light's bounding rect is inside the round glass."""
+    side_x = max(button.width(), 0.0) / 2.0
+    side_y = max(button.height(), 0.0) / 2.0
+    if side_x <= 0.0 or side_y <= 0.0 or badge.width() < 0.0 or badge.height() < 0.0:
+        return False
+    center = button.center()
+    corners = (badge.topLeft(), badge.topRight(), badge.bottomLeft(), badge.bottomRight())
+    for corner in corners:
+        nx = (corner.x() - center.x()) / side_x
+        ny = (corner.y() - center.y()) / side_y
+        if nx * nx + ny * ny > 1.0 + 1e-6:
+            return False
+    return True
+
+
+def personal_dj_fixed_status_light(button: QRectF, *, idle: bool) -> QRectF:
+    """Lamp fixed on the resting waveform's bottom-right corner.
+
+    Ring travel and speech energy do not move it. Idle or silence shifts the
+    same lamp inward so it sits on the icon instead of the glass rim.
+    """
+    inner = button.adjusted(
+        button.width() * 0.18, button.height() * 0.14,
+        -button.width() * 0.18, -button.height() * 0.14,
+    )
+    glyph = personal_dj_icon_bounds(inner, bands=None, elapsed=0.0)
+    if glyph.isNull():
+        glyph = QRectF(inner)
+    dot = max(4.0, min(7.0, min(button.width(), button.height()) * 0.16))
+    inward = min(glyph.width(), glyph.height()) * (0.16 if idle else 0.0)
+    return QRectF(
+        glyph.right() - dot * 0.5 - inward,
+        glyph.bottom() - dot * 0.5 - inward,
+        dot, dot,
+    )
+
+
 def paint_personal_dj_icon(
     painter: QPainter, rect: QRectF, color: QColor, *, bands=None,
     elapsed: float = 0.0, neutral: QColor | None = None,
@@ -47,19 +193,13 @@ def paint_personal_dj_icon(
     backdrop: QColor | Callable[[QRectF], QColor] | None = None,
 ):
     """Keep page tones, or blend island side light into its actual backdrop."""
-    values = (bands.low, bands.mid, bands.high) if bands is not None else (0.0, 0.0, 0.0)
-    levels = tuple(max(0.0, min(1.0, float(level) * 4.0)) for level in values)
     neutral = QColor(neutral or QColor(245, 246, 248))
     painter.save()
     parent_opacity = painter.opacity()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    for identity, x, height_fraction, opacity in personal_dj_ring_poses(elapsed):
-        energy = levels[(0, 1, 2, 1, 0)[identity]]
-        height = rect.height() * min(1.0, height_fraction + energy * .10)
-        width = rect.width() * (.15 + height_fraction * .13 + energy * .055)
-        ellipse = QRectF(rect.left() + rect.width() * x - width / 2,
-                         rect.center().y() - height / 2, width, height)
+    for identity, x, opacity, energy, ellipse in personal_dj_icon_ellipses(
+            rect, bands=bands, elapsed=elapsed):
         painter.setOpacity(parent_opacity * opacity)
         # Only island callers supply their background. Their left rim keeps
         # the cover characteristic instead of gaining positional white tint.

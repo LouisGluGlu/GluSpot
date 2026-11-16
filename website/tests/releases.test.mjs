@@ -16,9 +16,16 @@ function release(version, overrides = {}) {
 test("selects the highest published Windows version, including prereleases", () => {
   const selected = selectLatestRelease([
     release("6.417", { published_at: "2026-12-01T00:00:00Z", prerelease: false }),
-    release("6.419"), release("6.418"), release("6.99"),
+    release("6.419"), release("6.418"), release("6.09"),
   ]);
   assert.deepEqual(selected, { version: "6.419", url: `${REPO}/releases/tag/v6.419` });
+});
+
+test("reads a short minor as thousandths, like the Windows file version", () => {
+  // 6.50 is file version 6.500, so it follows 6.418; a later 6.51 follows it.
+  assert.equal(selectLatestRelease([release("6.418"), release("6.50")]).version, "6.50");
+  assert.equal(selectLatestRelease([release("6.50"), release("6.418.1")]).version, "6.50");
+  assert.equal(selectLatestRelease([release("6.50"), release("6.51")]).version, "6.51");
 });
 
 test("ignores drafts, source-only releases and incomplete Windows uploads", () => {

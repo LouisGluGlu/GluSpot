@@ -85,7 +85,6 @@ class IslandLyricCleanupTests(unittest.TestCase):
         visual = self.visual(["作词：A"])
         visual.no_lyrics_text = "No lyrics available"
         visual.no_lyrics_display_mode = "album_island"
-        self.assertTrue(visual._should_paint_album_island())
         self.assertEqual(visual._current_lyric_display_lines(), ["No lyrics available"])
         self.assertEqual(visual._gelv_display_lines(), ["No lyrics available"])
         self.assertEqual(visual._compact_music_text(), "No lyrics available")

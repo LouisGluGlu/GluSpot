@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
@@ -53,12 +53,27 @@ class MusicGlassLevelTests(unittest.TestCase):
                 manager._save_timer.stop()
                 reloaded._save_timer.stop()
 
+    def test_strengthened_blur_is_level_driven_and_static_frames_are_identical(self):
+        self.assertEqual(glass.glass_blur_scale(50), 1.45)
+        self.assertEqual(glass.GLASS_MATERIAL_MAX_EDGE, 224)
+        scene, rect = self.striped_scene(), QRectF(0, 0, 120, 60)
+        for level in (25, 75):
+            images = []
+            for _frame in range(10):
+                image = QImage(120, 60, QImage.Format.Format_ARGB32_Premultiplied)
+                image.fill(Qt.GlobalColor.transparent)
+                with QPainter(image) as painter:
+                    glass.paint_liquid_glass(painter, rect, refractive=True,
+                        backdrop=scene, material_level=level, cache_token='stable')
+                images.append(image)
+            self.assertTrue(all(image == images[0] for image in images))
+
     def test_one_settings_slider_persists_both_material_effects_and_syncs(self):
         island, settings = FakeIslandWidget(), FakeSettingsManager()
         window = SettingsWindow(island, settings)
         try:
             slider = window.music_glass_level
-            self.assertIn('越高越不透明', slider.toolTip())
+            self.assertIn('实色', slider.toolTip())
             slider.setValue(79)
             self.assertEqual(settings.get('v2_music_glass_level'), 79)
             self.assertEqual(slider._value_label.text(), '79%')
@@ -89,11 +104,9 @@ class MusicGlassLevelTests(unittest.TestCase):
             values = [material.pixelColor(x, material.height() // 2).red()
                       for x in range(15, material.width() - 15)]
             detail.append(float(np.std(values)))
-        self.assertEqual(alpha, sorted(alpha))
         self.assertGreater(alpha[-1], 245)
-        self.assertEqual(alpha[0], 0)
-        self.assertGreater(detail[0], detail[1])
-        self.assertGreater(detail[1], detail[2])
+        self.assertGreater(detail[0], detail[-1] * 2)
+        self.assertGreater(alpha[0], 80)
         # Strong blur is already a flat field; bounded 8-bit resampling may
         # vary by a shade rather than decreasing strictly below one byte.
         self.assertLess(max(detail[2:]), 4., detail)
@@ -118,7 +131,7 @@ class MusicGlassLevelTests(unittest.TestCase):
 
     def test_pause_glyph_itself_contains_scene_pigment_with_no_background_plate(self):
         owner = _TransitionOwner()
-        values = {'v2_music_glass_level': 50, 'v2_theme_mode': 'dark'}
+        values = {'v2_music_glass_level': 0, 'v2_theme_mode': 'dark'}
         owner.settings_getter = lambda key, default=None: values.get(key, default)
         window = MusicSurfaceWindow(owner)
         window.resize(240, 120)
@@ -201,6 +214,14 @@ class MusicGlassLevelTests(unittest.TestCase):
         try:
             images = []
             for hovered, pressed in ((False, False), (True, False), (True, True)):
+                feedback = window._glass_feedback
+                feedback.reset()
+                group = {"media:toggle_play_pause": QRectF(80, 20, 80, 80)}
+                feedback.advance([group], "", 100.)
+                if pressed:
+                    feedback.press("media:toggle_play_pause", QPointF(99, 60), 100.)
+                for index in range(1, 61):
+                    feedback.advance([group], "media:toggle_play_pause" if hovered else "", 100. + index / 120.)
                 image = QImage(240, 120, QImage.Format.Format_ARGB32_Premultiplied)
                 image.fill(Qt.GlobalColor.transparent)
                 with QPainter(image) as painter, \
@@ -212,9 +233,9 @@ class MusicGlassLevelTests(unittest.TestCase):
                 self.assertEqual(image.pixelColor(120, 60).alpha(), 0)
                 self.assertEqual(image.pixelColor(81, 60).alpha(), 0)
             center = [image.pixelColor(99, 60).lightness() for image in images]
-            # Hover still brightens transmitted opal inside the silhouette.
-            self.assertGreater(center[1], center[0] + 8)
-            self.assertLess(center[2], center[1])
+            # Hover and the new additive contact glow both brighten Clear.
+            self.assertGreater(center[1], center[0] + 4)
+            self.assertGreater(center[2], center[1])
         finally:
             window.shutdown()
             owner.close()
@@ -258,7 +279,7 @@ class MusicGlassLevelTests(unittest.TestCase):
                                         self.assertEqual(image.pixelColor(81, 21).alpha(), 0)
                                         if level > 0:
                                             self.assertGreater(actual.alpha(), 160)
-                                            if background == '#168ba8':
+                                            if background == '#168ba8' and level < 100:
                                                 self.assertGreater(actual.blue(), actual.red() + 8)
                                                 self.assertGreater(actual.green(), actual.red() + 6)
                                         if command == 'toggle_play_pause' and playing:
@@ -268,7 +289,7 @@ class MusicGlassLevelTests(unittest.TestCase):
             window.shutdown()
             owner.close()
 
-    def test_transport_opacity_follows_level_while_scene_still_changes_glyph_pixels(self):
+    def test_transport_level_keeps_clear_silhouette_while_scene_changes_glyph_pixels(self):
         owner = _TransitionOwner()
         values = {'v2_theme_mode': 'dark', 'v2_music_glass_level': 50}
         owner.settings_getter = lambda key, default=None: values.get(key, default)
@@ -295,10 +316,11 @@ class MusicGlassLevelTests(unittest.TestCase):
                     self.assertEqual(image.pixelColor(120, 60).alpha(), 0)
                     self.assertEqual(image.pixelColor(81, 60).alpha(), 0)
                 alpha = [color.alpha() for color in colors]
-                self.assertEqual(alpha, sorted(alpha))
-                self.assertGreater(alpha[-1], alpha[0] + 160)
+                # Confirmed Clear keeps shape/tint fixed; level scales only
+                # blur and veil, so a flat scene has the same glyph opacity.
+                self.assertEqual(alpha, [255] * 5)
                 scene_colors[background] = colors
-            for index in range(1, 5):
+            for index in range(1, 4):
                 teal = scene_colors['#168ba8'][index]
                 warm = scene_colors['#a88b16'][index]
                 self.assertGreater(teal.blue() - teal.red(), 8)

@@ -5,12 +5,13 @@ from collections import deque
 from dataclasses import replace
 import time
 
-from PySide6.QtCore import QEvent, QObject, QRect, QTimer
+from PySide6.QtCore import QEvent, QObject, QRect, Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QImage
 
 from api.online_music import AccountSnapshot, OnlinePlaylist, OnlineSong
 from api.online_music_artwork import fetch_online_thumbnail
 from api.online_music_diagnostics import record_login_phase
+from local.music_library_query import local_collection_matches, local_song_matches, log_search_phase
 from local.music_library_window import LibraryCollection, MusicLibraryWindow
 from local.music_tasks import MusicTasks
 from local.music_navigation_transition import MusicNavigationTransition
@@ -22,7 +23,20 @@ class MusicLibraryController(QObject):
         self.settings, self.service, self.player = settings, service, player
         self.island, self.entry = island, entry
         self.window = window or MusicLibraryWindow()
-        self.window.set_background_context(settings.get, getattr(island, "_run_background", None))
+        entry_window = getattr(entry, "window", None)
+        self.window.set_background_context(settings.get, getattr(island, "_run_background", None),
+            palette_visible=lambda: entry_window is not None and entry_window.isVisible()
+                                   and getattr(entry_window, "page", "") == "sources")
+        embedded = getattr(self.window, "now_playing_island", None)
+        if embedded is not None:
+            embedded.set_context(settings.get, island)
+            send_command = (getattr(self.island, "_send_playback_command_async", None)
+                            or getattr(self.player, "send_playback_command", None))
+            if callable(send_command):
+                embedded.commandRequested.connect(send_command)
+        entry_palette = getattr(entry_window, "set_background_palette", None)
+        if callable(entry_palette):
+            self.window.backgroundPaletteChanged.connect(entry_palette)
         settings_changed = getattr(settings, "setting_changed", None)
         if settings_changed is not None:
             settings_changed.connect(self.window.on_background_setting_changed)
@@ -31,6 +45,7 @@ class MusicLibraryController(QObject):
         self.tasks.completed.connect(self._completed)
         self.art_tasks.completed.connect(self._art_completed)
         self.window.sourceSwitchRequested.connect(self.switch_source)
+        self.window.retryRequested.connect(self._retry_current_library)
         self.window.backRequested.connect(self.back)
         self.window.logoutRequested.connect(self.logout)
         self.window.collectionRequested.connect(self.play_collection)
@@ -38,6 +53,19 @@ class MusicLibraryController(QObject):
         if now_playing is not None:
             now_playing.connect(self.open_now_playing)
         self.window.queueNextRequested.connect(self.queue_next)
+        for name, slot in (("playlistPageRequested", self.open_playlist_page),
+                           ("playlistSongRequested", self.play_from_page),
+                           ("playlistAddRequested", self.add_to_playlist_from_page),
+                           ("songInsertRequested", self.insert_search_song)):
+            signal = getattr(self.window, name, None)
+            if signal is not None:
+                signal.connect(slot)
+        self._page_key = None
+        self._page_rows = ()
+        self._search_cache = {}
+        setter = getattr(self.window, "set_search_history_store", None)
+        if callable(setter):
+            setter(self._load_search_history, self._save_search_history)
         self.window.libraryExpandChanged.connect(self._save_expanded)
         self.window.searchRequested.connect(self.search)
         self.window.search.textChanged.connect(self._search_edited)
@@ -55,6 +83,8 @@ class MusicLibraryController(QObject):
         self._query = ""
         self._collections = ()
         self._search_results = ()
+        self._search_network = ()
+        self._search_started = None
         self._offsets = {"songs": 0, "playlists": 0}
         self._more = {"songs": False, "playlists": False}
         self._pending = False
@@ -103,7 +133,14 @@ class MusicLibraryController(QObject):
         self._navigation = getattr(entry, "_navigation", None) or MusicNavigationTransition()
         entry._navigation = self._navigation
         self.window.set_library_expanded(bool(settings.get("v2_library_expanded", False)), animate=False)
-        self.window.set_now_playing(self.player.track)
+        # The floating island applies the selected provider's snapshot once.
+        # Catalog/player notifications can arrive before that application or
+        # belong to an inactive owned source. They must not publish a second
+        # current track to the library's independent presentation widgets.
+        self._visual_data_signal = getattr(island, "visualDataChanged", None)
+        if self._visual_data_signal is not None:
+            self._visual_data_signal.connect(self._sync_now_playing)
+        self._sync_now_playing()
         self._minimum_surface_sync_pending = False
         self._navigation_windows = tuple(window for window in (self.window, getattr(self.entry, "window", None))
                                          if window is not None)
@@ -123,6 +160,8 @@ class MusicLibraryController(QObject):
             window.installEventFilter(self)
 
     def eventFilter(self, watched, event):
+        if watched is getattr(self.entry, "window", None) and event.type() == QEvent.Type.Show:
+            self.window._prepare_background_palette()
         if (watched in getattr(self, "_navigation_windows", ())
                 and event.type() in (QEvent.Type.Move, QEvent.Type.Resize)
                 and watched.isVisible() and not self._music_geometry_applying
@@ -300,6 +339,10 @@ class MusicLibraryController(QObject):
         def fetch():
             if self._closed or epoch != self._epoch:
                 return None
+            # A saved Apple card is not proof the page is signed in. Ask once
+            # before any personal playlist request.
+            if source_id == "apple_music":
+                return self.service.account_status(source_id, refresh=True)
             account = self.service.account_status(source_id)
             if not account.logged_in:
                 account = self.service.account_status(source_id, refresh=True)
@@ -372,17 +415,20 @@ class MusicLibraryController(QObject):
 
     def open_now_playing(self):
         """The rotating library album always opens this track in a window."""
-        if (self._closed or self._logout_pending or self._opening is not None
-                or not self.settings.get("v2_owned_playback_enabled", True)):
+        if self._closed or self._logout_pending or self._opening is not None:
             return False
-        track = self.player.track
-        if track is None or not track.track_id.startswith("owned:"):
+        shared = self._visual_data_signal is not None
+        track = self.window._now_playing if shared else self.player.track
+        if (track is None or not shared and (
+                not self.settings.get("v2_owned_playback_enabled", True)
+                or not track.track_id.startswith("owned:"))):
             return False
         self._set_surface_loading()
         frame = self._navigation.origin_frame(self.window, separate_cover=True, freeze_cover=True)
-        visual = self.player.visual_data()
-        if visual is not None:
-            self.island._apply_visual_data(visual)
+        if not shared:
+            visual = self.player.visual_data()
+            if visual is not None:
+                self.island._apply_visual_data(visual)
         self.settings.set("v2_library_last_playback_surface", "window")
         self.settings.save_now()
         return self._present_music_surface("window", frame)
@@ -391,10 +437,8 @@ class MusicLibraryController(QObject):
         """Expose the final surface once, then animate only frozen layers."""
         if self.window.isVisible():
             self._publish_shared_music_geometry(self.window.geometry())
-        if getattr(self.island, "_music_surface_active", False):
-            self.island._restore_island_from_music_surface()
+        # Opening the expanded page must not restore the mini island on top of it.
         self.island._music_library_active = False
-        self.island.show()
         # An explicit empty origin bypasses the island's entire-window morph.
         # The separate cover handoff already owns this navigation animation.
         kwargs = {}
@@ -404,6 +448,7 @@ class MusicLibraryController(QObject):
         self.island._show_music_fullscreen(fullscreen=mode == "fullscreen",
             origin_geometry=QRect(), origin_snapshot=QImage(), **kwargs)
         if getattr(self.island, "_music_surface_active", False):
+            self.island.hide()
             self._navigation.request_start(frame, getattr(self.island, "music_fullscreen_overlay", None))
             self.window.hide()
             return True
@@ -448,6 +493,31 @@ class MusicLibraryController(QObject):
         setter = getattr(surface, "set_library_loading", None)
         if callable(setter):
             setter(row.title, self.window._artwork.get(row.key, QImage())) if row is not None else setter()
+
+    def _published_track_matches(self, owned) -> bool:
+        visual = getattr(self.island, "current_visual_data", None)
+        track = getattr(visual, "track", None)
+        if track is None:
+            return True
+        return str(getattr(track, "track_id", "") or "") == str(getattr(owned, "track_id", "") or "")
+
+    def _restore_retained_album_playback(self):
+        """Play the retained album from its current song and position."""
+        owned = self.player.track
+        if owned is None:
+            return
+        playing = getattr(self.player, "interruption_playing", None)
+        audible = bool(playing()) if callable(playing) else bool(getattr(owned, "is_playing", False))
+        command = getattr(self.player, "send_playback_command", None)
+        # Reopening the album is a play request, including after a pause.
+        if not audible and callable(command):
+            command("toggle_play_pause")
+        if self._published_track_matches(owned):
+            return
+        visual = self.player.visual_data() if callable(getattr(self.player, "visual_data", None)) else None
+        apply = getattr(self.island, "_apply_visual_data", None)
+        if visual is not None and callable(apply):
+            apply(visual)
 
     def _origin_token(self):
         getter = getattr(self.player, "playback_origin_token", None)
@@ -509,6 +579,34 @@ class MusicLibraryController(QObject):
             self.window.search.setEnabled(True)
             self.window.set_error("服务繁忙，退出未完成，请重试")
 
+    def _queue_songs(self):
+        queue = getattr(self.player, "queue", ()) or ()
+        return tuple(song for song in queue if isinstance(song, OnlineSong))
+
+    def _discard_stale_search(self):
+        """Drop queued search work whose request id is no longer current."""
+        discard = getattr(self.tasks, "discard", None)
+        if not callable(discard):
+            return 0
+        request = self._request
+        return discard(lambda token: isinstance(token, tuple) and bool(token) and token[0] == "search"
+                       and (len(token) < 3 or token[2] != request))
+
+    def _local_preview_rows(self):
+        catalog = local_collection_matches(self.window._catalog, self._query)
+        songs = self._rows(local_song_matches(self._queue_songs(), self._query, source_id=self._source))
+        return self._append_unique(songs, catalog)
+
+    def _publish_local_preview(self, query):
+        query = str(query).strip()
+        if not query or self.window.search.text().strip() != query:
+            return
+        merged = self._local_preview_rows()[:30]
+        current = tuple(self.window._results)
+        if tuple(getattr(row, "key", None) for row in current) == tuple(row.key for row in merged):
+            return
+        self.window.set_search_results(merged)
+
     def _search_edited(self, query):
         """Fence old results immediately while the view debounces network I/O."""
         query = str(query).strip()
@@ -521,7 +619,11 @@ class MusicLibraryController(QObject):
         self._offsets = {"songs": 0, "playlists": 0}
         self._more = {"songs": False, "playlists": False}
         self._search_results = ()
+        self._search_network = ()
         self._pending = False
+        self._discard_stale_search()
+        if query:
+            self._publish_local_preview(query)
         if self._opening is not None:
             self._opening = None
             self._opening_ready = False
@@ -540,13 +642,17 @@ class MusicLibraryController(QObject):
         self._offsets = {"songs": 0, "playlists": 0}
         self._more = {"songs": False, "playlists": False}
         self._search_results = ()
+        self._search_network = ()
+        self._discard_stale_search()
         if not self._query:
+            self._search_started = None
             self._pending = False
             self.window.set_loading(False)
             self.window.set_collections(self._collections)
-            self.window.set_has_more(getattr(self, "_catalog_has_more", False) or self._recommended_has_more or self._recommended_retry)
+            self._set_catalog_more()
             return
-        self.window.set_search_results(())
+        self._publish_local_preview(self._query)
+        self._search_started = time.perf_counter()
         self._fetch_search()
 
     def _fetch_search(self, kinds=None):
@@ -560,14 +666,14 @@ class MusicLibraryController(QObject):
         self._search_retry_kinds = kinds
         self._search_pending_kinds = set(kinds)
         self._search_failed_kinds = set()
-        self._search_batch_base = self._search_results
+        self._search_batch_base = self._search_network
         self._search_batch_pages = {}
         for kind in kinds:
             def fetch(kind=kind):
                 if self._closed or epoch != self._epoch or request != self._request:
                     return None
                 try:
-                    page = self.service.search(source, query, kind=kind, limit=30, offset=offsets[kind])
+                    page = self._cached_search(source, query, kind, offsets[kind])
                     return {kind: page}, []
                 except Exception:
                     return {}, [kind]
@@ -578,6 +684,8 @@ class MusicLibraryController(QObject):
             self._pending = False
             self.window.set_loading(False)
             self._schedule_catalog_retry("search")
+            if not self.window._results:
+                self.window.set_error("搜索没有完成，请检查网络后重试")
 
     def load_more(self):
         if self._pending or self._closed or self._logout_pending:
@@ -588,6 +696,13 @@ class MusicLibraryController(QObject):
             return
         if self._catalog_pending:
             return
+        if self.window.library_variant == "sidebar":
+            section = self.window._variant_view.section
+            if section == "recommended" and (self._recommended_has_more or self._recommended_retry):
+                self._fetch_recommended()
+            elif section == "personal" and getattr(self, "_catalog_has_more", False):
+                self._fetch_catalog_page()
+            return
         if self._recommended_retry:
             self._fetch_recommended()
             return
@@ -596,6 +711,12 @@ class MusicLibraryController(QObject):
                 self._fetch_recommended()
             return
         self._fetch_catalog_page()
+
+    def _set_catalog_more(self):
+        personal = getattr(self, "_catalog_has_more", False)
+        recommended = self._recommended_has_more or self._recommended_retry
+        self.window.set_has_more(personal or recommended,
+                                 groups={"personal": personal, "recommended": recommended})
 
     def _fetch_catalog_page(self, *, initial=False):
         self._catalog_pending = True
@@ -611,7 +732,7 @@ class MusicLibraryController(QObject):
             if not self._query:
                 self._pending = False
             self._schedule_catalog_retry(kind)
-            self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+            self._set_catalog_more()
 
     @staticmethod
     def _catalog_loading_kind(kind):
@@ -624,7 +745,7 @@ class MusicLibraryController(QObject):
         count = self._catalog_retry_counts.get(kind, 0)
         if kind == "account" and count >= 3:
             self.window.set_loading(False)
-            self.window.set_notice("网络暂不可用，本地快照已保留；可返回账号页重试核验")
+            self.window.set_error("网络暂不可用，本地快照已保留；可返回账号页重试核验")
             return
         self._catalog_retry_counts[kind] = min(count + 1, 6)
         self._catalog_retry_at[kind] = time.monotonic() + min(30., 2. ** min(count, 5))
@@ -702,20 +823,36 @@ class MusicLibraryController(QObject):
         return QImage(image) if isinstance(image, QImage) else QImage()
 
     def queue_next(self, row):
+        page_keys = getattr(self.window, "page_song_keys", lambda: frozenset())()
         if (self._closed or self._logout_pending or not isinstance(row, LibraryCollection)
                 or row.kind != "song" or row.song is None or row.song.source_id != self._source
-                or row.key not in {r.key for r in self.window.collections}):
+                or row.key not in {r.key for r in self.window.collections} and row.key not in page_keys):
             return
+        disabled = "请先在设置中开启程序内播放"
+        not_ready = "请先播放一首歌曲；加载歌曲期间请稍后再添加"
         if not self.settings.get("v2_owned_playback_enabled", True):
-            self.window.set_notice("请先在设置中开启程序内播放")
+            self.window.set_error(disabled)
             return
         if self.player.enqueue_next(row.song):
+            if getattr(self.window, "_error", "") in {disabled, not_ready}:
+                self.window.set_error("")
             self.window.set_notice("已加入播放列表，将在下一首播放")
         else:
-            self.window.set_notice("请先播放一首歌曲；加载歌曲期间请稍后再添加")
+            self.window.set_error(not_ready)
+
+    def _fetch_apple_for_you(self):
+        """Apple Music's own recommendations fill 为你精选, once per open."""
+        if self._source != "apple_music":
+            return
+        epoch, source = self._epoch, self._source
+        def fetch():
+            if self._closed or epoch != self._epoch:
+                return None
+            return self.service.recommended_playlists(source, limit=60, offset=0, shelf="for_you")
+        self.tasks.submit(("for_you_catalog", epoch, 0), fetch)
 
     def _fetch_recommended(self):
-        if self._recommended_pending or self._source not in {"netease", "qq"}:
+        if self._recommended_pending or self._source not in {"netease", "qq", "apple_music"}:
             return
         epoch, source, offset = self._epoch, self._source, self._recommended_offset
         self._recommended_pending = True
@@ -731,7 +868,7 @@ class MusicLibraryController(QObject):
             self._recommended_retry = True
             self._schedule_catalog_retry("recommended")
             if not self._query:
-                self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+                self._set_catalog_more()
 
     @staticmethod
     def _append_unique(previous, incoming):
@@ -740,6 +877,20 @@ class MusicLibraryController(QObject):
 
     def _completed(self, token, result, error):
         kind, epoch, request, *extra = token
+        if kind == "page_tracks":
+            if epoch == self._epoch:
+                self._page_completed(extra[0], extra[1], result, error)
+            return
+        if kind == "page_add":
+            if self._closed or epoch != self._epoch:
+                return
+            if error or result is not True:
+                messages = {"unsupported": "此来源暂不支持添加到歌单", "not_writable": "请选择自己创建的歌单",
+                            "auth_required": "请先登录此音乐来源"}
+                self.window.set_error(messages.get(str(error), "没有添加成功，请稍后再试"))
+            else:
+                self.window.set_notice(f"已加入「{extra[0]}」")
+            return
         if kind == "resume":
             if self._closed or epoch != self._epoch or request != self._request:
                 return
@@ -773,6 +924,19 @@ class MusicLibraryController(QObject):
             else:
                 self._retry_recommendation_cover_later(request)
             return
+        if kind == "for_you_catalog":
+            if self._closed or epoch != self._epoch or self._source != "apple_music":
+                return
+            if error or result is None or not result.items:
+                return
+            rows = self._rows((p for p in result.items if isinstance(p, OnlinePlaylist) and p.source_id == self._source),
+                              "for_you")
+            # Shelf order: 为你精选 first, as NetEase's daily rows are.
+            self._collections = self._append_unique(rows, self._collections)
+            if not self._query:
+                self.window.set_collections(self._collections)
+            self._prefetch_catalog_artwork()
+            return
         if kind == "recommended_catalog":
             if self._closed or epoch != self._epoch or request != self._recommended_offset:
                 return
@@ -782,7 +946,7 @@ class MusicLibraryController(QObject):
                 self._recommended_retry = True
                 self._schedule_catalog_retry("recommended")
                 if not self._query:
-                    self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+                    self._set_catalog_more()
                 return
             self._recommended_retry = False
             self._finish_catalog_retry("recommended")
@@ -792,7 +956,7 @@ class MusicLibraryController(QObject):
             self._recommended_has_more = bool(result.has_more and result.next_offset > request)
             if not self._query:
                 self.window.set_collections(self._collections)
-                self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+                self._set_catalog_more()
             self._prefetch_catalog_artwork()
             return
         if kind in {"initial_catalog", "catalog"}:
@@ -807,14 +971,19 @@ class MusicLibraryController(QObject):
                 self.window.set_loading(False)
             if (error or result is None
                     or result.has_more and (not result.items or result.next_offset <= self._catalog_offset)):
+                if self._source == "apple_music" and error in {"timeout", "runtime"}:
+                    self._show_apple_library_error("Apple Music 歌单没有在时限内返回，请重试")
+                    return
                 self._schedule_catalog_retry(kind)
                 if not self._query:
-                    self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+                    self._set_catalog_more()
             else:
                 self._finish_catalog_retry(kind)
                 self._append_catalog(result)
             return
         if self._closed or epoch != self._epoch or request != self._request:
+            if kind == "search":
+                log_search_phase("cancelled", time.perf_counter(), generation=request, detail="stale")
             return
         if kind == "open":
             self._account_validating = False
@@ -823,6 +992,9 @@ class MusicLibraryController(QObject):
         if kind == "search" and extra and (error or result is None):
             result, error = ({}, [extra[0]]), None
         if error or (result is None and kind != "logout"):
+            if kind == "open" and self._source == "apple_music" and error in {"timeout", "runtime"}:
+                self._show_apple_library_error("Apple Music 没有在时限内确认登录，请重试")
+                return
             if kind == "open":
                 self.window.set_loading(True, "正在连接账号…")
                 self._schedule_catalog_retry("account")
@@ -845,6 +1017,9 @@ class MusicLibraryController(QObject):
         if kind == "open":
             account = result
             if not account.logged_in:
+                if self._source == "apple_music" and account.state == "error":
+                    self._show_apple_library_error("Apple Music 没有在时限内确认登录，请重试")
+                    return
                 if account.state == "error":
                     self.window.set_account(account)
                     self.window.set_notice("网络暂不可用，已保留本地快照；将重试登录核验")
@@ -869,6 +1044,7 @@ class MusicLibraryController(QObject):
             self.window.set_loading(True, "正在加载歌单…")
             source = self._source
             self._fetch_recommended()
+            self._fetch_apple_for_you()
             self._fetch_catalog_page(initial=True)
             # Account and catalog work is already submitted and visible. These
             # independent workers never hold the first library frame for art.
@@ -888,26 +1064,53 @@ class MusicLibraryController(QObject):
                     continue
                 self._offsets[kind] = page.next_offset
                 self._more[kind] = bool(page.has_more and page.next_offset > old_offset)
-            self._search_results = self._search_batch_base
+            self._search_network = self._search_batch_base
             for result_kind in ("songs", "playlists"):
-                self._search_results = self._append_unique(self._search_results,
+                self._search_network = self._append_unique(self._search_network,
                     self._search_batch_pages.get(result_kind, ()))
+            known = {row.key for row in self._search_network}
+            local_only = tuple(row for row in self._local_preview_rows() if row.key not in known)
+            self._search_results = self._append_unique(self._search_network, local_only)
             self.window.set_search_results(self._search_results)
             self.window.set_has_more(any(self._more.values()))
             # Publish each kind immediately. A slow playlist search must not
             # withhold already returned songs and their cover requests.
             self._search_failed_kinds.update(errors)
             self._pending = bool(pending)
-            self.window.set_loading(bool(pending))
-            self.window.set_catalog_loading("search", bool(pending))
-            if pending:
+            if self._search_started is not None:
+                log_search_phase("network_done" if not self._pending else "network_first", self._search_started,
+                                 rows=len(self._search_results), query_chars=len(self._query), generation=self._request,
+                                 detail="retry" if self._search_failed_kinds else "ok")
+            self.window.set_loading(bool(self._pending))
+            self.window.set_catalog_loading("search", bool(self._pending))
+            if self._pending:
                 return
             if self._search_failed_kinds:
                 self._search_retry_kinds = tuple(k for k in ("songs", "playlists") if k in self._search_failed_kinds)
                 self._schedule_catalog_retry("search")
+                succeeded = set(self._search_batch_pages) - set(self._search_failed_kinds)
+                if not self._search_network and not succeeded and not self.window._results:
+                    self.window.set_error("搜索没有完成，请检查网络后重试")
             else:
                 self._search_retry_kinds = ()
                 self._finish_catalog_retry("search")
+
+    def _show_apple_library_error(self, message):
+        """Stop the gray skeleton. The glass retry button asks again once."""
+        self._account_validating = False
+        self._pending = False
+        self._catalog_pending = False
+        self._clear_catalog_retries()
+        self.window.set_loading(False)
+        self.window.set_catalog_loading("personal", False)
+        self.window.set_error(message, recovery="重试")
+
+    def _retry_current_library(self):
+        if self._closed or not self._source:
+            return
+        self._clear_catalog_retries()
+        self.window.set_loading(True, "正在重新确认登录…")
+        self._fetch_account()
 
     def _record_library_visible(self):
         start = getattr(self, "_login_visible_started", None)
@@ -970,7 +1173,7 @@ class MusicLibraryController(QObject):
         self._catalog_has_more = bool(page.has_more and page.next_offset > old_offset)
         if not self._query:
             self.window.set_collections(self._collections)
-            self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+            self._set_catalog_more()
         self._prefetch_catalog_artwork()
 
     def _queue_art(self, key, url):
@@ -1092,9 +1295,33 @@ class MusicLibraryController(QObject):
         if (self._active_collection == (identity, self._origin_token())
                 and self.player.track is not None
                 and self.player.status not in {"idle", "stream_unavailable", "playback_failed"}):
+            # The same album keeps its song and position, and starts playing
+            # even when the listener left it paused.
+            self._restore_retained_album_playback()
             self.window.finish_open_transition()
             self.open_now_playing()
             return
+        def start():
+            if row.kind == "daily":
+                return self.player.play_daily(self._source)
+            if row.kind == "fm":
+                return self.player.play_personal_fm(self._source)
+            if row.kind == "playlist":
+                return self.player.play_playlist(self._source, row.playlist_id)
+            if row.kind == "song" and row.song is not None and row.song.source_id == self._source:
+                songs = tuple(r.song for r in self._search_results if r.kind == "song" and r.song is not None)
+                if row.song not in songs:
+                    songs = (row.song,)
+                return self.player.play_queue(songs, index=songs.index(row.song))
+            return False
+        self._open_playback(row, mode, global_cover_rect, start, identity)
+
+    def _open_playback(self, row, mode, global_cover_rect, start, identity, *, layout=None):
+        """Grab the cover, start playback and open the playback surface on it.
+
+        ``start`` returns whether the player accepted the request. ``layout``
+        opens the surface on that content layout for this visit only.
+        """
         rect = QRect(global_cover_rect)
         snapshot = QImage()
         if rect.isValid():
@@ -1108,7 +1335,8 @@ class MusicLibraryController(QObject):
         self.settings.save_now()
         self._opening_ready = False
         self._opening = (mode, rect, snapshot)
-        self._opening_origin_guard = callable(getattr(self.player, "playback_origin_token", None))
+        # An insert keeps the queue's origin; only a replacement changes it.
+        self._opening_origin_guard = identity is not None and callable(getattr(self.player, "playback_origin_token", None))
         self._opening_origin_before = self._origin_token()
         self._opening_origin = None
         self._pending_collection = identity
@@ -1116,20 +1344,7 @@ class MusicLibraryController(QObject):
         frame = self._navigation.origin_frame(self.window, separate_cover=True, cover_state=(rect, snapshot, 0.))
         if frame is not None and rect.width() > 0:
             frame.cover_roundness = min(.5, 14. / rect.width())
-        if row.kind == "daily":
-            accepted = self.player.play_daily(self._source)
-        elif row.kind == "fm":
-            accepted = self.player.play_personal_fm(self._source)
-        elif row.kind == "playlist":
-            accepted = self.player.play_playlist(self._source, row.playlist_id)
-        elif row.kind == "song" and row.song is not None and row.song.source_id == self._source:
-            songs = tuple(r.song for r in self._search_results if r.kind == "song" and r.song is not None)
-            if row.song not in songs:
-                songs = (row.song,)
-            index = songs.index(row.song)
-            accepted = self.player.play_queue(songs, index=index)
-        else:
-            accepted = False
+        accepted = start()
         if not accepted:
             if frame is not None:
                 frame.release()
@@ -1156,8 +1371,147 @@ class MusicLibraryController(QObject):
                 self.entry._show_island()
             else:
                 self._present_music_surface(mode, frame)
+                if layout:
+                    surface = getattr(self.island, "music_fullscreen_overlay", None)
+                    change = getattr(surface, "_change_content_layout", None)
+                    if callable(change):
+                        change(layout, animate=False, temporary=True)
                 if self._opening is not None:
                     self._set_surface_loading(row)
+
+    # --- search history and cache -------------------------------------------
+    SEARCH_HISTORY_KEY = "v2_library_search_history"
+    SEARCH_CACHE_SECONDS = 300.0
+    SEARCH_CACHE_LIMIT = 48
+
+    def _load_search_history(self, source):
+        stored = self.settings.get(self.SEARCH_HISTORY_KEY, {}) or {}
+        items = stored.get(str(source), []) if isinstance(stored, dict) else []
+        return tuple(str(item) for item in items if isinstance(item, str))[-12:]
+
+    def _save_search_history(self, source, items):
+        stored = self.settings.get(self.SEARCH_HISTORY_KEY, {}) or {}
+        stored = dict(stored) if isinstance(stored, dict) else {}
+        stored[str(source)] = [str(item) for item in items][-12:]
+        self.settings.set(self.SEARCH_HISTORY_KEY, stored)
+
+    def _cached_search(self, source, query, kind, offset):
+        """A recent identical search (typing back to an earlier query) is instant."""
+        import threading
+        lock = self.__dict__.setdefault("_search_cache_lock", threading.Lock())
+        key = (source, query.casefold(), kind, int(offset))
+        with lock:
+            entry = self._search_cache.get(key)
+            if entry is not None and time.monotonic() - entry[0] < self.SEARCH_CACHE_SECONDS:
+                return entry[1]
+        page = self.service.search(source, query, kind=kind, limit=30, offset=offset)
+        with lock:
+            self._search_cache.pop(key, None)
+            self._search_cache[key] = (time.monotonic(), page)
+            while len(self._search_cache) > self.SEARCH_CACHE_LIMIT:
+                self._search_cache.pop(next(iter(self._search_cache)))
+        return page
+
+    # --- a playlist's own page ----------------------------------------------
+    PAGE_SONG_LIMIT = 500
+
+    def open_playlist_page(self, row):
+        """Fetch the songs of one playlist (or the daily mix) for its page."""
+        if self._closed or not self._source or not isinstance(row, LibraryCollection):
+            return
+        self._page_key = row.key
+        self._page_rows = ()
+        self._fetch_page(row, 0)
+
+    def _fetch_page(self, row, offset):
+        epoch, source = self._epoch, self._source
+        def fetch():
+            if self._closed or epoch != self._epoch:
+                return None
+            if row.kind == "daily":
+                return tuple(self.service.daily_recommendations(source))
+            return self.service.playlist_tracks(source, row.playlist_id, limit=100, offset=offset)
+        if not self.tasks.submit(("page_tracks", epoch, row.key, row, offset), fetch):
+            self.window.set_playlist_tracks(row, self._page_rows, error="暂时无法载入歌曲，请稍后再试")
+
+    def _page_completed(self, row, offset, result, error):
+        if self._closed or row.key != self._page_key:
+            return
+        if error or result is None:
+            self.window.set_playlist_tracks(row, self._page_rows, error="" if self._page_rows else "暂时无法载入歌曲，请稍后再试")
+            return
+        items = result if isinstance(result, tuple) else tuple(getattr(result, "items", ()))
+        songs = tuple(item for item in items if isinstance(item, OnlineSong) and item.media_kind == "song")
+        known = {r.key for r in self._page_rows}
+        fresh = tuple(r for r in self._rows(songs, group=row.group) if r.key not in known)
+        self._page_rows = (self._page_rows + fresh)[:self.PAGE_SONG_LIMIT]
+        more = (not isinstance(result, tuple) and bool(getattr(result, "has_more", False)) and bool(fresh)
+                and len(self._page_rows) < self.PAGE_SONG_LIMIT)
+        self.window.set_playlist_tracks(row, self._page_rows, has_more=more)
+        if more:
+            self._fetch_page(row, int(getattr(result, "next_offset", offset + len(items))))
+
+    def play_from_page(self, collection, rows, index, global_cover_rect, how):
+        """Play from a playlist page without dropping the current queue.
+
+        "single": only this song now (the cover, a double click), then the
+        earlier queue. "list": this playlist from this row, then the earlier
+        queue; the playback window opens on its list.
+        """
+        rows = tuple(rows)
+        if (self._closed or self._logout_pending or not 0 <= index < len(rows)
+                or not all(isinstance(r, LibraryCollection) and r.song is not None for r in rows)):
+            self.window.finish_open_transition()
+            return
+        if not self.settings.get("v2_owned_playback_enabled", True):
+            self.window.finish_open_transition()
+            self.window.set_error("请先在设置中开启程序内播放")
+            return
+        songs = tuple(r.song for r in rows)
+        chosen = rows[index]
+        if how == "single":
+            start = lambda: self.player.insert_and_play((songs[index],), 0)
+            layout = None
+        else:
+            start = lambda: self.player.insert_and_play(songs, index)
+            layout = "playlist"
+        self._open_playback(chosen, "default", global_cover_rect, start, None, layout=layout)
+
+    def insert_search_song(self, row, global_cover_rect):
+        """A search result played now; the current queue carries on after it."""
+        if (self._closed or self._logout_pending or not isinstance(row, LibraryCollection)
+                or row.song is None or row.song.source_id != self._source):
+            return
+        self.play_from_page(None, (row,), 0, global_cover_rect, "single")
+
+    def add_to_playlist_from_page(self, row, global_pos):
+        """Offer the account's own playlists; the chosen one gets this song."""
+        if self._closed or not isinstance(row, LibraryCollection) or row.song is None:
+            return
+        from PySide6.QtWidgets import QMenu
+        own = [c for c in self._collections if c.kind == "playlist" and c.group == "personal" and c.playlist_id]
+        if not own:
+            self.window.set_error("还没有可以添加的个人歌单")
+            return
+        menu = QMenu(self.window)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        for playlist in own[:40]:
+            action = menu.addAction(playlist.title)
+            action.triggered.connect(lambda _checked=False, target=playlist: self._add_song_to(row.song, target))
+        menu.popup(global_pos)
+
+    def _add_song_to(self, song, playlist):
+        epoch, source = self._epoch, self._source
+        def add():
+            if self._closed or epoch != self._epoch:
+                return None
+            if source == "apple_music":
+                self.service.append_playlist_tracks(source, playlist.playlist_id, (song.song_id,))
+            else:
+                self.service.add_song_to_playlist(source, song.song_id, playlist.playlist_id)
+            return True
+        if not self.tasks.submit(("page_add", epoch, playlist.key, playlist.title), add):
+            self.window.set_error("暂时无法添加，请稍后再试")
 
     def _player_status(self, status):
         if self._opening and status == "loading_stream":
@@ -1219,8 +1573,21 @@ class MusicLibraryController(QObject):
                 self.window.raise_()
                 self.window.activateWindow()
 
+    def _sync_now_playing(self, visual=None):
+        if self._closed:
+            return
+        if self._visual_data_signal is None:
+            # Lightweight legacy/offline owners without the shared publisher.
+            track = self.player.track
+        else:
+            visual = getattr(self.island, "current_visual_data", None) if visual is None else visual
+            track = (visual.track if visual is not None
+                     and not bool(getattr(self.island, "media_no_audio", False)) else None)
+        self.window.set_now_playing(track)
+
     def _player_changed(self):
-        self.window.set_now_playing(self.player.track)
+        if self._visual_data_signal is None:
+            self._sync_now_playing()
         if self._opening is None or self.player.track is None:
             return
         # Old playback can emit position signals while a catalog request runs.
@@ -1244,6 +1611,9 @@ class MusicLibraryController(QObject):
 
     def close(self):
         self._closed = True
+        if self._visual_data_signal is not None:
+            self._visual_data_signal.disconnect(self._sync_now_playing)
+            self._visual_data_signal = None
         self._navigation.cancel()
         self._navigation.close()
         self._invalidate()

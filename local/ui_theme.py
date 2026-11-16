@@ -5,9 +5,19 @@ from dataclasses import dataclass
 from datetime import datetime, time as clock_time
 from typing import Callable
 
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QVariantAnimation, Signal
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QComboBox
+
+from local.settings_store import normalize_music_ambience_style, normalize_music_glass_level
+from local.theme_tokens import (
+    THEME_TRANSITION_MS,
+    ThemeTokens,
+    accent_from_qcolor,
+    interpolate_tokens,
+    resolve_tokens,
+    tokens_match,
+)
 
 
 THEME_CHANGE_EVENT_TYPES = (
@@ -259,3 +269,183 @@ def style_combo_popup(combo: QComboBox, theme: dict[str, str] | None = None):
     view.setUniformItemSizes(True)
     view.setAutoFillBackground(True)
     view.setStyleSheet(combo_popup_stylesheet(theme))
+
+
+def surface_is_dark(settings_getter: Callable[[str, object], object] | None = None, now: datetime | clock_time | None = None) -> bool:
+    """Island style 系统 follows Windows. Every other style follows 界面模式."""
+    style = normalize_music_ambience_style(_theme_setting("v2_music_ambience_style", "sea_level", settings_getter))
+    if style == "system":
+        return system_dark_mode()
+    return app_dark_mode(settings_getter, now)
+
+
+def library_is_dark(settings_getter: Callable[[str, object], object] | None = None, now: datetime | clock_time | None = None) -> bool:
+    """Sea level is a dark library. Other styles follow the interface mode."""
+    style = normalize_music_ambience_style(_theme_setting("v2_music_ambience_style", "sea_level", settings_getter))
+    if style == "sea_level":
+        return True
+    return surface_is_dark(settings_getter, now)
+
+
+def resolve_settings_tokens(
+    settings_getter: Callable[[str, object], object] | None = None,
+    accent: tuple[int, int, int] | None = None,
+    now: datetime | clock_time | None = None,
+) -> ThemeTokens:
+    level = normalize_music_glass_level(_theme_setting("v2_music_glass_level", 50, settings_getter))
+    return resolve_tokens(surface_is_dark(settings_getter, now), level, accent)
+
+
+class ThemeTransition(QObject):
+    """One interruptible 360 ms blend. The animation exists only while it runs."""
+
+    changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._from: ThemeTokens | None = None
+        self._to = resolve_tokens(True, 50)
+        self._progress = 1.0
+        self._animation: QVariantAnimation | None = None
+        self.published = False
+
+    @property
+    def active(self) -> bool:
+        return self._from is not None and self._progress < 1.0
+
+    def current(self) -> ThemeTokens:
+        if self._from is None or self._progress >= 1.0:
+            return self._to
+        return interpolate_tokens(self._from, self._to, self._progress)
+
+    def snap(self, tokens: ThemeTokens) -> None:
+        self._from = None
+        self._to = tokens
+        self._progress = 1.0
+        self.published = True
+        self._stop()
+        self.changed.emit()
+
+    def retarget(self, tokens: ThemeTokens, *, animate: bool) -> None:
+        if not animate or not self.published:
+            self.snap(tokens)
+            return
+        current = self.current()
+        if tokens_match(current, tokens) and not self.active:
+            self._to = tokens
+            self.published = True
+            return
+        self._from = current
+        self._to = tokens
+        self._progress = 0.0
+        self.published = True
+        self._start()
+        self.changed.emit()
+
+    def set_progress_for_test(self, progress: float) -> None:
+        self._progress = max(0.0, min(1.0, float(progress)))
+        if self._progress >= 1.0:
+            self._from = None
+        self.changed.emit()
+
+    def _start(self) -> None:
+        animation = self._animation
+        if animation is None:
+            animation = QVariantAnimation(self)
+            animation.setDuration(THEME_TRANSITION_MS)
+            animation.setEasingCurve(QEasingCurve.Type.Linear)
+            animation.setStartValue(0.0)
+            animation.setEndValue(1.0)
+            animation.valueChanged.connect(self._on_value)
+            animation.finished.connect(self._on_finished)
+            self._animation = animation
+        animation.stop()
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.start()
+
+    def _stop(self) -> None:
+        if self._animation is not None:
+            self._animation.stop()
+
+    def _on_value(self, value) -> None:
+        self._progress = float(value)
+        self.changed.emit()
+
+    def _on_finished(self) -> None:
+        self._progress = 1.0
+        self._from = None
+        self.changed.emit()
+
+
+_transition: ThemeTransition | None = None
+
+
+def theme_transition() -> ThemeTransition:
+    global _transition
+    if _transition is None:
+        _transition = ThemeTransition()
+    return _transition
+
+
+def publish_theme(
+    settings_getter: Callable[[str, object], object] | None = None,
+    *,
+    animate: bool = False,
+    accent: tuple[int, int, int] | None = None,
+    now: datetime | clock_time | None = None,
+) -> ThemeTokens:
+    tokens = resolve_settings_tokens(settings_getter, accent, now)
+    theme_transition().retarget(tokens, animate=animate)
+    return tokens
+
+
+def widget_settings_getter(widget):
+    current = widget
+    while current is not None:
+        owner = getattr(current, "owner", None)
+        getter = getattr(owner, "settings_getter", None) if owner is not None else None
+        if not callable(getter):
+            getter = getattr(current, "settings_getter", None)
+        if not callable(getter):
+            getter = getattr(current, "_background_settings_getter", None)
+        if callable(getter):
+            return getter
+        parent = getattr(current, "parentWidget", None)
+        current = parent() if callable(parent) else None
+    return None
+
+
+def active_tokens(widget=None, accent=None) -> ThemeTokens:
+    """Settled or in-flight tokens. Unset widgets keep the historical dark glass."""
+    transition = theme_transition()
+    bound = widget is not None and bool(getattr(widget, "_theme_tokens_bound", False))
+    if transition.active and (widget is None or bound):
+        return transition.current()
+    parsed = accent if isinstance(accent, tuple) or accent is None else accent_from_qcolor(accent)
+    getter = widget_settings_getter(widget) if widget is not None else None
+    if callable(getter):
+        host = widget
+        library = False
+        while host is not None:
+            if getattr(host, "library_variant", None):
+                library = True
+                break
+            parent = getattr(host, "parentWidget", None)
+            host = parent() if callable(parent) else None
+        if library:
+            level = normalize_music_glass_level(_theme_setting("v2_music_glass_level", 50, getter))
+            return resolve_tokens(library_is_dark(getter), level, parsed)
+        return resolve_settings_tokens(getter, parsed)
+    if widget is not None and bool(getattr(widget, "property", lambda *_args: False)("followsAppTheme")) and transition.published:
+        return transition.current()
+    if widget is None and transition.published:
+        return transition.current()
+    return resolve_tokens(True, 50)
+
+
+def bind_theme_updates(widget, callback) -> None:
+    if getattr(widget, "_theme_tokens_bound", False):
+        return
+    widget._theme_tokens_bound = True
+    theme_transition().changed.connect(callback)

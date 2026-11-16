@@ -19,10 +19,19 @@ SETTINGS_FILE = settings_file_for()
 
 
 MUSIC_READING_GRADIENT_DEFAULT_STEPS = 30
-MUSIC_READING_LIFT_DEFAULT_LEVEL = 2
-MUSIC_READING_LIFT_LEVELS = (0, 1, 2, 4)
-MUSIC_READING_STRATEGY_DEFAULT = "gold"
 MUSIC_GLASS_DEFAULT_LEVEL = 50
+CONTROL_OPACITY_DEFAULT = 58
+
+
+def normalize_control_opacity(value) -> int:
+    """0 is clear, 100 is an opaque control plate. One value per theme mode."""
+    try:
+        number = float(value)
+        if isinstance(value, bool) or not math.isfinite(number):
+            return CONTROL_OPACITY_DEFAULT
+        return max(0, min(100, round(number)))
+    except (TypeError, ValueError, OverflowError):
+        return CONTROL_OPACITY_DEFAULT
 
 
 def normalize_music_glass_level(value) -> int:
@@ -42,25 +51,6 @@ def normalize_system_lyric_offset(value) -> float:
         return max(-12.0, min(12.0, number)) if math.isfinite(number) else 0.0
     except (TypeError, ValueError, OverflowError):
         return 0.0
-
-
-def normalize_music_reading_strategy(value) -> str:
-    """Keep the current interpolated reading unless low-perception is selected."""
-    return value if isinstance(value, str) and value in {"gold", "low_perception"} else MUSIC_READING_STRATEGY_DEFAULT
-
-
-def normalize_music_reading_lift_level(value) -> int:
-    """Quarter units of the original reading lift height."""
-    try:
-        if isinstance(value, bool):
-            return MUSIC_READING_LIFT_DEFAULT_LEVEL
-        number = float(value)
-        if not math.isfinite(number) or not number.is_integer():
-            return MUSIC_READING_LIFT_DEFAULT_LEVEL
-        level = int(number)
-    except (TypeError, ValueError, OverflowError):
-        return MUSIC_READING_LIFT_DEFAULT_LEVEL
-    return level if level in MUSIC_READING_LIFT_LEVELS else MUSIC_READING_LIFT_DEFAULT_LEVEL
 
 
 def normalize_music_reading_gradient_steps(value) -> int:
@@ -169,6 +159,26 @@ def placement_mode_family(mode) -> str:
     return "immersive" if value in {"finder", "tasker"} else "top" if value == "top" else "free"
 
 
+def normalize_location_mode(value) -> str:
+    """The four placement tokens, plus the existing stick route.
+
+    Unknown text stays on the default top island. Legacy taskbar names map
+    to tasker. This is the value startup reads back; it is not rewritten to
+    top just because the file is old.
+    """
+    text = str(value or "").strip().lower()
+    text = {
+        "off": "free",
+        "preview": "free",
+        "compact": "tasker",
+        "expanded": "tasker",
+        "taskbar": "tasker",
+    }.get(text, text)
+    if text in {"finder", "tasker", "top", "free", "stick"}:
+        return text
+    return "top"
+
+
 def placement_mode_label(mode) -> str:
     """Name the family and, for immersive bars, its physical placement."""
     return PLACEMENT_MODE_LABELS.get(str(mode or "free"), "Free")
@@ -176,7 +186,16 @@ def placement_mode_label(mode) -> str:
 
 def normalize_finder_bar_style(value) -> str:
     style = str(value or "transparent").strip().lower()
-    return style if style in {"capsule", "fade", "transparent"} else "transparent"
+    # Retired gradient bars keep their album/background intent.
+    if style == "fade":
+        return "capsule"
+    return style if style in {"capsule", "transparent"} else "transparent"
+
+
+def normalize_broadcast_style(value) -> str:
+    """样式一 stays the scrolling rings. Anything else recognized is 样式二."""
+    from local.broadcast_indicator import normalize_broadcast_style as _normalize
+    return _normalize(value)
 
 
 def normalize_finder_bar_center_ratio(value) -> float:
@@ -211,8 +230,11 @@ DEFAULT_SETTINGS = {
     "v2_library_last_playback_surface": "fullscreen",
     "v2_music_content_layout": "lyrics",
     "v2_personal_dj_enabled": False,
+    "v2_motion_cover_enabled": True,
     "v2_personal_dj_voice_key": "",
+    "v2_broadcast_style": "rings",
     "v2_system_capture_enabled": True,
+    "v2_playback_interruption_enabled": False,
     "v2_startup_mode": "none",
     "v2_custom_icon_path": "",
     "v2_music_playing": True,
@@ -283,20 +305,13 @@ DEFAULT_SETTINGS = {
     "v2_ember_blur_panel_strength": 18,
     "v2_ember_lyric_offset_seconds": 0.0,
     "v2_no_lyrics_display_mode": "text",
-    "v2_album_island_cover_count": 5,
-    "v2_album_island_cover_size": 30,
-    "v2_album_island_compact_cover_size": 30,
-    "v2_album_island_expanded_cover_size": 72,
-    "v2_album_island_spacing": 112,
-    "v2_album_island_secondary_style": "perspective_dim",
-    "v2_album_island_perspective_amount": 100,
-    "v2_album_island_listened_seconds_total": 0.0,
-    "v2_album_island_history": [],
     "v2_theme_mode": "system",
     "v2_theme_dark_start": "22:00",
     "v2_theme_dark_end": "07:00",
     "v2_music_background_follow_theme": False,
     "v2_music_glass_level": MUSIC_GLASS_DEFAULT_LEVEL,
+    "v2_control_opacity_light": CONTROL_OPACITY_DEFAULT,
+    "v2_control_opacity_dark": CONTROL_OPACITY_DEFAULT,
     "v2_tasker_follow_taskbar_color": False,
     "v2_music_background_follow_previous_style": "",
     "v2_font_family": "Alibaba PuHuiTi",
@@ -329,13 +344,22 @@ DEFAULT_SETTINGS = {
     "v2_expand_direction": "auto",
     "v2_lyric_offset_seconds": 0.0,
     "v2_lyric_font_size": 18,
-    "v2_music_surface_reading_lift_level": MUSIC_READING_LIFT_DEFAULT_LEVEL,
     "v2_music_surface_reading_gradient_steps": MUSIC_READING_GRADIENT_DEFAULT_STEPS,
-    "v2_music_surface_reading_strategy": MUSIC_READING_STRATEGY_DEFAULT,
+    "v2_music_apple_lyrics_enabled": False,
     "v2_music_sparse_highlight_seconds_per_unit": SPARSE_MIN_SECONDS_PER_UNIT,
     "v2_music_surface_preload_count": 6,
     "v2_music_intro_cleanup_enabled": True,
     "v2_system_lyric_offset_seconds": 0.0,
+    # Experimental external position pipeline; legacy SMTC behavior stays default.
+    "v2_capture_position_enabled": False,
+    "v2_capture_app_profiles": {},
+    # NetEase CEF/CDP capture is a separate developer opt-in.  Transport A
+    # owns process startup and never writes to the player's installation
+    # directory.  Keep these keys explicit so a malformed or legacy settings
+    # file cannot turn the bridge on accidentally.
+    "netease.transport": "off",
+    "netease.cef.enabled": False,
+    "netease.adapter": "auto",
     "v2_enable_dual_line_lyrics": False,
     "v2_dual_line_font_size": 12,
     "v2_dual_line_secondary_weight": 72,
@@ -379,7 +403,7 @@ FIXED_DEFAULT_SETTING_KEYS = frozenset({
     "v2_enable_player_progress_plugin", "v2_player_progress_auto_detect",
     "v2_netease_betterncm_path",
     "v2_music_playing", "v2_music_auto_detect", "v2_persistent_plugin",
-    "v2_enabled_plugins", "v2_super_topmost", "v2_location_mode", "v2_top_notch_height_mode",
+    "v2_enabled_plugins", "v2_super_topmost", "v2_top_notch_height_mode",
     "v2_finder_mode", "v2_manual_mydockfinder", "v2_show_seconds",
     "v2_taskbar_corner_style", "v2_taskbar_auto_hide_mode",
     "v2_taskbar_left_handle_color", "v2_tasker_follow_taskbar_color",
@@ -404,10 +428,7 @@ FIXED_DEFAULT_SETTING_KEYS = frozenset({
     "v2_gelv_color_fill_enabled", "v2_gelv_word_fill_enabled",
     "v2_enable_dual_line_lyrics", "v2_dual_line_font_size",
     "v2_dual_line_secondary_weight", "v2_dual_line_secondary_spacing",
-    "v2_album_island_cover_count", "v2_album_island_cover_size",
-    "v2_album_island_compact_cover_size", "v2_album_island_expanded_cover_size",
-    "v2_album_island_spacing", "v2_album_island_secondary_style",
-    "v2_album_island_perspective_amount", "v2_barrage_y_offset",
+    "v2_barrage_y_offset",
     "v2_barrage_font_size", "v2_barrage_speed", "v2_barrage_use_backdrop",
     "v2_barrage_show_icon", "v2_barrage_display_mode",
     "v2_enable_message_detection", "v2_enable_wechat_notification",
@@ -419,6 +440,8 @@ FIXED_DEFAULT_SETTING_KEYS = frozenset({
 
 _REMOVED_MUSIC_AMBIENCE_STYLES = {"yaoguang", "bilateral_diffraction"}
 _REMOVED_VISUAL_SETTING_KEYS = {
+    "v2_music_surface_reading_strategy",
+    "v2_music_surface_reading_lift_level",
     "v2_diffraction_frequency",
     "v2_yaoguang_outer_color",
     "v2_yaoguang_blur_strength",
@@ -433,55 +456,105 @@ _REMOVED_VISUAL_SETTING_KEYS = {
     "v2_fullscreen_reading_effect",
     "v2_plugin_count",
     "v2_taskbar_fusion_mode",
+    # Album-island cover row. Old settings.json may still contain these keys;
+    # load skips them and set() ignores them so a legacy file cannot error or
+    # turn the removed arrangement back on.
+    "v2_album_island_cover_count",
+    "v2_album_island_cover_size",
+    "v2_album_island_compact_cover_size",
+    "v2_album_island_expanded_cover_size",
+    "v2_album_island_spacing",
+    "v2_album_island_secondary_style",
+    "v2_album_island_perspective_amount",
+    "v2_album_island_listened_seconds_total",
+    "v2_album_island_history",
 }
 
 
 class SettingsManager(QObject):
     setting_changed = Signal(str, object)
 
-    def __init__(self):
+    def __init__(self, *, settings_path=None):
         super().__init__()
+        # An explicit fixture/session path never reads or migrates account
+        # settings. Keep the normal path unchanged for ordinary launches.
+        self.settings_path = os.fspath(settings_path) if settings_path is not None else SETTINGS_FILE
+        self._explicit_settings_path = settings_path is not None
         self._settings = copy.deepcopy(DEFAULT_SETTINGS)
         self._dirty = False
         self._save_timer = QTimer()
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self._do_save)
         self._ensure_dir()
-        self._import_legacy_settings_if_needed()
+        if not self._explicit_settings_path:
+            self._import_legacy_settings_if_needed()
         self.load()
 
     def _ensure_dir(self):
-        os.makedirs(APP_DATA_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self.settings_path)), exist_ok=True)
 
     def _import_legacy_settings_if_needed(self):
-        if os.path.exists(SETTINGS_FILE):
+        if os.path.exists(self.settings_path):
             return
         for legacy_dir in legacy_app_data_dirs():
             legacy_file = os.path.join(legacy_dir, "settings.json")
             if not os.path.exists(legacy_file):
                 continue
             try:
-                shutil.copy2(legacy_file, SETTINGS_FILE)
+                shutil.copy2(legacy_file, self.settings_path)
             except OSError:
                 return
             return
 
     def load(self):
-        if not os.path.exists(SETTINGS_FILE):
+        if not os.path.exists(self.settings_path):
             return
         try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            with open(self.settings_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict):
                 return
+            # Retain raw migration evidence before fixed legacy defaults are
+            # applied. The new envelope is written only after explicit opt-in.
+            self._capture_legacy_profiles = copy.deepcopy(data.get("v2_music_app_profiles"))
             migrated = any(key in data for key in _REMOVED_VISUAL_SETTING_KEYS)
             self._settings.update({key: value for key, value in data.items() if key not in _REMOVED_VISUAL_SETTING_KEYS})
+            if self._settings.get("v2_capture_position_enabled") is True:
+                from api.capture.capabilities import normalize_capture_profiles
+                profiles = normalize_capture_profiles(self._capture_legacy_profiles,
+                                                      self._settings.get("v2_capture_app_profiles"))
+                migrated = migrated or profiles != self._settings.get("v2_capture_app_profiles")
+                self._settings["v2_capture_app_profiles"] = profiles
+            elif self._settings.get("v2_capture_position_enabled") is not False:
+                self._settings["v2_capture_position_enabled"] = False
+                migrated = True
             for key, default in (("v2_owned_playback_enabled", True), ("v2_system_capture_enabled", True),
                                  ("v2_playback_onboarding_completed", False), ("v2_personal_dj_enabled", False),
+                                 ("v2_playback_interruption_enabled", False),
+                                 ("v2_music_apple_lyrics_enabled", False),
                                  ("v2_library_expanded", False), ("v2_bar_hide_follow_enabled", True)):
                 if not isinstance(self._settings.get(key), bool):
                     self._settings[key] = default
                     migrated = True
+            transport = self._settings.get("netease.transport", "off")
+            if not isinstance(transport, str) or transport.strip().casefold() not in {"off", "attach", "relaunch", "port", "pipe"}:
+                self._settings["netease.transport"] = "off"
+                migrated = True
+            else:
+                canonical = transport.strip().casefold()
+                migrated = migrated or transport != canonical
+                self._settings["netease.transport"] = canonical
+            if not isinstance(self._settings.get("netease.cef.enabled"), bool):
+                self._settings["netease.cef.enabled"] = False
+                migrated = True
+            adapter = self._settings.get("netease.adapter", "auto")
+            if not isinstance(adapter, str) or not adapter.strip() or len(adapter.strip()) > 64:
+                self._settings["netease.adapter"] = "auto"
+                migrated = True
+            else:
+                canonical = adapter.strip().casefold()
+                migrated = migrated or adapter != canonical
+                self._settings["netease.adapter"] = canonical
             if not self._settings["v2_owned_playback_enabled"] and not self._settings["v2_system_capture_enabled"]:
                 self._settings["v2_owned_playback_enabled"] = True
                 migrated = True
@@ -498,11 +571,17 @@ class SettingsManager(QObject):
             if not isinstance(voice, str) or voice and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", voice) is None:
                 self._settings["v2_personal_dj_voice_key"] = ""
                 migrated = True
+            raw_broadcast = self._settings.get("v2_broadcast_style", "rings")
+            canonical_broadcast = normalize_broadcast_style(raw_broadcast)
+            self._settings["v2_broadcast_style"] = canonical_broadcast
+            migrated = migrated or raw_broadcast != canonical_broadcast
             for key, normalize in (
                 ("v2_finder_bar_style", normalize_finder_bar_style),
                 ("v2_finder_bar_center_ratio", normalize_finder_bar_center_ratio),
                 ("v2_system_lyric_offset_seconds", normalize_system_lyric_offset),
                 ("v2_music_glass_level", normalize_music_glass_level),
+                ("v2_control_opacity_light", normalize_control_opacity),
+                ("v2_control_opacity_dark", normalize_control_opacity),
             ):
                 raw = self._settings.get(key)
                 value = normalize(raw)
@@ -517,27 +596,25 @@ class SettingsManager(QObject):
             ambience_values = self._settings.get("v2_music_ambience_values")
             self._settings["v2_music_ambience_values"] = normalize_music_ambience_values(ambience_values, original_style)
             migrated = migrated or ambience_values != self._settings["v2_music_ambience_values"]
-            if str(self._settings.get("v2_lyric_flow_style")) not in {"wave_stream", "gelv_songscatter", "album_island"}:
+            if str(self._settings.get("v2_lyric_flow_style")) != "wave_stream":
                 self._settings["v2_lyric_flow_style"] = "wave_stream"
                 migrated = True
-            if self._settings.get("v2_album_island_secondary_style") != "perspective_dim":
-                self._settings["v2_album_island_secondary_style"] = "perspective_dim"
+            if str(self._settings.get("v2_no_lyrics_display_mode") or "text") != "text":
+                self._settings["v2_no_lyrics_display_mode"] = "text"
+                migrated = True
+            if not isinstance(self._settings.get("v2_motion_cover_enabled"), bool):
+                self._settings["v2_motion_cover_enabled"] = True
                 migrated = True
             raw_sparse_threshold = self._settings.get("v2_music_sparse_highlight_seconds_per_unit")
             self._settings["v2_music_sparse_highlight_seconds_per_unit"] = normalize_sparse_seconds_per_unit(raw_sparse_threshold)
             migrated = migrated or raw_sparse_threshold != self._settings["v2_music_sparse_highlight_seconds_per_unit"]
-            raw_lift_level = self._settings.get("v2_music_surface_reading_lift_level")
-            lift_level = normalize_music_reading_lift_level(raw_lift_level)
-            self._settings["v2_music_surface_reading_lift_level"] = lift_level
-            migrated = migrated or raw_lift_level != lift_level
+            raw_location_mode = self._settings.get("v2_location_mode", "top")
+            self._settings["v2_location_mode"] = normalize_location_mode(raw_location_mode)
+            migrated = migrated or raw_location_mode != self._settings["v2_location_mode"]
             raw_gradient_steps = self._settings.get("v2_music_surface_reading_gradient_steps")
             gradient_steps = normalize_music_reading_gradient_steps(raw_gradient_steps)
             self._settings["v2_music_surface_reading_gradient_steps"] = gradient_steps
             migrated = migrated or raw_gradient_steps != gradient_steps
-            raw_reading_strategy = self._settings.get("v2_music_surface_reading_strategy")
-            reading_strategy = normalize_music_reading_strategy(raw_reading_strategy)
-            self._settings["v2_music_surface_reading_strategy"] = reading_strategy
-            migrated = migrated or raw_reading_strategy != reading_strategy
             for key in FIXED_DEFAULT_SETTING_KEYS:
                 default = DEFAULT_SETTINGS[key]
                 migrated = migrated or self._settings.get(key) != default
@@ -559,11 +636,11 @@ class SettingsManager(QObject):
         if not self._dirty:
             return
         self._ensure_dir()
-        temp_file = SETTINGS_FILE + ".tmp"
+        temp_file = self.settings_path + ".tmp"
         try:
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(self._settings, f, indent=2, ensure_ascii=False)
-            os.replace(temp_file, SETTINGS_FILE)
+            os.replace(temp_file, self.settings_path)
             self._dirty = False
         except OSError:
             pass
@@ -580,7 +657,34 @@ class SettingsManager(QObject):
             value = key == "v2_owned_playback_enabled"
         if key in _REMOVED_VISUAL_SETTING_KEYS or key in FIXED_DEFAULT_SETTING_KEYS:
             return
+        if key == "v2_capture_position_enabled":
+            if not isinstance(value, bool):
+                return
+            if value:
+                from api.capture.capabilities import normalize_capture_profiles
+                self._settings["v2_capture_app_profiles"] = normalize_capture_profiles(
+                    getattr(self, "_capture_legacy_profiles", None), self._settings.get("v2_capture_app_profiles"))
+        if key == "v2_capture_app_profiles":
+            from api.capture.capabilities import normalize_capture_profiles
+            value = normalize_capture_profiles(getattr(self, "_capture_legacy_profiles", None), value)
+        if key == "netease.transport":
+            if not isinstance(value, str) or value.strip().casefold() not in {"off", "attach", "relaunch", "port", "pipe"}:
+                return
+            value = value.strip().casefold()
+        if key == "netease.cef.enabled":
+            if not isinstance(value, bool):
+                return
+        if key == "netease.adapter":
+            if not isinstance(value, str) or not value.strip() or len(value.strip()) > 64:
+                return
+            value = value.strip().casefold()
+        if key == "v2_playback_interruption_enabled" and not isinstance(value, bool):
+            return
         if key == "v2_personal_dj_enabled" and not isinstance(value, bool):
+            return
+        if key == "v2_motion_cover_enabled" and not isinstance(value, bool):
+            return
+        if key == "v2_music_apple_lyrics_enabled" and not isinstance(value, bool):
             return
         if key == "v2_library_expanded" and not isinstance(value, bool):
             return
@@ -592,6 +696,10 @@ class SettingsManager(QObject):
             return
         if key == "v2_personal_dj_voice_key" and (not isinstance(value, str) or value and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) is None):
             return
+        if key == "v2_location_mode":
+            value = normalize_location_mode(value)
+        if key == "v2_broadcast_style":
+            value = normalize_broadcast_style(value)
         if key == "v2_owned_playback_mode" and value not in ("sequential", "shuffle", "repeat_one"):
             value = "sequential"
         if key == "v2_finder_bar_style":
@@ -602,22 +710,18 @@ class SettingsManager(QObject):
             value = normalize_music_ambience_style(value) if value or key == "v2_music_ambience_style" else ""
         if key == "v2_music_ambience_values":
             value = normalize_music_ambience_values(value)
-        if key == "v2_lyric_flow_style" and str(value) not in {"wave_stream", "gelv_songscatter", "album_island"}:
+        if key == "v2_lyric_flow_style" and str(value) != "wave_stream":
             value = "wave_stream"
-        if key == "v2_album_island_secondary_style":
-            value = "perspective_dim"
         if key == "v2_music_sparse_highlight_seconds_per_unit":
             value = normalize_sparse_seconds_per_unit(value)
         if key == "v2_system_lyric_offset_seconds":
             value = normalize_system_lyric_offset(value)
         if key == "v2_music_glass_level":
             value = normalize_music_glass_level(value)
-        if key == "v2_music_surface_reading_lift_level":
-            value = normalize_music_reading_lift_level(value)
+        if key in {"v2_control_opacity_light", "v2_control_opacity_dark"}:
+            value = normalize_control_opacity(value)
         if key == "v2_music_surface_reading_gradient_steps":
             value = normalize_music_reading_gradient_steps(value)
-        if key == "v2_music_surface_reading_strategy":
-            value = normalize_music_reading_strategy(value)
         if self._settings.get(key) == value:
             return
         self._settings[key] = value

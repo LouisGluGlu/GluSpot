@@ -101,7 +101,7 @@ class FakeLyricsStore:
     def is_lookup_pending(self, *_args):
         return False
 
-    def resolve_in_background(self, *_args):
+    def resolve_in_background(self, *_args, **_kwargs):
         return False
 
     def enrich_in_background(self, *_args):
@@ -646,30 +646,13 @@ class ProviderStateTests(unittest.TestCase):
             def __init__(self):
                 calls["qq"] += 1
 
-        class QuietAuxProvider:
-            def __init__(self, *_args, **_kwargs):
-                pass
-
-            def plugins(self):
-                return ()
-
-            def messages(self):
-                return ()
-
-            def diagnostics(self):
-                return {}
-
         original_audio = providers_module.LiveAudioAnalyzer
         original_netease = providers_module.NeteasePositionReader
         original_qq = providers_module.QQPositionReader
-        original_plugins = providers_module.RealPluginProvider
-        original_messages = providers_module.WindowsMessageDetector
         original_start_loop = WindowsMediaProvider._start_loop
         providers_module.LiveAudioAnalyzer = CountingAudioAnalyzer
         providers_module.NeteasePositionReader = CountingNeteaseReader
         providers_module.QQPositionReader = CountingQQReader
-        providers_module.RealPluginProvider = QuietAuxProvider
-        providers_module.WindowsMessageDetector = QuietAuxProvider
         WindowsMediaProvider._start_loop = lambda self: None
         try:
             provider = WindowsMediaProvider(settings_getter=lambda key, default=None: {
@@ -684,8 +667,6 @@ class ProviderStateTests(unittest.TestCase):
             providers_module.LiveAudioAnalyzer = original_audio
             providers_module.NeteasePositionReader = original_netease
             providers_module.QQPositionReader = original_qq
-            providers_module.RealPluginProvider = original_plugins
-            providers_module.WindowsMessageDetector = original_messages
             WindowsMediaProvider._start_loop = original_start_loop
 
         self.assertEqual(calls, {"audio": 0, "netease": 0, "qq": 0})
@@ -961,8 +942,6 @@ class ProviderStateTests(unittest.TestCase):
         )
         provider._last_ready_at = 100.0
         provider._provider_status = "no_session"
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.has_live_audio = lambda: False
 
         retained = provider._cached_or_status_visual(106.0)
@@ -1275,8 +1254,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -1334,8 +1311,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -1728,8 +1703,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -1781,8 +1754,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -1940,7 +1911,7 @@ class ProviderStateTests(unittest.TestCase):
         ]}}
         self.assertEqual(provider._resolve_netease_art_url("no space", "alextbh"), "https://example.test/matched.jpg")
 
-    def test_netease_api_denial_enters_source_cooldown_before_caa_fallback(self):
+    def test_netease_api_denial_does_not_block_another_tracks_lookup(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         provider._online_current_art_lookup_enabled = True
         provider._music_player_adapter = "netease"
@@ -1974,10 +1945,9 @@ class ProviderStateTests(unittest.TestCase):
             jobs.pop(0)()
             self.assertEqual(provider._current_art_lookup_sources["track"], "cover-art-archive")
             self.assertEqual(requested, ["https://archive.org/download/valid/front.jpg"])
-            self.assertGreater(provider._netease_art_source_failed_until, time.monotonic() + 40.0)
+            self.assertFalse(hasattr(provider, "_netease_art_source_failed_until"))
 
-            provider._current_art_url_by_track_id.pop("track")
-            self.assertTrue(provider._schedule_current_netease_art_lookup("track", "Song", "Artist", album_title="Album", duration_seconds=240))
+            self.assertTrue(provider._schedule_current_netease_art_lookup("other-track", "Song", "Artist", album_title="Album", duration_seconds=240))
             jobs.pop(0)()
             self.assertEqual(requested, ["https://archive.org/download/valid/front.jpg"] * 2)
 
@@ -2038,8 +2008,6 @@ class ProviderStateTests(unittest.TestCase):
         provider.qq_position = None
         provider._music_player_adapter_for = lambda _source_app, _raw_source_app="": "netease"
         provider._player_position_reader_for = lambda _adapter: reader
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -2098,8 +2066,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -2155,8 +2121,6 @@ class ProviderStateTests(unittest.TestCase):
             duration_for_track=lambda *_args: 220.0,
         )
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -2198,8 +2162,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = None
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda _key, default=None: default
         provider._is_source_app_foreground = lambda *_args: False
         provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
@@ -2272,8 +2234,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -2343,8 +2303,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -2390,8 +2348,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -2422,7 +2378,7 @@ class ProviderStateTests(unittest.TestCase):
         self.assertEqual(reader.upcoming_calls, [])
         self.assertEqual(data.track.album_queue, ())
 
-    def test_legacy_enabled_player_settings_cannot_start_readers_or_foreground_detection(self):
+    def test_legacy_settings_cannot_enable_progress_readers_but_artwork_can_read_queue(self):
         for app_id in ("cloudmusic.exe", "QQMusic.exe"):
             with self.subTest(app_id=app_id):
                 provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -2434,8 +2390,6 @@ class ProviderStateTests(unittest.TestCase):
                 provider._last_raw_timeline_position = provider._local_seek_position_seconds = None
                 provider._last_raw_timeline_at = provider._local_seek_at = 0.0
                 provider._art_cache = provider._queue_art_cache = {}
-                provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-                provider.message_detector = SimpleNamespace(messages=lambda: ())
                 provider.settings_getter = lambda key, default=None: {
                     "v2_enable_player_progress_plugin": True,
                     "v2_player_progress_auto_detect": True,
@@ -2455,10 +2409,13 @@ class ProviderStateTests(unittest.TestCase):
                              "_is_source_app_foreground", "_foreground_netease_track_metadata",
                              "_player_window_track_metadata"):
                     setattr(provider, name, lambda *_args, _name=name, **_kwargs: self.fail(_name))
-                with patch.object(providers_module, "NeteasePositionReader", side_effect=AssertionError("UIA reader")), patch.object(
+                queue_reader = SimpleNamespace(track_metadata=lambda *_args: None)
+                with patch.object(providers_module, "NeteasePositionReader", return_value=queue_reader) as reader_factory, patch.object(
                     providers_module, "QQPositionReader", side_effect=AssertionError("QQ UIA reader"),
                 ):
                     data = asyncio.run(provider._read_visual_data())
+                self.assertEqual(reader_factory.call_count, int(app_id == "cloudmusic.exe"))
+                self.assertIsNone(getattr(provider, "netease_position", None))
                 self.assertEqual(data.track.title, "System Song")
                 self.assertEqual(data.track.artist, "System Artist")
                 self.assertEqual(data.track.position_source, "windows-media")
@@ -2601,7 +2558,8 @@ class ProviderStateTests(unittest.TestCase):
                 read_limits.append(limit)
                 return self.content[:limit]
 
-        with patch("api.providers.threading.Thread", ManualThread), patch(
+        from tests.test_artwork_sources import ManualTimer
+        with patch("api.providers.threading.Thread", ManualThread), patch("api.providers.threading.Timer", ManualTimer), patch(
             "api.providers.urlopen", side_effect=[Response(complete_image), Response(oversize_image)]
         ):
             self.assertTrue(provider._schedule_queue_album_art_prefetch("https://example.test/large.png"))
@@ -2682,8 +2640,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -2730,8 +2686,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = FakePositionReader()
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -3343,8 +3297,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = None
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -3421,8 +3373,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = FakePositionReader()
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -3502,8 +3452,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = None
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_music_player_mode": "netease",
             "v2_enable_player_progress_plugin": False,
@@ -3523,12 +3471,15 @@ class ProviderStateTests(unittest.TestCase):
         first = asyncio.run(provider._read_visual_data())
         self.assertEqual(first.track.album_art_bytes, thumbnail)
         self.assertEqual(first.track.album_art_source, "thumbnail")
+        self.assertEqual(requested, [])
+        provider._current_art_first_seen["song|artist"] -= 1.1
+        asyncio.run(provider._read_visual_data())
         self.assertEqual(len(requested), 1)
         self.assertEqual(requested[0][0][1:], ("Song", "Artist"))
         self.assertEqual(requested[0][1], {"album_title": "", "duration_seconds": 240.0})
 
         provider._last_data = first
-        provider._current_art_url_by_track_id = {first.track.track_id: "https://example.test/original.jpg"}
+        provider._current_art_url_by_track_id = {provider._artwork_track_key("Song", "Artist"): "https://example.test/original.jpg"}
         provider._queue_album_art_bytes = lambda _track: original
         second = asyncio.run(provider._read_visual_data())
         self.assertEqual(second.track.track_id, first.track.track_id)
@@ -3643,8 +3594,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -3711,8 +3660,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._player_anchor_fast_refresh_until = 0.0
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -3786,8 +3733,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._netease_upcoming_prefetch_keys = set()
         provider.netease_position = None
         provider.qq_position = reader
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -3865,7 +3810,9 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
 
         track = SimpleNamespace(album_art_url=self.upgraded_url, album_art_bytes=tiny)
         provider._queue_art_cache[self.upgraded_url] = tiny
-        with tempfile.TemporaryDirectory() as root, patch("api.providers.threading.Thread", ManualThread):
+        from tests.test_artwork_sources import ManualTimer
+        with tempfile.TemporaryDirectory() as root, patch("api.providers.threading.Thread", ManualThread), \
+                patch("api.providers.threading.Timer", ManualTimer):
             disk_path = Path(root) / "cover.img"
             disk_path.write_bytes(tiny)
             provider._queue_art_disk_path = lambda _url: disk_path
@@ -3885,7 +3832,7 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
                 self.assertFalse(provider._album_art_url_is_preview(self.upgraded_url, original))
             self.assertEqual(jobs, [])
 
-    def test_known_500_preview_stays_pending_until_upgraded_source_arrives(self):
+    def test_downloaded_500_cover_is_original_while_larger_variant_can_arrive(self):
         provider = self.provider()
         preview, original = self.png(500), self.png(1417)
         provider._queue_art_cache[self.raw_url] = preview
@@ -3894,12 +3841,12 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
         track = SimpleNamespace(album_art_url=self.raw_url, album_art_bytes=preview)
         self.assertEqual(provider._queue_album_art_bytes(track), preview)
         self.assertEqual(scheduled, [self.upgraded_url])
-        self.assertTrue(provider._album_art_url_is_preview(self.raw_url, preview))
+        self.assertFalse(provider._album_art_url_is_preview(self.raw_url, preview))
         provider._current_art_lookup_lock = threading.Lock()
         provider._current_art_url_by_track_id = {"track": self.raw_url}
         self.assertEqual(
-            provider._current_artwork_lookup_state("track", preview, eligible=True, online_art=preview, source="thumbnail"),
-            "pending",
+            provider._current_artwork_lookup_state("track", preview, eligible=True, online_art=preview, source="netease-original"),
+            "ready",
         )
         provider._queue_art_cache[self.upgraded_url] = original
         self.assertEqual(provider._queue_album_art_bytes(track), original)
@@ -3925,7 +3872,7 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
         self.assertEqual(provider._current_artwork_lookup_state(
             "track", selected, eligible=True, online_art=selected, source="thumbnail"), "ready")
 
-    def test_visual_handoff_preserves_known_500_preview_provenance(self):
+    def test_visual_handoff_promotes_downloaded_500_cover_provenance(self):
         provider = self.provider()
         preview, original = self.png(500), self.png(1417)
         provider.fallback = EmptyIslandDataProvider(empty_visual_data())
@@ -3937,8 +3884,6 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
         provider._last_raw_timeline_at = provider._local_seek_at = 0.0
         provider._art_cache = {}
         provider.netease_position = provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_music_player_mode": "netease", "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False, "v2_enable_dual_line_lyrics": False,
@@ -3959,8 +3904,8 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
         provider._queue_art_cache[self.raw_url] = preview
         first = asyncio.run(provider._read_visual_data())
         self.assertEqual(first.track.album_art_bytes, preview)
-        self.assertEqual(first.track.album_art_source, "thumbnail")
-        self.assertNotEqual(first.track.album_art_lookup_state, "ready")
+        self.assertEqual(first.track.album_art_source, "netease-original")
+        self.assertEqual(first.track.album_art_lookup_state, "ready")
         provider._last_data = first
         provider._queue_art_cache[self.upgraded_url] = original
         second = asyncio.run(provider._read_visual_data())

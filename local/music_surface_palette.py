@@ -44,6 +44,16 @@ class MusicSurfacePalette:
         return _same_color_family(self.primary, self.characteristic)
 
 
+def idle_surface_colors(*, light: bool = False) -> tuple[QColor, QColor]:
+    """Shared no-track source tones; login/library use the dark surface theme."""
+    return tuple(QColor(tone, tone, tone) for tone in ((242, 214) if light else (44, 14)))
+
+
+def idle_surface_palette() -> MusicSurfacePalette:
+    """Static dark AlbumFlow fallback, without platform or onboarding pigments."""
+    return artwork_surface_palette(QImage(), *idle_surface_colors())
+
+
 def solid_album_background_color(palette: MusicSurfacePalette) -> QColor:
     """Use the occupied cover tone unchanged for the flat music island."""
     source = palette.source_primary
@@ -274,6 +284,8 @@ def future_lyric_color(
         alternate_candidates = lambda: (
             QColor.fromHsv(hue, chroma, brightness, 242)
             for chroma in chromas for brightness in alternate_values)
+    from local.theme_tokens import backdrop_needs_dark_ink
+    contrast_floor = 3.0 if backdrop_needs_dark_ink(backdrop.getRgb()[:3]) else 2.30
     tinted = None
     best_ratio = -1.0
     candidates = (preferred_candidates() if require_light else
@@ -291,7 +303,7 @@ def future_lyric_color(
                  / (min(composite_luminance, backdrop_luminance) + .05))
         if ratio > best_ratio:
             tinted, best_ratio = candidate, ratio
-        if ratio >= 2.30:
+        if ratio >= contrast_floor:
             tinted = candidate
             break
     if tinted is None:

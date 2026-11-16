@@ -26,6 +26,8 @@ class IslandBackgroundSystemTests(unittest.TestCase):
         self.visual.finder_mode = False
         self.visual.music_surface_transition_mode = ""
         self.visual.music_surface_transition_started_at = 0.0
+        # These checks cover the system surface, not the no-media bar.
+        self.visual.media_no_audio = False
         # These existing checks assert exact settled color roles. Pump a
         # deterministic worker result instead of waiting on real threads;
         # queued runtime lifecycle and interpolation have separate tests.
@@ -172,7 +174,14 @@ class IslandBackgroundSystemTests(unittest.TestCase):
             with self.subTest(tone=tone):
                 self._cover(tone)
                 self.assertEqual(self.visual._music_lyric_text_color(255).getRgb()[:3], ink)
-                self.assertEqual(self.visual._music_lyric_base_text_color(82).getRgb(), (*ink, 82))
+                base_ink = self.visual._music_lyric_base_text_color(82)
+                self.assertEqual(base_ink.getRgb()[:3], ink)
+                if tone == "#FFFFFF":
+                    from local.theme_tokens import composite, contrast_ratio
+                    painted = composite((*ink, base_ink.alpha()), (255, 255, 255))
+                    self.assertGreaterEqual(contrast_ratio(painted, (255, 255, 255)), 3.0)
+                else:
+                    self.assertEqual(base_ink.alpha(), 82)
                 self.assertEqual(self.visual._music_meta_text_color(240).getRgb(), (*ink, 240))
                 self.assertTrue(str(self.visual._music_control_icon_spec("music:previous")["path"]).endswith(f"上一首{suffix}.svg"))
 
@@ -181,6 +190,59 @@ class IslandBackgroundSystemTests(unittest.TestCase):
             with self.subTest(tone=tone):
                 self.visual.set_solid_album_background_fallback(tone, notify=False)
                 self.assertEqual(self.visual.solid_album_background_fallback, tone)
+
+    def test_selected_background_reaches_free_and_immersive_music_painters(self):
+        """Switch on one live instance; no reconstruction or stale bar pigment."""
+        self._cover("#E3DDCC")
+        visual = self.visual
+        visual._paint_music_compact = lambda *_args: None
+        visual._paint_music_expanded = lambda *_args: None
+        visual._paint_compact_lyric_viewport = lambda *_args: None
+        visual._paint_interactive_music_cover = lambda *_args: None
+        visual._paint_taskbar_music_hover_overlay = lambda *_args: None
+        visual._personal_dj_island_presenting = lambda: False
+        visual._audio_device_pose = lambda: None
+        visual._finder_bar_active = lambda: visual.location_mode == "finder"
+        visual._taskbar_compact_active = lambda: visual.location_mode == "tasker" and not visual.expanded
+        visual.finder_bar_style = "capsule"
+        for mode, expanded in (("free", False), ("free", True), ("finder", False), ("tasker", False)):
+            visual.location_mode = mode
+            visual.expanded = expanded
+            images = {}
+            for style, expected in (("sea_level", None), ("solid_album", QColor("#E3DDCC")),
+                                    ("system", QColor(255, 255, 255))):
+                with self.subTest(mode=mode, expanded=expanded, style=style), \
+                        patch("local.island_stack_visual.system_dark_mode", return_value=False):
+                    visual.set_music_ambience_style(style, notify=False)
+                    image = QImage(360, 100, QImage.Format.Format_ARGB32_Premultiplied)
+                    image.fill(Qt.GlobalColor.transparent)
+                    with QPainter(image) as painter:
+                        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                        visual._paint_music(painter, QRectF(5, 5, 350, 90), expanded)
+                    images[style] = image
+                    if style == "system":
+                        # The shared white painter retains its subtle sheen.
+                        color = image.pixelColor(180, 40)
+                        self.assertGreaterEqual(min(color.getRgb()[:3]), 245)
+                        self.assertEqual(color.alpha(), 255)
+                    elif expected is not None:
+                        self.assertEqual(image.pixelColor(180, 40), expected)
+                    if mode != "free":
+                        self.assertEqual(visual._finder_bar_ink().getRgb()[:3],
+                                         (255, 255, 255) if style == "sea_level" else (0, 0, 0))
+            self.assertNotEqual(images["sea_level"], images["solid_album"])
+            self.assertNotEqual(images["solid_album"], images["system"])
+
+    def test_immersive_system_face_follows_native_theme_without_changing_selection(self):
+        visual = self.visual
+        visual.finder_bar_style = "capsule"
+        from local.theme_tokens import accent_from_qcolor, themed_base
+        for dark in (False, True):
+            with self.subTest(dark=dark), patch("local.island_stack_visual.system_dark_mode", return_value=dark):
+                visual.set_music_ambience_style("system", notify=False)
+                expected = QColor(*themed_base(dark, accent_from_qcolor(visual.album_color)))
+                self.assertEqual(visual._finder_bar_effective_backdrop(), expected)
+                self.assertEqual(visual.music_ambience_style, "system")
 
     def test_shared_helpers_copy_source_and_select_the_better_contrast_ink(self):
         tone = QColor(227, 221, 204, 100)

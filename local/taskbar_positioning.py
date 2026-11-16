@@ -878,14 +878,16 @@ def fullscreen_placement_mode(
     """
     if bool(mydockfinder_available):
         if not bool(finder_bar_available):
-            return "top", bool(hide_follow_enabled)
+            return "top", False
         owner_mode = "finder"
     else:
         owner_mode = "tasker"
     if not bool(owner_bar_hidden):
         return owner_mode, False
-    if bool(hide_follow_enabled):
-        return owner_mode, True
+    # Fullscreen with no visible Finder bar or taskbar: the island moves to
+    # the top edge as an ultra-short bar (it opens on hover) instead of
+    # hiding with the bar. Outside fullscreen, an auto-hidden bar still
+    # takes the island with it.
     return "top", False
 
 
@@ -2262,12 +2264,20 @@ def taskbar_compact_music_size(
         manual = float(manual_width or 0.0)
     except (TypeError, ValueError):
         manual = 0.0
-    if compact_active and manual <= 0.0 and not selected.isNull():
+    if compact_active and not selected.isNull():
         slot_width = max(0.0, float(selected.width()))
         if slot_width > 1.0 and slot_width < normal_width:
+            # Fit the free gap beside the taskbar's icons: the island narrows
+            # with it (the title elides) and only a very narrow gap leaves
+            # just the cover. It never spills over the icons.
+            if slot_width >= TASKBAR_FIT_MIN_WIDTH * u:
+                return slot_width, height
             cover_width = min(slot_width, max(28.0 * u, height + 8.0 * u))
             return cover_width, height
     return normal_width, height
+
+
+TASKBAR_FIT_MIN_WIDTH = 150.0
 
 
 def taskbar_cover_only_music_active(
@@ -2346,6 +2356,66 @@ def compact_music_target_width_from_content(
     min_width = 470.0 * u if dual > 0.0 else 430.0 * u
     max_width = 760.0 * u if dual > 0.0 else 610.0 * u
     return max(min_width, min(max_width, required))
+
+
+# One width for the whole song. The 60th percentile fits a typical line:
+# the median leaves half the lines scrolling, and the longest line would
+# stretch the island for a single chorus. The existing 430–610 clamp
+# (470–760 when a translation row is present) still applies afterwards.
+SONG_WIDTH_PERCENTILE = 0.60
+MAGNET_WIDTH_PRESETS = frozenset({
+    "top_center", "top_left", "top_right", "bottom_left", "bottom_right",
+})
+
+
+def moderate_song_line_width(line_widths, *, fraction: float = SONG_WIDTH_PERCENTILE) -> float:
+    """A stable lyric width for one song. Empty widths are ignored."""
+    widths = []
+    for raw in line_widths or ():
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0.0 and math.isfinite(value):
+            widths.append(value)
+    if not widths:
+        return 0.0
+    widths.sort()
+    if len(widths) == 1:
+        return widths[0]
+    amount = max(0.0, min(1.0, float(fraction)))
+    index = int(round((len(widths) - 1) * amount))
+    return widths[max(0, min(len(widths) - 1, index))]
+
+
+def compact_width_anchors_center(*, location_mode: str, position_preset: str) -> bool:
+    """Magnet presets and attached bars grow from the island center.
+
+    A free island keeps the album's left edge still. Finder and taskbar
+    attachment already own that edge, so they stay on the center rule too.
+    """
+    mode = str(location_mode or "free").strip().lower()
+    if mode in {"finder", "tasker", "top", "stick"}:
+        return True
+    preset = str(position_preset or "last").strip().lower()
+    return preset in MAGNET_WIDTH_PRESETS
+
+
+def compact_width_spring_damping(current_width: float, target_width: float, *, default: float) -> float:
+    """Song-to-song width changes use the critically damped spring (zeta = 1)."""
+    try:
+        current = float(current_width)
+        target = float(target_width)
+    except (TypeError, ValueError):
+        return float(default)
+    if abs(target - current) > 0.5:
+        return 1.0
+    return float(default)
+
+
+def held_screen_left_window_x(anchor_screen_left: float, local_left: float) -> float:
+    """Window x that keeps the island's screen-left on the album edge."""
+    return float(anchor_screen_left) - float(local_left)
 
 
 def stack_target_width(
@@ -3409,6 +3479,48 @@ def build_taskbar_drop_zones(
     return [] if fallback.isNull() else [fallback]
 
 
+def build_taskbar_gap_zones(
+    taskbar_rect: QRectF,
+    obstacles: list[QRectF],
+    *,
+    desired_width: float | None = None,
+    unit: float = 1.0,
+) -> list[QRectF]:
+    """One zone in each free gap of the bar, never over its content.
+
+    Unlike ``taskbar_drop_zone_rect`` the zone never grows past its gap: a
+    narrow gap gives a narrow island (down to the cover-only size) instead
+    of one that spills over the icons.
+    """
+    taskbar = QRectF(taskbar_rect)
+    if taskbar.isNull() or taskbar.width() < taskbar.height():
+        return []
+    u = max(0.0, float(unit))
+    gaps = available_taskbar_slot_rects(taskbar, obstacles, min_size=56.0 * u)
+    inset = 5.0 * u
+    height = max(24.0 * u, taskbar.height() - inset * 2.0)
+    zones = []
+    for gap in gaps:
+        room = gap.width() - inset * 2.0
+        if room < 44.0 * u:
+            continue
+        # The whole gap: the island slides anywhere inside it.
+        zones.append(QRectF(gap.left() + inset, taskbar.center().y() - height / 2.0, room, height))
+    return zones
+
+
+def taskbar_gap_for_center(zones: list[QRectF], center_x: float) -> QRectF:
+    """The free gap holding ``center_x``, else the nearest one."""
+    clean = [QRectF(zone) for zone in zones if zone is not None and not zone.isNull()]
+    if not clean:
+        return QRectF()
+    x = float(center_x)
+    for zone in clean:
+        if zone.left() <= x <= zone.right():
+            return zone
+    return min(clean, key=lambda zone: min(abs(x - zone.left()), abs(x - zone.right())))
+
+
 def select_taskbar_drop_zone(zones: list[QRectF], global_pos: QPoint | QPointF | None) -> QRectF:
     clean = [QRectF(zone) for zone in zones if zone is not None and not zone.isNull()]
     if not clean:
@@ -4043,12 +4155,12 @@ def build_standalone_top_notch_target(
         return None
     if screen.isNull():
         return None
-    desired_center_x = max(
-        screen.left() + float(main_width) / 2.0,
-        min(screen.right() - float(main_width) / 2.0, anchor.center().x()),
-    )
+    half = max(float(main_width), anchor.width()) / 2.0
+    desired_center_x = max(screen.left() + half, min(screen.right() - half, anchor.center().x()))
+    # Only the island must stay on screen. The transparent canvas around it
+    # is far wider than the island; clamping the canvas to the screen pulled
+    # every top island back toward the middle (no horizontal placement).
     window_x = desired_center_x - float(window_width) / 2.0
-    window_x = max(screen.left(), min(screen.right() - float(window_width), window_x))
     pos = QPoint(int(round(window_x)), int(round(screen.top() - float(main_top))))
     return StandalonePlacementTarget(
         window_pos=QPoint(pos),

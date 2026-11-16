@@ -37,6 +37,9 @@ class OwnedAudioBridge(QObject):
         self._dj_frames = deque(maxlen=96)
         self._dj_lock = threading.RLock()
         self._dj_smooth = [0.0, 0.0, 0.0]
+        self._music_frames = deque(maxlen=96)
+        self._music_lock = threading.RLock()
+        self._music_smooth = [0.0, 0.0, 0.0]
         self._voice_token = None
         self._voice_pcm = deque()
         self._voice_intervals = deque()
@@ -96,10 +99,33 @@ class OwnedAudioBridge(QObject):
                 return frame
         return None
 
+    def get_music_audio_frame(self):
+        """Frequency bands of the owned music at its presentation clock, like the DJ voice."""
+        if self._closed or self.media_token() != self._owner_token:
+            return None
+        with self._music_lock:
+            frames = tuple(self._music_frames)
+        if not frames:
+            return None
+        position = self.owned.player.position() / 1000.0
+        for start, end, frame in reversed(frames):
+            if start <= position < end:
+                return frame
+        return None
+
     def _sample_personal_dj_buffer(self, buffer):
         speaking = getattr(self.owned, "is_personal_dj_speaking", None)
         if not callable(speaking) or not speaking() or self.media_token() != self._owner_token:
             return
+        self._append_band_frames(buffer, self._dj_frames, self._dj_lock, self._dj_smooth)
+
+    def _sample_music_buffer(self, buffer):
+        if self.media_token() != self._owner_token:
+            return
+        self._append_band_frames(buffer, self._music_frames, self._music_lock, self._music_smooth)
+
+    @staticmethod
+    def _append_band_frames(buffer, frames, lock, smooth):
         format_ = buffer.format()
         if (format_.sampleRate() != 44100 or format_.channelCount() != 2
                 or format_.sampleFormat() != QAudioFormat.SampleFormat.Int16
@@ -111,11 +137,11 @@ class OwnedAudioBridge(QObject):
         # retained timeline stores frequency values only, never raw audio.
         for offset in range(0, len(samples), 2205):
             block = samples[offset:offset + 2205].astype(np.float32) / 32768.0
-            frame = analyze_frequency_block(block, 44100, np, self._dj_smooth)
+            frame = analyze_frequency_block(block, 44100, np, smooth)
             if frame is None:
-                self._dj_smooth[:] = [0.0, 0.0, 0.0]
-            with self._dj_lock:
-                self._dj_frames.append((start + offset / 44100.0,
+                smooth[:] = [0.0, 0.0, 0.0]
+            with lock:
+                frames.append((start + offset / 44100.0,
                     start + min(len(samples), offset + 2205) / 44100.0, frame or AudioFrame(0.0, 0.0, 0.0)))
 
     @staticmethod
@@ -341,6 +367,9 @@ class OwnedAudioBridge(QObject):
             with self._dj_lock:
                 self._dj_frames.clear()
             self._dj_smooth[:] = [0.0, 0.0, 0.0]
+            with self._music_lock:
+                self._music_frames.clear()
+            self._music_smooth[:] = [0.0, 0.0, 0.0]
             self._voice_pcm.clear()
             self._voice_intervals.clear()
             self._music_pcm.clear()
@@ -429,6 +458,7 @@ class OwnedAudioBridge(QObject):
             return
         if self.dj_output is None:
             self._sample_personal_dj_buffer(buffer)
+        self._sample_music_buffer(buffer)
         if self._closed or not self._direct or self._restarting or self._controller is None or not buffer.isValid() or not buffer.frameCount():
             return
         if self.media_token() != self._direct_token:
@@ -573,6 +603,8 @@ class OwnedAudioBridge(QObject):
         self._closed = True
         with self._dj_lock:
             self._dj_frames.clear()
+        with self._music_lock:
+            self._music_frames.clear()
         if self.supported:
             self.owned.player.setAudioBufferOutput(None)
             if self.dj_output is not None:

@@ -62,7 +62,7 @@ class CoverLyricContinuityTests(unittest.TestCase):
         self.window.resize(960, 540)
         for translated in (False, True):
             self.owner.enable_dual_line_lyrics = translated
-            expected = [(10., "Hello world\n你好世界" if translated else "Hello world"), (20., "Next line")]
+            expected = [(10., "Hello world\n你好世界"), (20., "Next line")]
             for layout in ("cover_lyrics", "lyrics"):
                 with self.subTest(layout=layout, translated=translated), patch(
                     "local.music_surface_window.time.monotonic", return_value=100.,
@@ -77,6 +77,8 @@ class CoverLyricContinuityTests(unittest.TestCase):
                     self.assertEqual(self.window._display_raw_source_texts[0], INTRO_COUNTDOWN_TEXT)
                     self.assertTrue(all(credit not in row for row in self.window._display_raw_source_texts))
                     self.assertEqual(self.owner.timed_lyrics, source)
+                    if not translated:
+                        self.assertEqual(self.window._translation_layer_pose(1, "你好世界", 100.), (0., 0., 0.))
 
     def test_metadata_only_cached_song_never_paints_json_in_either_layout(self):
         credits = ['{"t":-1,"c":[{"tx":"作词: "},{"tx":"Jerry Murad, Al Fiore"}]}',
@@ -135,7 +137,6 @@ class CoverLyricContinuityTests(unittest.TestCase):
 
     def test_cover_translation_respects_toggle_and_keeps_multiline_companion_inside_cover(self):
         self.lyrics(4)
-        self.owner.music_surface_reading_strategy = "low_perception"
         self.owner.media_is_playing = False
         with patch("local.music_surface_window.time.monotonic", return_value=100.0):
             self.render()
@@ -154,10 +155,19 @@ class CoverLyricContinuityTests(unittest.TestCase):
             self.window.on_translation_visibility_changed(False)
             self.render()
         with patch("local.music_surface_window.time.monotonic", return_value=102.0):
-            self.render()
-            self.assertTrue(all(layer is None for layer in self.window._song_secondary_layouts))
+            with patch.object(self.window, "_draw_sprung_cached_wrapped_layout",
+                              wraps=self.window._draw_sprung_cached_wrapped_layout) as draw, \
+                    patch.object(self.window, "_paint_wrapped_lifted_lyric",
+                                 wraps=self.window._paint_wrapped_lifted_lyric) as current:
+                self.render()
+            # Hidden companions stay shaped; their pose suppresses all ink.
+            self.assertTrue(all(layer is not None for layer in self.window._song_secondary_layouts))
+            self.assertEqual(self.window._translation_layer_pose(1, "把你的骄傲放在这里，紧靠着我。", 102.), (0., 0., 0.))
+            drawn = [call.args[3] for call in draw.call_args_list]
+            drawn += [call.args[2] for call in current.call_args_list]
+            self.assertNotIn("把你的骄傲放在这里，紧靠着我。", drawn)
 
-    def test_external_lyric_pixels_and_blur_flow_past_internal_insets_to_real_window_edges(self):
+    def test_external_lyric_blur_crosses_horizontal_insets_but_clears_bottom_controls(self):
         self.window.resize(1190, 666)
         self.window._fullscreen = True
         self.window.set_content_layout("lyrics", animate=False)
@@ -178,8 +188,13 @@ class CoverLyricContinuityTests(unittest.TestCase):
             return sum(normal.pixel(x, y) != absent.pixel(x, y)
                        for y in range(max(0, int(region.top() * dpr)), min(normal.height(), int(region.bottom() * dpr)))
                        for x in range(max(0, int(region.left() * dpr)), min(normal.width(), int(region.right() * dpr))))
-        self.assertGreater(different(QRectF(clip.left(), 0., clip.width(), clip.top())), 0)
-        self.assertGreater(different(QRectF(clip.left(), clip.bottom(), clip.width(), self.window.height() - clip.bottom())), 0)
+        self.assertGreater(different(clip), 0)
+        fade_top, fade_bottom = self.window._lyric_bottom_fade_band(QRectF(self.window.rect()))
+        self.assertEqual(clip.bottom(), fade_bottom)
+        self.assertEqual(fade_bottom, self.window.height())
+        self.assertGreater(different(QRectF(clip.left(), fade_top, clip.width(), fade_bottom - fade_top)), 0)
+        self.assertEqual(different(QRectF(clip.left(), fade_bottom + 1., clip.width(),
+                                        self.window.height() - fade_bottom - 1.)), 0)
         # Real cached blur spreads into the left inset instead of stopping at
         # the text column. It remains naturally bounded by its finite kernel.
         self.assertGreater(different(QRectF(clip.left() - 24., 0., 24., self.window.height())), 0)

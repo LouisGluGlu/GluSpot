@@ -42,6 +42,8 @@ class LoginSnapshot:
     failure_category: str = ""
     failure_stage: str = ""
     retry_after_seconds: float = 0.
+    # qr: phone scan. window: the platform opens its own login window.
+    login_kind: str = "qr"
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,8 @@ class OnlineSong:
     direct_stream: StreamInfo | None = field(default=None, repr=False)
     # Verified service association; speech and visual songs are distinct.
     introduced_song_id: str = ""
+    # Apple library rows keep the catalog id for artwork and timed lyrics.
+    catalog_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,7 @@ class OnlinePlaylist:
     title: str
     artwork_url: str = ""
     track_count: int = 0
+    contains_track: bool = False
 
 
 @dataclass(frozen=True)
@@ -115,6 +120,42 @@ class LyricPayload:
     raw_netease: str = ""
 
 
+def _ttml_document(text: str, depth: int = 0) -> str:
+    """The TTML itself, also when it arrives wrapped in Apple's JSON body."""
+    if not isinstance(text, str) or depth > 6:
+        return ""
+    stripped = text.lstrip()
+    if stripped.startswith("<"):
+        return stripped if "<tt" in stripped else ""
+    if not stripped.startswith(("{", "[")):
+        return ""
+    try:
+        value = json.loads(stripped)
+    except (ValueError, RecursionError):
+        return ""
+
+    def walk(node, level):
+        if level > 8:
+            return ""
+        if isinstance(node, str):
+            return _ttml_document(node, depth + 1)
+        if isinstance(node, dict):
+            preferred = node.get("ttml")
+            if isinstance(preferred, str):
+                found = _ttml_document(preferred, depth + 1)
+                if found:
+                    return found
+            node = list(node.values())
+        if isinstance(node, list):
+            for item in node:
+                found = walk(item, level + 1)
+                if found:
+                    return found
+        return ""
+
+    return walk(value, 0)
+
+
 class OnlineMusicError(RuntimeError):
     def __init__(self, code: str, source_id: str = "", message: str = "在线音乐请求失败", *, stage="", category="", session_lost=False):
         super().__init__(message)
@@ -156,8 +197,8 @@ class _LoginAttempt:
 
 
 class OnlineMusicService:
-    _names = (("netease", "网易云音乐"), ("kugou", "酷狗音乐"), ("qq", "QQ音乐"), ("qishui", "汽水音乐"))
-    _capabilities = {"netease": ("qr_login", "playlist", "recommendations", "daily", "personal_fm", "personal_dj", "stream", "lyrics", "search", "favorite", "playlist_write"), "qq": ("qr_login", "playlist", "recommendations", "stream", "lyrics", "search"), "kugou": ("qr_login", "playlist", "stream", "search"), "qishui": ()}
+    _names = (("netease", "网易云音乐"), ("kugou", "酷狗音乐"), ("qq", "QQ音乐"), ("apple_music", "Apple Music"), ("qishui", "汽水音乐"))
+    _capabilities = {"netease": ("qr_login", "playlist", "recommendations", "daily", "personal_fm", "personal_dj", "stream", "lyrics", "search", "favorite", "playlist_write"), "qq": ("qr_login", "playlist", "recommendations", "stream", "lyrics", "search"), "kugou": ("qr_login", "playlist", "stream", "search"), "apple_music": ("window_login", "playlist", "search", "companion_playback"), "qishui": ()}
 
     def __init__(self, backend: OnlineBackend | None = None, credential_store: ProtectedCredentialStore | None = None, *, clock=time.time):
         if backend is None:
@@ -201,8 +242,8 @@ class OnlineMusicService:
             self._validation_epochs[source_id] += 1
             self._validation_cancel_events[source_id].set()
             self._validation_cancel_events[source_id] = threading.Event()
-            # Cancellation only signals/terminates the owned child; it never
-            # waits for network I/O. Keep registration fenced until signalled.
+            # Replacement login stays fenced until this returns. The Apple
+            # backend only queues the window close; it does not wait on it.
             cancel = getattr(self.backend, "cancel_login_request", None)
             if callable(cancel):
                 cancel(source_id)
@@ -305,6 +346,9 @@ class OnlineMusicService:
             return False
         if source_id == "qq":
             return bool(credential.get("token") and isinstance(credential.get("sessions"), list) and credential["sessions"])
+        if source_id == "apple_music":
+            # The WebView profile holds the session. This marker is not a token.
+            return credential.get("profile") == "webview" and isinstance(credential.get("user_id"), str) and bool(credential["user_id"].strip())
         cookies = credential.get("cookie")
         if not isinstance(cookies, dict):
             return False
@@ -373,18 +417,26 @@ class OnlineMusicService:
             saved = self._load_credential(source_id)
             if saved and isinstance(saved.get("device_context"), dict):
                 device = {"device_context": saved["device_context"]}
+        window_login = "window_login" in self._capabilities.get(source_id, ())
         with login_request_guard(cancelled), login_phase("qr_acquisition"):
             response = self.backend.request(source_id, "begin_login", {}, device) if device else self.backend.request(source_id, "begin_login", {})
         data = response.get("data", {})
         if not isinstance(data, dict) or not isinstance(data.get("key"), str) or not data["key"]:
-            raise OnlineMusicError("response", source_id, "音乐服务未返回有效二维码")
-        image = self._image(data.get("qr_image"))
-        qr_url = self._http_url(data.get("qr_url", ""))
+            raise OnlineMusicError("response", source_id, "登录窗口没有准备好" if window_login else "音乐服务未返回有效二维码")
+        if window_login:
+            image, qr_url = b"", ""
+            message = "请在弹出的 Apple 登录窗口中登录"
+            login_kind = "window"
+        else:
+            image = self._image(data.get("qr_image"))
+            qr_url = self._http_url(data.get("qr_url", ""))
+            message = "使用手机音乐应用扫码登录"
+            login_kind = "qr"
         try:
             ttl = max(30.0, min(300.0, float(data.get("ttl", 180))))
         except (ValueError, TypeError):
             ttl = 180.0
-        snapshot = LoginSnapshot(session_id, source_id, "waiting", image, qr_url, self._clock() + ttl, "使用手机音乐应用扫码登录")
+        snapshot = LoginSnapshot(session_id, source_id, "waiting", image, qr_url, self._clock() + ttl, message, login_kind=login_kind)
         with self._lock:
             if self._closed or generation != self._generations[source_id]:
                 snapshot = self._snapshot_state(snapshot, "cancelled", "登录已取消")
@@ -410,7 +462,7 @@ class OnlineMusicService:
     def _snapshot_state(snapshot: LoginSnapshot, state: str, message: str, account: AccountSnapshot | None = None) -> LoginSnapshot:
         # Terminal states drop QR account material from public snapshots.
         keep_qr = state in {"waiting", "scanned"}
-        return LoginSnapshot(snapshot.session_id, snapshot.source_id, state, snapshot.qr_image_bytes if keep_qr else b"", snapshot.qr_url if keep_qr else "", snapshot.expires_at, message, account)
+        return LoginSnapshot(snapshot.session_id, snapshot.source_id, state, snapshot.qr_image_bytes if keep_qr else b"", snapshot.qr_url if keep_qr else "", snapshot.expires_at, message, account, login_kind=snapshot.login_kind)
 
     def poll_login(self, session_id: str) -> LoginSnapshot:
         with self._lock:
@@ -421,7 +473,8 @@ class OnlineMusicService:
             if snapshot.state not in {"waiting", "scanned"}:
                 return snapshot
             if self._clock() >= snapshot.expires_at:
-                attempt.snapshot = self._snapshot_state(snapshot, "expired", "二维码已过期，请刷新")
+                expired_message = "登录窗口已过期，请重新打开" if snapshot.login_kind == "window" else "二维码已过期，请刷新"
+                attempt.snapshot = self._snapshot_state(snapshot, "expired", expired_message)
                 return attempt.snapshot
             source_id, generation, key = snapshot.source_id, attempt.generation, attempt.key
             cancelled = self._login_cancel_events[source_id]
@@ -457,7 +510,10 @@ class OnlineMusicService:
                 credential = verified.get("credential", credential)
                 if not account.logged_in:
                     raise OnlineMusicError("auth", source_id, "扫码确认后未能验证账号，请重试")
-            messages = {"waiting": "使用手机音乐应用扫码登录", "scanned": "已扫码，请在手机上确认", "confirmed": "登录成功", "expired": "二维码已过期，请刷新", "cancelled": "登录已取消", "error": "音乐服务登录失败，请刷新"}
+            if snapshot.login_kind == "window":
+                messages = {"waiting": "请在弹出的 Apple 登录窗口中登录", "scanned": "正在确认 Apple 账号", "confirmed": "登录成功", "expired": "登录窗口已过期，请重新打开", "cancelled": "登录已取消", "error": "Apple 登录失败，请重新打开窗口"}
+            else:
+                messages = {"waiting": "使用手机音乐应用扫码登录", "scanned": "已扫码，请在手机上确认", "confirmed": "登录成功", "expired": "二维码已过期，请刷新", "cancelled": "登录已取消", "error": "音乐服务登录失败，请刷新"}
             with self._lock:
                 if self._closed or generation != self._generations[source_id] or attempt.snapshot.state == "cancelled":
                     return attempt.snapshot
@@ -506,7 +562,8 @@ class OnlineMusicService:
                     message = "已确认，账号核验暂不可用，正在重试" if stage == "account_status" else "网络暂不可用，保留二维码并自动重试"
                     attempt.snapshot = LoginSnapshot(snapshot.session_id, source_id, state,
                         snapshot.qr_image_bytes, snapshot.qr_url, snapshot.expires_at, message,
-                        failure_category=error.code, failure_stage=stage, retry_after_seconds=delay)
+                        failure_category=error.code, failure_stage=stage, retry_after_seconds=delay,
+                        login_kind=snapshot.login_kind)
                     return attempt.snapshot
                 from dataclasses import replace
                 stage = "account_status" if attempt.pending_credential is not None else "poll_login"
@@ -621,10 +678,21 @@ class OnlineMusicService:
                 self._validation_completed_keys[source_id] = validation_key
             self._validation_locks[source_id].release()
 
+    def watch_apple_login_window(self, callback) -> None:
+        """Tell the source page when the Apple login window closes."""
+        backend = getattr(self.backend, "apple", self.backend)
+        watch = getattr(backend, "watch_login_window", None)
+        if callable(watch):
+            watch(callback)
+
     def _validate_account(self, source_id, validation_key):
         credential = self._load_credential(source_id)
         if not credential:
-            return AccountSnapshot(source_id)
+            # Apple's session lives in the WebView profile, not in this store.
+            # Reopening GluSpot still has to ask the companion once.
+            if source_id != "apple_music":
+                return AccountSnapshot(source_id)
+            credential = {}
         with self._lock:
             generation, validation_epoch = validation_key
             if (self._closed or generation != self._generations[source_id]
@@ -798,17 +866,20 @@ class OnlineMusicService:
         cover = album.get("picUrl") or album.get("sizable_cover") or album.get("cover") or item.get("picUrl") or item.get("sizable_cover") or transform.get("union_cover") or item.get("cover") or item.get("img") or ""
         if source_id == "qq" and not cover and isinstance(album.get("mid"), str) and re.fullmatch(r"[A-Za-z0-9]{1,64}", album["mid"]):
             cover = f"https://y.gtimg.cn/music/photo_new/T002R500x500M000{album['mid']}.jpg"
-        return OnlineSong(source_id, str(song_id), str(item.get("name") or item.get("title") or item.get("songname") or item.get("SongName") or item.get("audio_name") or item.get("filename") or item.get("FileName") or ""), artist, str(album.get("name") or item.get("album_name") or item.get("AlbumName") or ""), duration, OnlineMusicService._artwork_url(cover))
+        catalog_id = str(item.get("catalog_id") or "")[:200] if isinstance(item.get("catalog_id"), str) else ""
+        return OnlineSong(source_id, str(song_id), str(item.get("name") or item.get("title") or item.get("songname") or item.get("SongName") or item.get("audio_name") or item.get("filename") or item.get("FileName") or ""), artist, str(album.get("name") or item.get("album_name") or item.get("AlbumName") or ""), duration, OnlineMusicService._artwork_url(cover), catalog_id=catalog_id)
 
     @staticmethod
     def _playlist(source_id: str, item: dict[str, Any]) -> OnlinePlaylist:
         cover = item.get("coverImgUrl") or item.get("cover_url") or item.get("bigpicUrl") or item.get("picUrl") or item.get("picurl") or item.get("coverUrl") or item.get("sizable_cover") or item.get("pic") or item.get("img") or item.get("imgurl") or item.get("logo") or item.get("albumPicUrl") or ""
+        contains = item.get("contains") is True or item.get("containsTrack") is True or item.get("contains_track") is True
         return OnlinePlaylist(
             source_id,
             str((item.get("global_collection_id") or item.get("gid") if source_id == "kugou" else None) or item.get("id") or item.get("tid") or item.get("dissid") or item.get("dirId") or item.get("dirid") or item.get("global_collection_id") or item.get("listid") or item.get("specialid") or ""),
             str(item.get("name") or item.get("title") or item.get("dirName") or item.get("dirname") or item.get("diss_name") or item.get("dissname") or item.get("listname") or item.get("specialname") or ""),
             OnlineMusicService._artwork_url(cover),
             OnlineMusicService._nonnegative_int(item.get("trackCount") or item.get("songNum") or item.get("song_cnt") or item.get("count") or item.get("song_count") or item.get("songnum") or item.get("m_count") or item.get("music_num")),
+            contains,
         )
 
     def playlists(self, source_id: str, limit: int = 100, offset: int = 0) -> CatalogPage:
@@ -836,6 +907,10 @@ class OnlineMusicService:
         items = tuple(item for item in items if item.playlist_id and item.title)
         next_offset = offset + len(raw)
         has_more = next_offset < total if total is not None else bool(data.get("more") or len(raw) == limit)
+        # Apple pages say explicitly whether another offset exists. A full page
+        # is not another page, or a repeated library would keep loading.
+        if source_id == "apple_music":
+            has_more = data.get("more") is True
         page = CatalogPage(items, next_offset, has_more and bool(raw), total)
         if offset == 0:
             self._save_catalog_snapshot(source_id, "playlists", page, account.user_id)
@@ -937,6 +1012,22 @@ class OnlineMusicService:
         if data.get("ok") is not True:
             raise OnlineMusicError("response", source_id, "添加歌单操作未确认，请刷新后重试")
 
+    def create_playlist(self, source_id: str, title: str, *, expected_user_id: str = "") -> OnlinePlaylist:
+        """Create one owned playlist. Ordering and deletion stay out of this call."""
+        account, generation = self._favorite_account(source_id, expected_user_id)
+        if not isinstance(title, str) or not title.strip() or len(title.strip()) > 40 or any(ord(char) < 32 for char in title):
+            raise OnlineMusicError("argument", source_id, "请输入歌单名称")
+        data = self._catalog(source_id, "create_playlist",
+                             {"user_id": account.user_id, "title": title.strip()},
+                             expected_generation=generation)
+        raw = data.get("playlist") if isinstance(data.get("playlist"), dict) else data
+        if not isinstance(raw, dict) or data.get("ok") is False:
+            raise OnlineMusicError("response", source_id, "新建歌单未确认，请稍后重试")
+        playlist = self._playlist(source_id, raw)
+        if not playlist.playlist_id or not playlist.title.strip():
+            raise OnlineMusicError("response", source_id, "新建歌单未确认，请稍后重试")
+        return playlist
+
     def search(self, source_id: str, query: str, kind: str = "songs", limit: int = 30, offset: int = 0) -> CatalogPage:
         self._check_source(source_id)
         if not isinstance(query, str) or not query.strip() or len(query) > 200 or any(ord(char) < 32 for char in query) or kind not in {"songs", "playlists"}:
@@ -957,7 +1048,8 @@ class OnlineMusicService:
         has_more = data.get("has_more") is True and next_offset > offset
         return CatalogPage(items, max(offset, next_offset), has_more, total)
 
-    def recommended_playlists(self, source_id: str, *, limit: int = 30, offset: int = 0) -> CatalogPage:
+    def recommended_playlists(self, source_id: str, *, limit: int = 30, offset: int = 0,
+                              shelf: str = "recommended") -> CatalogPage:
         """Read the platform's finite recommendation shelf, independently of owned lists.
 
         The pinned endpoints return a complete shelf rather than a server-side
@@ -965,12 +1057,17 @@ class OnlineMusicService:
         QQ supplies editorial hot playlists, not a personalized daily mix.
         """
         self._check_source(source_id)
-        if source_id not in {"netease", "qq"}:
+        if source_id not in {"netease", "qq", "apple_music"}:
             raise OnlineMusicError("unsupported", source_id, "此来源暂不支持推荐歌单")
+        if shelf not in {"recommended", "for_you"} or (shelf == "for_you" and source_id != "apple_music"):
+            raise OnlineMusicError("argument", source_id, "未知的推荐分区")
         limit, offset = self._page_bounds(limit, offset)
         limit = min(100, limit)
         account = self.account_status(source_id)
-        data = self._catalog(source_id, "recommended_playlists", {"limit": limit, "offset": offset})
+        params = {"limit": limit, "offset": offset}
+        if source_id == "apple_music":
+            params["shelf"] = shelf
+        data = self._catalog(source_id, "recommended_playlists", params)
         if not isinstance(data.get("items"), list):
             raise OnlineMusicError("response", source_id, "推荐歌单返回的数据无效")
         items = []
@@ -984,7 +1081,7 @@ class OnlineMusicService:
         total = min(100, self._nonnegative_int(data["total"])) if data.get("total") is not None else None
         has_more = data.get("has_more") is True and next_offset > offset and (total is None or next_offset < total)
         page = CatalogPage(tuple(items), next_offset, has_more, total)
-        if offset == 0 and account.logged_in:
+        if offset == 0 and account.logged_in and shelf == "recommended":
             self._save_catalog_snapshot(source_id, "recommended", page, account.user_id)
         return page
 
@@ -999,7 +1096,8 @@ class OnlineMusicService:
             raw = raw[offset:offset + limit]
         items = tuple(self._song(source_id, item) for item in raw)
         items = tuple(item for item in items if item.song_id and item.title)
-        return CatalogPage(items, offset + len(raw), bool(data.get("more") or len(raw) == limit), None)
+        has_more = data.get("more") is True if source_id == "apple_music" else bool(data.get("more") or len(raw) == limit)
+        return CatalogPage(items, offset + len(raw), has_more, None)
 
     def daily_recommendations(self, source_id: str = "netease") -> tuple[OnlineSong, ...]:
         return self._recommendation_songs("daily", source_id)
@@ -1228,7 +1326,82 @@ class OnlineMusicService:
             invalid()
         return tuple(result)
 
+    def _signed_account(self, source_id: str, expected_user_id: str = "") -> tuple[AccountSnapshot, int]:
+        self._check_source(source_id)
+        if not isinstance(expected_user_id, str):
+            raise OnlineMusicError("argument", source_id, "无效的账号标识")
+        with self._lock:
+            generation = self._generations[source_id]
+        account = self.account_status(source_id)
+        if not account.logged_in:
+            account = self.account_status(source_id, refresh=True)
+        with self._lock:
+            if self._closed or generation != self._generations[source_id]:
+                raise OnlineMusicError("cancelled", source_id, "账号已变化，请重试")
+        if not account.logged_in:
+            raise OnlineMusicError("auth_required", source_id, account.message or "请先登录此音乐来源")
+        if expected_user_id and expected_user_id != account.user_id:
+            raise OnlineMusicError("cancelled", source_id, "账号已变化，请重试")
+        return account, generation
+
+    def apple_timed_lyrics(self, song_id: str, catalog_id: str = "") -> str:
+        """Timed lyrics from the signed-in Apple page. Empty means try another source."""
+        if not isinstance(song_id, str) or not isinstance(catalog_id, str):
+            raise OnlineMusicError("argument", "apple_music", "无效的歌曲标识")
+        data = self._catalog("apple_music", "song_lyrics", {"song_id": song_id[:200], "catalog_id": catalog_id[:200]})
+        ttml = data.get("ttml") if isinstance(data.get("ttml"), str) else ""
+        return _ttml_document(ttml)
+
+    def companion_transport(self, source_id: str, action: str, params: dict | None = None) -> dict:
+        """Play, pause, resume, seek or read status. Playback mode is not a parameter."""
+        if source_id != "apple_music" or "companion_playback" not in self._capabilities.get(source_id, ()):
+            raise OnlineMusicError("unsupported", source_id, "这个来源不能在官方页面里播放")
+        if action not in {"play", "resume", "pause", "seek", "status"}:
+            raise OnlineMusicError("argument", source_id, "只接受播放、暂停和跳转，不会改播放模式")
+        params = dict(params or {})
+        if any(key in params for key in ("shuffle", "repeat", "playback_mode")):
+            raise OnlineMusicError("argument", source_id, "不会修改播放模式")
+        return self._catalog(source_id, "companion_transport", {
+            "action": action, "song_id": str(params.get("song_id") or ""), "seconds": params.get("seconds") or 0,
+        })
+
+    def create_playlist(self, source_id: str, title: str, *, expected_user_id: str = "") -> str:
+        if source_id not in {"netease", "apple_music"}:
+            raise OnlineMusicError("unsupported", source_id, "这个来源还不能新建歌单")
+        if not isinstance(title, str) or not title.strip() or len(title.strip()) > 40:
+            raise OnlineMusicError("argument", source_id, "歌单名不能为空，也不要超过 40 个字")
+        account, generation = self._signed_account(source_id, expected_user_id)
+        data = self._catalog(source_id, "create_playlist", {"name": title.strip(), "user_id": account.user_id},
+                             expected_generation=generation)
+        playlist_id = data.get("playlist_id")
+        if not isinstance(playlist_id, str) or not playlist_id.strip():
+            raise OnlineMusicError("response", source_id, "歌单没有创建成功")
+        return playlist_id.strip()
+
+    def append_playlist_tracks(self, source_id: str, playlist_id: str, song_ids, *, expected_user_id: str = "") -> int:
+        """Add songs. This never removes an existing song."""
+        ids = tuple(song_ids)
+        if source_id == "netease":
+            for song_id in ids:
+                self.add_song_to_playlist(source_id, song_id, playlist_id, expected_user_id=expected_user_id)
+            return len(ids)
+        if source_id != "apple_music":
+            raise OnlineMusicError("unsupported", source_id, "这个来源还不能写入歌单")
+        if not ids or any(not isinstance(song_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", song_id) for song_id in ids):
+            raise OnlineMusicError("argument", source_id, "歌曲标识无效")
+        if not isinstance(playlist_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", playlist_id):
+            raise OnlineMusicError("argument", source_id, "歌单标识无效")
+        _account, generation = self._signed_account(source_id, expected_user_id)
+        data = self._catalog(source_id, "append_tracks", {"playlist_id": playlist_id, "song_ids": list(ids)},
+                             expected_generation=generation)
+        if data.get("ok") is not True:
+            raise OnlineMusicError("response", source_id, "加入歌单没有确认")
+        return len(ids)
+
     def stream_url(self, source_id: str, song_id: str) -> StreamInfo:
+        if source_id == "apple_music":
+            self._check_source(source_id)
+            return StreamInfo(source_id, str(song_id), "", False, restriction="Apple Music 的声音在官方页面里播放，不提供音频地址")
         data = self._catalog(source_id, "stream_url", {"song_id": str(song_id)})
         if source_id == "netease":
             entries = data.get("data")
@@ -1288,4 +1461,5 @@ class OnlineMusicService:
 
 
 def make_online_music_service() -> OnlineMusicService:
-    return OnlineMusicService()
+    from api.online_music_router import RoutingOnlineBackend
+    return OnlineMusicService(RoutingOnlineBackend())

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 from shiboken6 import isValid
 
 from api.online_music import AccountSnapshot
-from local.playback_entry_window import ENTRY_SOURCES, PlaybackEntryWindow
+from local.playback_entry_window import ENTRY_SOURCES, MusicSourceButton, PlaybackEntryWindow
 
 
 def _source(source_id, available=True):
@@ -35,7 +35,17 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # Physical offscreen screens shrink to 400 logical px at DPR 2. Most
+        # cases specify their own window size, so provide a normal work area;
+        # short-display cases override this fixture explicitly below.
+        screen = SimpleNamespace(availableGeometry=lambda: QRect(0, 0, 1920, 1080))
+        self.screen_patch = patch.object(QGuiApplication, "screenAt", return_value=screen)
+        self.screen_patch.start()
+        self.addCleanup(self.screen_patch.stop)
         self.window = PlaybackEntryWindow()
+        # Keep the original layout's geometry regressions explicitly scoped.
+        # Shipping-default sidebar coverage lives in test_login_layout_variants.
+        self.window.set_login_variant("classic")
 
     def tearDown(self):
         self.window.close()
@@ -95,7 +105,7 @@ class PlaybackEntryWindowTests(unittest.TestCase):
 
     def test_source_order_and_unsupported_source_are_explicit(self):
         self.window.set_sources(tuple(_source(item.source_id, item.source_id != "qishui") for item in ENTRY_SOURCES))
-        self.assertEqual(tuple(self.window.source_buttons), ("netease", "kugou", "qq", "qishui"))
+        self.assertEqual(tuple(self.window.source_buttons), ("netease", "kugou", "qq", "apple_music", "qishui", "spotify"))
         self.assertFalse(self.window.source_buttons["qishui"].isEnabled())
         self.assertIn("暂无经过验证", self.window.source_buttons["qishui"].toolTip())
         spy = QSignalSpy(self.window.sourceSelected)
@@ -115,10 +125,10 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         qishui = self.window.source_buttons["qishui"]
         self.assertEqual(netease.availability_status, "需安装运行时")
         self.assertEqual(kugou.availability_status, "需安装运行时")
-        self.assertEqual(qishui.availability_status, "暂不支持")
+        self.assertEqual(qishui.availability_status, "即将支持")
         self.assertIn("需安装运行时", netease.accessibleName())
         self.assertIn("在线音乐运行时未安装", netease.accessibleDescription())
-        self.assertIn("暂不支持", qishui.accessibleName())
+        self.assertIn("即将支持", qishui.accessibleName())
         self.assertIn("汽水音乐尚无已验证", qishui.accessibleDescription())
         self.assertFalse(netease.isEnabled())
         self.assertFalse(kugou.isEnabled())
@@ -133,7 +143,55 @@ class PlaybackEntryWindowTests(unittest.TestCase):
                                     "汽水音乐尚无已验证且可随本项目分发的扫码适配器"))
             for item in ENTRY_SOURCES
         ))
-        self.assertEqual(self.window.message_label.text(), "没有可用音乐来源；请安装在线音乐运行时；汽水音乐暂不支持。")
+        self.assertEqual(self.window.message_label.text(), "没有可用音乐来源；请安装在线音乐运行时。")
+
+    def test_disabled_source_faces_dim_and_cannot_paint_armed_rings(self):
+        reason = "在线音乐适配依赖未安装，请运行 prepare-runtime.ps1"
+        self.window.set_sources((SimpleNamespace(source_id="netease", available=False, reason=reason),))
+        button = self.window.source_buttons["netease"]
+        button.resize(140, 88)
+        button.show_caption = False
+        faces, icons = [], []
+
+        def face(painter, rect, **kwargs):
+            faces.append((painter.opacity(), kwargs))
+            painter.fillRect(rect, QColor("white"))
+
+        def icon(painter, *_args):
+            icons.append(painter.opacity())
+
+        with patch("local.playback_entry_window.paint_liquid_glass", side_effect=face), \
+                patch("local.playback_entry_window.paint_music_source_icon", side_effect=icon), \
+                patch("local.playback_entry_window.widget_glass_backdrop", return_value=(QImage(), QRectF())), \
+                patch.object(MusicSourceButton, "hasFocus", return_value=True), \
+                patch.object(MusicSourceButton, "underMouse", return_value=True):
+            for style in ("classic", "sidebar", "sidebar-icons", "focus", "hero"):
+                with self.subTest(style=style):
+                    button.login_style = style
+                    self.window.set_sources((SimpleNamespace(source_id="netease", available=False, reason=reason),))
+                    faces.clear()
+                    icons.clear()
+                    button.setDown(True)
+                    button.setChecked(True)
+                    checked = button.grab().toImage()
+                    button.setChecked(False)
+                    self.assertEqual(button.grab().toImage(), checked)
+                    self.assertTrue(faces)
+                    self.assertTrue(icons)
+                    self.assertTrue(all(.40 <= opacity <= .55 for opacity, _ in faces))
+                    self.assertTrue(all(.40 <= opacity <= .55 for opacity in icons))
+                    self.assertTrue(all(not data["active"] and not data["hovered"] and not data["pressed"]
+                                        for _, data in faces))
+                    self.window.set_sources((_source("netease"),))
+                    button.setChecked(True)
+                    button.grab()
+                    self.assertEqual(faces[-1][0], 1.)
+                    self.assertTrue(faces[-1][1]["active"])
+                    self.assertTrue(faces[-1][1]["hovered"])
+                    button.setDown(False)
+        self.window.set_sources((SimpleNamespace(source_id="netease", available=False, reason=reason),))
+        self.assertIn(reason, button.toolTip())
+        self.assertIn(reason, button.accessibleDescription())
 
     def test_source_recovery_clears_diagnostic_and_restores_selectable_tile(self):
         self.window.set_sources((SimpleNamespace(source_id="netease", available=False,
@@ -144,9 +202,9 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         self.window.set_sources((_source("netease"),))
         self.assertTrue(button.isEnabled())
         self.assertEqual(button.availability_status, "")
-        self.assertEqual(button.accessibleName(), "网易云音乐")
-        self.assertEqual(button.accessibleDescription(), "")
-        self.assertEqual(button.toolTip(), "网易云音乐")
+        self.assertEqual(button.accessibleName(), "网易云音乐（未登录）")
+        self.assertEqual(button.accessibleDescription(), "网易云音乐（未登录）")
+        self.assertEqual(button.toolTip(), "网易云音乐（未登录）")
         self.assertEqual(self.window.message_label.text(), "选择音乐来源")
         spy = QSignalSpy(self.window.sourceSelected)
         button.click()
@@ -252,7 +310,11 @@ class PlaybackEntryWindowTests(unittest.TestCase):
     def test_installer_island_expands_at_the_same_anchor_and_releases_snapshot(self):
         self.window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
         origin = QRect(510, 12, 340, 52)
-        self.window.show_choices_from(origin)
+        # Anchor behavior needs room for the expanded page; the default Box
+        # offscreen screen is only 800 px wide and correctly clamps this pose.
+        screen = SimpleNamespace(availableGeometry=lambda: QRect(0, 0, 1920, 1080))
+        with patch.object(QGuiApplication, "screenAt", return_value=screen):
+            self.window.show_choices_from(origin)
         self.window.show()
         self.assertEqual(self.window.geometry(), origin)
         self.assertFalse(self.window._page_morph_to.isNull())
@@ -368,8 +430,8 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         account = AccountSnapshot("netease", True, "test", "测试昵称", state="verified")
         self.window.set_account(account)
         self.assertTrue(self.window.rect().contains(self.window.enter_button.geometry()))
-        self.assertGreaterEqual(self.window.enter_button.height(), 44)
-        self.assertEqual(self.window.enter_button.text(), "进入音乐库")
+        self.assertEqual(self.window.enter_button.height(), 38)
+        self.assertEqual(self.window.enter_button.text(), "使用此平台")
         self.assertTrue(self.window.refresh_button.isHidden())
         self.assertTrue(self.window.message_label.isHidden())
         self.assertTrue(self.window._qr_image.isNull())
@@ -410,10 +472,13 @@ class PlaybackEntryWindowTests(unittest.TestCase):
 
     def test_source_and_account_navigation_use_clear_targets_within_window(self):
         self._login_page()
-        for button in (self.window.back_button, self.window.close_button, self.window.refresh_button, *self.window.source_buttons.values()):
+        for button in (self.window.back_button, self.window.close_button, *self.window.source_buttons.values()):
             self.assertGreaterEqual(button.width(), 44)
             self.assertGreaterEqual(button.height(), 44)
             self.assertTrue(self.window.rect().contains(button.geometry()))
+        self.assertEqual(self.window.refresh_button.height(), 38)
+        self.assertGreaterEqual(self.window.refresh_button.width(), 44)
+        self.assertTrue(self.window.rect().contains(self.window.refresh_button.geometry()))
         self.assertGreaterEqual(self.window.height() - 24 - self.window.refresh_button.geometry().bottom(), 16)
         self.assertFalse(self.window.message_label.geometry().intersects(self.window.refresh_button.geometry()))
         self.window.set_account(AccountSnapshot("netease", True, "fixture", "较长的布局测试账号昵称" * 3, state="verified"))
@@ -458,10 +523,12 @@ class PlaybackEntryWindowTests(unittest.TestCase):
             self.window._set_expanded(1.0)
         self.assertLessEqual(self.window.width(), available.width())
         self.assertLessEqual(self.window.height(), available.height())
-        for button in (self.window.back_button, self.window.close_button, self.window.refresh_button, *self.window.source_buttons.values()):
+        for button in (self.window.back_button, self.window.close_button, *self.window.source_buttons.values()):
             self.assertTrue(self.window.rect().contains(button.geometry()))
             self.assertGreaterEqual(button.height(), 44)
             self.assertGreaterEqual(button.width(), 44)
+        self.assertEqual(self.window.refresh_button.height(), 38)
+        self.assertTrue(self.window.rect().contains(self.window.refresh_button.geometry()))
         self.assertFalse(self.window.message_label.geometry().intersects(self.window.refresh_button.geometry()))
         self.assertGreaterEqual(self.window.height() - 24 - self.window.refresh_button.geometry().bottom(), 16)
         self.assertFalse(self.window.grab().isNull())
@@ -486,7 +553,7 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         selected = QSignalSpy(self.window.sourceSelected)
         self.window.source_buttons["netease"].click()
         self.assertIs(self.window._account, account)
-        self.assertEqual(self.window.enter_button.text(), "进入音乐库")
+        self.assertEqual(self.window.enter_button.text(), "使用此平台")
         self.assertEqual(selected.count(), 0)
 
     def test_login_back_returns_to_source_picker_before_optional_mode_page(self):
@@ -510,7 +577,7 @@ class PlaybackEntryWindowTests(unittest.TestCase):
                 self.window.set_login_snapshot(SimpleNamespace(source_id="netease", state=state))
                 self.assertEqual(self.window._login_placeholder_text(), placeholder)
                 self.assertTrue(self.window.refresh_button.isEnabled())
-                self.assertEqual(self.window.refresh_button.text(), "刷新二维码" if state == "expired" else "重试登录")
+                self.assertEqual(self.window.refresh_button.text(), "刷新二维码")
                 self.assertEqual(self.window.refresh_button.accessibleName(), self.window.refresh_button.text())
                 refreshed = QSignalSpy(self.window.refreshRequested)
                 self.window.refresh_button.click()
@@ -532,7 +599,7 @@ class PlaybackEntryWindowTests(unittest.TestCase):
                                                              qr_image_bytes=_image_bytes(), message=message))
                 self.assertEqual(self.window.message_label.text(), message)
                 if state == "error":
-                    self.assertEqual(self.window.refresh_button.text(), "刷新二维码" if "刷新" in message else "重试登录")
+                    self.assertEqual(self.window.refresh_button.text(), "刷新二维码")
 
     def test_login_qr_status_and_action_remain_adjacent_without_overlap_on_short_display(self):
         self._login_page()
@@ -589,11 +656,13 @@ class PlaybackEntryWindowTests(unittest.TestCase):
                     self.assertFalse(helper.intersects(message))
                     self.assertFalse(qr.intersects(action))
                     self.assertFalse(self.window.message_label.geometry().intersects(self.window.refresh_button.geometry()))
-                    for button in (self.window.close_button, self.window.back_button,
-                                   self.window.refresh_button, *self.window.source_buttons.values()):
+                    for button in (self.window.close_button, self.window.back_button, *self.window.source_buttons.values()):
                         self.assertTrue(self.window.rect().contains(button.geometry()), button.geometry())
                         self.assertGreaterEqual(button.height(), 44)
                         self.assertGreaterEqual(button.width(), 44)
+                    self.assertEqual(self.window.refresh_button.height(), 38)
+                    self.assertGreaterEqual(self.window.refresh_button.width(), 44)
+                    self.assertTrue(self.window.rect().contains(self.window.refresh_button.geometry()))
                     self.window.set_account(AccountSnapshot("netease", True, "fixture", "测试账号", state="verified"))
                     avatar, name, enter = self.window._account_content_rects()
                     for rect in (avatar, name, enter):
@@ -601,7 +670,7 @@ class PlaybackEntryWindowTests(unittest.TestCase):
                     self.assertFalse(name.intersects(enter))
                     self.assertFalse(avatar.intersects(enter))
                     self.assertTrue(self.window.rect().contains(self.window.enter_button.geometry()))
-                    self.assertGreaterEqual(self.window.enter_button.height(), 44)
+                    self.assertEqual(self.window.enter_button.height(), 38)
 
     def test_normal_height_expansion_does_not_move_sources_into_compact_row(self):
         self.window.show_sources()
@@ -612,8 +681,8 @@ class PlaybackEntryWindowTests(unittest.TestCase):
             self.window._expansion.stop()
             for fraction in (0.0, .3, .65, 1.0):
                 self.window._set_expanded(fraction)
-                self.assertEqual(self.window.source_buttons["netease"].geometry().y(), 112)
-                self.assertEqual(self.window.source_buttons["netease"].height(), 96)
+                self.assertEqual(self.window.source_buttons["netease"].geometry().y(), 72)
+                self.assertEqual(self.window.source_buttons["netease"].height(), 64)
 
 
 if __name__ == "__main__":

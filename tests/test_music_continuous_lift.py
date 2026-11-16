@@ -127,52 +127,47 @@ class MusicSurfaceContinuousLiftTests(unittest.TestCase):
             self.window._paint_lifted_run(painter, QPointF(10.0, 10.0), 90.0, text, self.font, progress)
         return tuple(call.args[2].y() for call in draw.call_args_list)
 
-    def test_actual_latin_and_cjk_painter_follows_continuous_staircase_at_each_height(self):
+    def test_actual_latin_and_cjk_painter_follows_continuous_staircase_at_original_height(self):
         scale = max(0.5, self.font.pixelSize() / self.window.LYRIC_PIXEL_SIZE)
-        for level in (1, 2, 4):
-            self.owner.music_surface_reading_lift_level = level
-            height = GLYPH_FLOAT_LIFT * level / 4.0 * scale
-            for text in ("A B C D E F", "甲乙丙丁戊己"):
-                start = self.positions(text, 0.0)
-                self.assertEqual(len(start), 6)
-                for frame in range(9):
-                    current = self.positions(text, frame / 8.0)
-                    with self.subTest(level=level, text=text, frame=frame):
-                        for index in range(6):
-                            self.assertAlmostEqual(start[index] - current[index], height * continuous_read_lift(frame / 8.0, index, 6))
+        height = GLYPH_FLOAT_LIFT * scale
+        for text in ("A B C D E F", "甲乙丙丁戊己"):
+            start = self.positions(text, 0.0)
+            self.assertEqual(len(start), 6)
+            for frame in range(9):
+                current = self.positions(text, frame / 8.0)
+                with self.subTest(text=text, frame=frame):
+                    for index in range(6):
+                        self.assertAlmostEqual(start[index] - current[index], height * continuous_read_lift(frame / 8.0, index, 6))
 
     def test_actual_painter_never_alternates_odd_even_velocity_platforms(self):
-        for level in (1, 2, 4):
-            self.owner.music_surface_reading_lift_level = level
-            for text in ("A B C D E F", "甲乙丙丁戊己"):
-                baseline = self.positions(text, 0.0)
-                frames = [self.positions(text, step / 256.0) for step in range(257)]
-                lifts = [tuple(start - y for start, y in zip(baseline, frame)) for frame in frames]
-                full = lifts[-1][0]
-                with self.subTest(level=level, text=text):
-                    for heights in lifts:
-                        self.assertTrue(all(a + 1e-10 >= b for a, b in zip(heights, heights[1:])))
-                    for index in range(6):
-                        middle = [(a[index], b[index]) for a, b in zip(lifts, lifts[1:])
-                                  if full * 0.01 < a[index] < full * 0.99 and b[index] < full * 0.99]
-                        self.assertTrue(middle)
-                        self.assertTrue(all(b - a > 1e-8 for a, b in middle))
+        for text in ("A B C D E F", "甲乙丙丁戊己"):
+            baseline = self.positions(text, 0.0)
+            frames = [self.positions(text, step / 256.0) for step in range(257)]
+            lifts = [tuple(start - y for start, y in zip(baseline, frame)) for frame in frames]
+            full = lifts[-1][0]
+            with self.subTest(text=text):
+                for heights in lifts:
+                    self.assertTrue(all(a + 1e-10 >= b for a, b in zip(heights, heights[1:])))
+                for index in range(6):
+                    middle = [(a[index], b[index]) for a, b in zip(lifts, lifts[1:])
+                              if full * 0.01 < a[index] < full * 0.99 and b[index] < full * 0.99]
+                    self.assertTrue(middle)
+                    self.assertTrue(all(b - a > 1e-8 for a, b in middle))
 
-    def test_painter_supports_160_80_40_distinct_positions_without_extra_clock_ticks(self):
+    def test_painter_supports_160_distinct_positions_without_extra_clock_ticks(self):
         scale = max(0.5, self.font.pixelSize() / self.window.LYRIC_PIXEL_SIZE)
-        for level, expected_samples in ((1, 40), (2, 80), (4, 160)):
-            with self.subTest(level=level):
-                self.owner.music_surface_reading_lift_level = level
-                bands = READING_LIFT_FULL_BANDS * level // 4
-                samples = bands * READING_LIFT_SAMPLES_PER_BAND
-                self.assertEqual(samples, expected_samples)
-                # The existing playback progress may sample this continuous
-                # curve at any cadence; the lift adds no independent timer.
-                positions = [self.positions("shine", step / samples)[0] for step in range(samples + 1)]
-                self.assertGreaterEqual(len(set(round(y, 6) for y in positions)), expected_samples)
-                self.assertEqual(positions, sorted(positions, reverse=True))
-                self.assertAlmostEqual(positions[0] - positions[-1], GLYPH_FLOAT_LIFT * level / 4.0 * scale)
-                self.assertEqual(self.positions("shine", 0.5), self.positions("shine", 0.5))
+        expected_samples = 160
+        with self.subTest(height="original"):
+            bands = READING_LIFT_FULL_BANDS
+            samples = bands * READING_LIFT_SAMPLES_PER_BAND
+            self.assertEqual(samples, expected_samples)
+            # The existing playback progress may sample this continuous
+            # curve at any cadence; the lift adds no independent timer.
+            positions = [self.positions("shine", step / samples)[0] for step in range(samples + 1)]
+            self.assertGreaterEqual(len(set(round(y, 6) for y in positions)), expected_samples)
+            self.assertEqual(positions, sorted(positions, reverse=True))
+            self.assertAlmostEqual(positions[0] - positions[-1], GLYPH_FLOAT_LIFT * scale)
+            self.assertEqual(self.positions("shine", 0.5), self.positions("shine", 0.5))
 
     def test_wrapped_sentence_keeps_one_wave_across_visual_rows(self):
         text = "one two three four five six seven eight"

@@ -44,10 +44,12 @@ class AutomaticIslandPlacementTests(unittest.TestCase):
                         visual._owner_bar_hidden.return_value = hidden
                         suppressed, reason = visual._apply_automatic_placement_policy(100., True, True, "fullscreen")
                         expected = "finder" if finder else "top" if dock else "tasker"
-                        if hidden and not follow:
+                        if hidden:
+                            # Fullscreen with the bar out of sight: the thin top
+                            # bar, whatever the hide-follow option.
                             expected = "top"
                         self.assertEqual(visual.location_mode, expected)
-                        self.assertEqual(suppressed, follow and (hidden or (dock and not finder)))
+                        self.assertFalse(suppressed)
                         self.assertEqual(bool(reason), suppressed)
                         self.assertTrue(visual.media_is_playing)
                         self.assertEqual(visual.media_position_seconds, 2.)
@@ -110,8 +112,9 @@ class AutomaticIslandPlacementTests(unittest.TestCase):
     def test_dock_without_finder_fullscreen_exit_reveals_and_keeps_top(self):
         visual = self.environment(True, False)
         visual.bar_hide_follow_enabled = True
+        # Fullscreen keeps the island as the thin top bar, not hidden.
         self.assertEqual(visual._apply_automatic_placement_policy(100., True, True, "fullscreen"),
-                         (True, "dock-top-hidden"))
+                         (False, ""))
         self.assertEqual(visual.location_mode, "top")
         self.assertEqual(visual._apply_automatic_placement_policy(101., False, False, ""), (False, ""))
         self.assertEqual(visual.location_mode, "top")

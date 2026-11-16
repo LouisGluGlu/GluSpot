@@ -303,6 +303,7 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
         self.assertEqual(bytes(closed.constBits()), bytes(restored.constBits()))
 
     def test_translation_active_has_sharp_contrasting_symbol_over_glass(self):
+        self.owner.settings_getter = lambda key, default=None: "dark" if key == "v2_theme_mode" else default
         self.owner.enable_dual_line_lyrics = True
         self.window._reset_control_idle(100.0)
         image = self._controls()
@@ -317,7 +318,7 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
         self.assertTrue(all(image.pixelColor(x, y).alpha() > 240 for x, y in points))
         face = image.pixelColor(round(circle.center().x()), round(circle.top()) + 3)
         self.assertGreater(face.alpha(), 0)
-        self.assertLess(face.alpha(), 245)
+        self.assertEqual(face.alpha(), 255)
         self.assertGreater(abs(sum(image.pixelColor(x, y).lightness() for x, y in points) / len(points)
                                - face.lightness()), 80)
 
@@ -332,7 +333,6 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
         active = self._controls()
         self.assertEqual(bytes(inactive.constBits()), bytes(active.constBits()))
         self.assertEqual(controls, self.window._button_rects)
-        self.owner.music_surface_reading_strategy = "low_perception"
         low_perception = self._controls()
         self.assertEqual(bytes(active.constBits()), bytes(low_perception.constBits()))
         self.assertEqual(controls, self.window._button_rects)

@@ -31,8 +31,6 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
         reader.read = Mock(side_effect=lambda *_args, **_kwargs: reader.sample)
         provider.lyrics_store = store
         provider.netease_position = reader
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider._music_player_adapter_for = lambda *_args: "netease"
         provider._is_source_app_foreground = lambda *_args: foreground
         provider._schedule_current_netease_art_lookup = lambda *_args, **_kwargs: None

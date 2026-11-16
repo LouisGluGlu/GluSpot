@@ -9,6 +9,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from html import escape
 import math
+import os
 import threading
 import time
 
@@ -17,21 +18,30 @@ from PySide6.QtGui import QColor, QFontMetricsF, QGuiApplication, QIcon, QImage,
 from PySide6.QtWidgets import QAbstractButton, QGraphicsOpacityEffect, QLabel, QMessageBox, QPushButton, QScrollArea, QWidget
 
 from api.online_music import AccountSnapshot, OnlineSong
+from local.spring_motion import FlickScroll
 from local.branding import APP_NAME
 from local.island_stack_visual import IslandStackVisual
 from local.music_mode_controls import paint_presentation_glyph
 from local.music_library_layout import CatalogMotionOverlay
 from local.music_library_search import LibraryProgress, LibrarySearch
+from local.music_library_query import (SearchHistory, local_collection_matches, log_search_phase,
+                                      paint_highlighted_text)
 from local.artwork_skeleton import paint_artwork_skeleton
 from local.music_page_resize import MusicPageResizeMixin
 from local.music_source_icons import music_source_icon_image, paint_music_source_icon
 from local.liquid_glass import (GlassCaptureMixin, GlassPushButton, glass_owner_is_live,
                                 paint_liquid_glass, widget_glass_backdrop, widget_glass_level)
 from local.music_surface_background import AlbumFlowBackgroundRenderer
-from local.music_surface_palette import artwork_surface_palette, cached_artwork_surface_palette
+from local.backdrop_variants import BACKDROP_VARIANTS, resolve_backdrop_variant
+from local.music_surface_palette import artwork_surface_palette, cached_artwork_surface_palette, idle_surface_palette
 from local.music_lyric_motion import MotionSimulationClock
 from local.control_hover import HOVER_SECONDS, install_control_hover
 from local.playback_entry_window import ENTRY_SOURCES, EntryNavigationButton, MusicSourceButton, _entry_font
+from local.library_layout_variants import LIBRARY_VARIANTS, LibraryVariantPresentation
+from local.library_now_playing import LibraryNowPlayingIsland
+from local.library_error_toast import (
+    LibraryErrorToast, error_toast_rect, paint_library_error_toast,
+)
 
 
 @dataclass(frozen=True)
@@ -71,11 +81,18 @@ class _LibraryActionButton(QAbstractButton):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
             backdrop, source = widget_glass_backdrop(self, rect)
-            paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
-                              refractive=True, backdrop=backdrop, backdrop_rect=source, cache_token=id(self),
-                              material_level=widget_glass_level(self))
+            from local.ui_theme import active_tokens
+            light_plate = not active_tokens(self).dark
+            if not self.property("glassClusterMember") or self.underMouse() or self.hasFocus():
+                paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
+                                  refractive=True, backdrop=backdrop, backdrop_rect=source, cache_token=id(self),
+                                  light=light_plate,
+                                  material_level=widget_glass_level(self))
+            from local.theme_tokens import hex_rgb
+            from local.ui_theme import active_tokens
+            tokens = active_tokens(self)
             paint_music_source_icon(painter, rect.adjusted(10, 10, -10, -10), self.kind,
-                                     tint=QColor("white") if self.kind == "switch" else None)
+                                     tint=QColor(*tokens.icon))
             if self.hasFocus() and self.window().testAttribute(Qt.WidgetAttribute.WA_KeyboardFocusChange):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(QColor(255, 255, 255, 110), 1.0))
@@ -100,6 +117,11 @@ class _NowPlayingCover(QAbstractButton):
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
             path = QPainterPath()
+            if owner.library_variant != "classic":
+                path.addRoundedRect(rect, 12, 12)
+                painter.setClipPath(path)
+                _paint_crop(painter, rect, owner._header_album_image)
+                return
             path.addEllipse(rect)
             painter.setClipPath(path)
             painter.translate(rect.center())
@@ -109,7 +131,12 @@ class _NowPlayingCover(QAbstractButton):
             painter.resetTransform()
             painter.setClipping(False)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor("#c8cdd6") if self.hasFocus() else QColor(255, 255, 255, 44), 1))
+            from local.ui_theme import active_tokens
+            ring = active_tokens(self)
+            if ring.dark and ring.shade >= 0.999:
+                painter.setPen(QPen(QColor("#c8cdd6") if self.hasFocus() else QColor(255, 255, 255, 44), 1))
+            else:
+                painter.setPen(QPen(QColor(*ring.text, 90 if self.hasFocus() else 55), 1))
             painter.drawEllipse(rect)
 
 
@@ -163,10 +190,14 @@ class _ModeButton(QAbstractButton):
                 painter.drawRoundedRect(rect, 12, 12)
             side = min(25.0, rect.width() * .6)
             glyph = QRectF(rect.center().x() - side / 2, rect.top() + 6, side, side)
+            from local.ui_theme import active_tokens
+            chrome = active_tokens(self)
+            glyph_ink = QColor("#ffffff") if chrome.dark and chrome.shade >= 0.999 else QColor(*chrome.icon)
+            caption_ink = QColor("#e4e7ed") if chrome.dark and chrome.shade >= 0.999 else QColor(*chrome.muted)
             paint_presentation_glyph(painter, glyph, "windowed" if self.mode == "window" else self.mode,
-                                     QColor("#ffffff"))
+                                     glyph_ink)
             painter.setFont(_entry_font(11))
-            painter.setPen(QColor("#e4e7ed"))
+            painter.setPen(caption_ink)
             painter.drawText(rect.adjusted(2, rect.height() - 22, -2, -3), Qt.AlignmentFlag.AlignCenter, self.caption)
 
 
@@ -240,9 +271,10 @@ class _CollectionCover(QAbstractButton):
                 icon = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2 - 8, side, side)
                 paint_music_source_icon(painter, icon, source.source_id)
                 label = {"daily": "每日推荐", "fm": "私人漫游", "playlist": "歌单", "song": "歌曲"}.get(self.kind, "音乐")
-                painter.setFont(_entry_font(12))
-                painter.setPen(QColor("#c4c7d0"))
-                painter.drawText(rect.adjusted(8, rect.height() - 30, -8, -6), Qt.AlignmentFlag.AlignCenter, label)
+                if rect.width() >= 72:
+                    painter.setFont(_entry_font(12))
+                    painter.setPen(QColor("#c4c7d0"))
+                    painter.drawText(rect.adjusted(8, rect.height() - 30, -8, -6), Qt.AlignmentFlag.AlignCenter, label)
             painter.setClipping(False)
             painter.setPen(QPen(QColor("#717171") if self.hasFocus() else QColor("#343434"), 1.4))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -267,6 +299,13 @@ class _CollectionCover(QAbstractButton):
         self._hover = 0.0
         self._opening_pose = False
         super().hideEvent(event)
+
+    def keyPressEvent(self, event):
+        window = self.window()
+        if window is not None and getattr(window, "_move_search_key", None) and window._move_search_key(self, event):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _CollectionRow(QWidget):
@@ -340,18 +379,27 @@ class _CollectionRow(QWidget):
             backdrop, source = widget_glass_backdrop(self, panel)
             paint_liquid_glass(painter, panel, radius=18, refractive=True,
                               backdrop=backdrop, backdrop_rect=source, cache_token=id(self))
+            window = self.window()
+            query = getattr(window, "_highlight_query", "") if window is not None else ""
             painter.setFont(_entry_font(21))
-            painter.setPen(QColor("#f8f8f8"))
-            title = painter.fontMetrics().elidedText(self.collection.title, Qt.TextElideMode.ElideRight,
-                                                     round(self._title_rect.width()))
-            painter.drawText(self._title_rect, Qt.AlignmentFlag.AlignVCenter, title)
+            paint_highlighted_text(painter, self._title_rect, self.collection.title, query,
+                                   QColor("#f8f8f8"), QColor("#ffe7a3"))
             painter.setFont(_entry_font(13))
-            painter.setPen(QColor("#989eac"))
             subtitle = self.collection.song.artist if self.collection.song is not None else {
                 "daily": "为你推荐的音乐", "fm": "私人漫游", "playlist": "歌单", "song": "歌曲"}.get(self.collection.kind, "音乐合集")
-            painter.drawText(self._subtitle_rect, Qt.AlignmentFlag.AlignVCenter,
-                             painter.fontMetrics().elidedText(subtitle, Qt.TextElideMode.ElideRight,
-                                                             round(self._subtitle_rect.width())))
+            paint_highlighted_text(painter, self._subtitle_rect, subtitle, query,
+                                   QColor("#989eac"), QColor("#ffe7a3"))
+            if query and self.hasFocus():
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(255, 231, 163, 180), 1.4))
+                painter.drawRoundedRect(panel, 18, 18)
+
+    def keyPressEvent(self, event):
+        window = self.window()
+        if window is not None and getattr(window, "_move_search_key", None) and window._move_search_key(self, event):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _LibraryGroup(QAbstractButton):
@@ -409,6 +457,7 @@ class _CollectionShelf(QWidget):
             "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal {width:0;}"
             "QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal {background:transparent;}")
         self.body = QWidget(); self.scroll.setWidget(self.body)
+        self._strip_flick = FlickScroll()
         self.scroll.viewport().installEventFilter(self)
         self.body.installEventFilter(self)
         self.tiles, self.labels = [], []
@@ -451,15 +500,42 @@ class _CollectionShelf(QWidget):
                     bar = self.owner.scroll.verticalScrollBar()
                     step = -pixels.y() if pixels.y() else int(-angles.y() / 120 * 62)
                     if step and bar.maximum() > bar.minimum():
-                        bar.setValue(bar.value() + step)
+                        self.owner._push_page(bar, step, coast=bool(pixels.y()))
                         event.accept()
                         return True
                     event.ignore()
                     return True
                 return super().eventFilter(watched, event)
-            bar = self.scroll.horizontalScrollBar();bar.setValue(bar.value()-delta)
+            bar = self.scroll.horizontalScrollBar()
+            flick = self._strip_flick
+            flick.on_step = self._on_strip_flick
+            flick.cancel()
+            previous = bar.value()
+            flick.observe(-delta, time.monotonic())
+            committed, overscroll = flick.absorb(previous, previous - delta, bar.minimum(), bar.maximum(), max(1, bar.pageStep()))
+            bar.setValue(int(round(committed)))
+            if overscroll:
+                self._place_strip(overscroll)
+            elif (event.pixelDelta().x() or event.pixelDelta().y()) and committed == previous - delta:
+                flick.arm_coast(committed, bar.minimum(), bar.maximum(), span=max(1, self.width()))
             event.accept();return True
         return super().eventFilter(watched,event)
+
+    def _on_strip_flick(self, result):
+        bar = self.scroll.horizontalScrollBar()
+        if result[0] == "overscroll":
+            self._place_strip(result[1])
+            return
+        bar.setValue(int(round(max(bar.minimum(), min(bar.maximum(), result[1])))))
+        self._place_strip(result[2])
+
+    def _place_strip(self, offset):
+        x = -self.scroll.horizontalScrollBar().value() + int(round(offset))
+        y = self.body.y()
+        if abs(offset) < 0.5:
+            x = -self.scroll.horizontalScrollBar().value()
+        if self.body.pos() != QPoint(x, y):
+            self.body.move(x, y)
 
     def resizeEvent(self,event):
         self.scroll.setGeometry(0,36,self.width(),184)
@@ -486,8 +562,14 @@ class _CatalogSkeleton(QWidget):
     def paintEvent(self, event):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            owner = self.window()
+            if getattr(owner, "library_variant", "classic") != "classic":
+                owner._variant_view.paint_skeleton(painter, self)
+                return
             seconds = time.monotonic()
-            ink = QColor("#ffffff")
+            from local.ui_theme import active_tokens
+            chrome = active_tokens(self)
+            ink = QColor("#ffffff") if chrome.dark and chrome.shade >= 0.999 else QColor(*chrome.muted)
             paint_artwork_skeleton(painter, QRectF(12, 9, 112, 15), ink, seconds, radius=7.5)
             side = 132
             for left in range(12, self.width(), 156):
@@ -496,6 +578,7 @@ class _CatalogSkeleton(QWidget):
 
 
 class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
+    retryRequested = Signal()
     backRequested = Signal()
     sourceSwitchRequested = Signal()
     logoutRequested = Signal()
@@ -506,10 +589,17 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     collectionBrowseRequested = Signal(object)
     playlistMoreRequested = Signal(object)
     queueNextRequested = Signal(object)
+    # A playlist's own page: open it, play from it, add a song to a playlist.
+    playlistPageRequested = Signal(object)
+    playlistSongRequested = Signal(object, object, int, object, str)
+    playlistAddRequested = Signal(object, object)
+    # A search song played now, ahead of the current queue (插播).
+    songInsertRequested = Signal(object, object)
     nowPlayingRequested = Signal()
     libraryExpandChanged = Signal(bool)
     closed = Signal()
     backgroundPaletteReady = Signal(int, object, object)
+    backgroundPaletteChanged = Signal(object)
 
     # 256 downsampled 256px covers are bounded to roughly 64 MiB, allowing all
     # ordinary library pages to retain their covers before a user expands them.
@@ -531,15 +621,19 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._account: AccountSnapshot | None = None
+        requested_variant = os.environ.get("GLUSPOT_LIBRARY_VARIANT", "sidebar").strip().lower()
+        self._library_variant = requested_variant if requested_variant in LIBRARY_VARIANTS else "sidebar"
         self._logout_confirmation = None
         self._background_frame = QImage()
         self._background_key = None
         self._background_source_key = None
+        self._backdrop_variant = None
         self._background_renderer = AlbumFlowBackgroundRenderer()
         self._background_seconds = 0.0
         self._background_clock = MotionSimulationClock()
         self._background_settings_getter = None
         self._background_runner = None
+        self._background_palette_visible = None
         self._background_palette = None
         self._background_palette_key = None
         self._background_palette_current_key = None
@@ -598,9 +692,15 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._catalog_loading = set()
         self._message = ""
         self._error = ""
+        self._recovery_label = ""
+        self._error_toast = LibraryErrorToast()
+        self._error_toast_timer = QTimer(self)
+        self._error_toast_timer.setInterval(32)
+        self._error_toast_timer.timeout.connect(self._advance_error_toast)
         self._opening = False
         self._opening_cover = None
         self._has_more = False
+        self._catalog_more = None
         self._more_requested = False
         self._drag_origin: QPoint | None = None
         self._section_starts = {}
@@ -617,8 +717,17 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._toolbar.valueChanged.connect(self._set_expanded)
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(350)
+        # Local matches paint at once; the network asks after a short pause.
+        self._search_timer.setInterval(250)
         self._search_timer.timeout.connect(self._submit_search)
+        self._highlight_query = ""
+        self._search_histories = {}
+        self._search_history_store = None
+        self._history_index = None
+        self._history_draft = ""
+        self._history_applying = False
+        self._search_rendered = False
+        self._search_row_keys = ()
         source = ENTRY_SOURCES[0]
         self.source_button = MusicSourceButton(source, self)
         self.source_button.show_caption = False
@@ -653,6 +762,8 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.now_playing_button = _NowPlayingCover(self)
         self.now_playing_button.clicked.connect(self.nowPlayingRequested)
         self.now_playing_button.hide()
+        self.now_playing_island = LibraryNowPlayingIsland(self)
+        self.now_playing_island.openRequested.connect(self.nowPlayingRequested)
         self.search = LibrarySearch(self)
         self.search.setAccessibleName("搜索当前平台的歌曲与歌单")
         self.search.setPlaceholderText("搜索歌曲与歌单")
@@ -711,10 +822,42 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.more_button.setGlassLight(False)
         self.more_button.setStyleSheet(self.empty_action.styleSheet())
         self.more_button.clicked.connect(self._load_more_clicked)
+        self._page_flick = FlickScroll()
+        self._page_drag = None
         self.scroll.viewport().setMouseTracking(True)
         self.scroll.viewport().installEventFilter(self)
         self.scroll.verticalScrollBar().valueChanged.connect(self._scroll_changed)
+        self._variant_view = LibraryVariantPresentation(self)
+        from local.music_playlist_page import PlaylistPage
+        self.playlist_page = PlaylistPage(self, artwork_lookup=self._artwork.get, current_lookup=self._is_now_playing_row)
+        self.playlist_page.backRequested.connect(self.close_playlist_page)
+        self.playlist_page.playAllRequested.connect(self._play_all_from_page)
+        self.playlist_page.songRequested.connect(self._song_from_page)
+        self.playlist_page.queueNextRequested.connect(self.queueNextRequested)
+        self.playlist_page.addRequested.connect(self.playlistAddRequested)
+        self.playlist_page.artworkNeeded.connect(self._page_artwork_needed)
+        from local.music_search_history_panel import SearchHistoryPanel
+        self.search_history_panel = SearchHistoryPanel(self)
+        self.search_history_panel.queryChosen.connect(self._choose_history_query)
+        self.search_history_panel.clearRequested.connect(self._clear_search_history)
         self._layout()
+
+    @property
+    def library_variant(self) -> str:
+        return self._library_variant
+
+    def set_library_variant(self, name: str):
+        name = str(name).strip().lower()
+        if name not in LIBRARY_VARIANTS:
+            raise ValueError(f"Unknown music-library variant: {name}")
+        if name == self._library_variant:
+            return
+        self._library_variant = name
+        self._search_query_padding = None
+        self.search.set_expanded(name != "classic" or bool(self.search.text().strip()))
+        self.search.settle()
+        self._sync_album_rotation()
+        self._rebuild_rows(preserve_scroll=True)
 
     @property
     def collections(self) -> tuple[LibraryCollection, ...]:
@@ -728,6 +871,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         previous = self._now_playing
         self._accumulate_album_rotation()
         self._now_playing = track
+        self.now_playing_island.set_track(track)
         art = getattr(track,'album_art_bytes',b'')
         if art != self._now_playing_art:
             self._now_playing_art = art
@@ -754,6 +898,10 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         background_changed = self._update_background()
         self.search.update()
         self.progress_button.update()
+        if self.library_variant != "classic":
+            self._variant_view.layout_header()
+            self._variant_view.play_button.setVisible(self.library_variant == "listen" and track is not None)
+            self.update(self._variant_view.player.toAlignedRect())
         if background_changed:
             self.update()
         if (getattr(previous,'track_id',''),getattr(previous,'title',''),getattr(previous,'artist','')) != (
@@ -780,6 +928,10 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.update(QRect(16, 16, max(1, self.width()-32), 80))
 
     def _layout_header(self):
+        if self.library_variant != "classic":
+            self._variant_view.layout_header()
+            return
+        self.account_name_label.show()
         fraction = self._header_fraction
         self._account_avatar_rect = QRectF(_mix(24, 108, fraction), _mix(24, 30, fraction),
                                            _mix(64, 36, fraction), _mix(64, 36, fraction))
@@ -835,7 +987,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         dialog.open()
 
     def _album_should_rotate(self):
-        return (not self._background_closing and not self._navigation_cover_frozen
+        return (self.library_variant == "classic" and not self._background_closing and not self._navigation_cover_frozen
                 and self.isVisible() and not self.isMinimized()
                 and self._now_playing is not None and self._now_playing.is_playing)
 
@@ -865,16 +1017,23 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def navigation_cover_state(self):
         """Global album bounds, unrotated image and clockwise angle in degrees."""
+        if self.library_variant == "sidebar" and self._now_playing is not None:
+            island = self.now_playing_island
+            rect = island.music_cover_rect.toAlignedRect()
+            if island.isVisible() and not rect.isEmpty():
+                return (QRect(island.mapToGlobal(rect.topLeft()), rect.size()),
+                        QImage(self._header_album_image), 0.)
         if self.now_playing_button.isHidden():
             return QRect(), QImage(), 0.
         button = self.now_playing_button
         rect = button.rect().adjusted(1, 1, -1, -1)
         return (QRect(button.mapToGlobal(rect.topLeft()), rect.size()),
-                QImage(self._header_album_image), self._album_rotation)
+                QImage(self._header_album_image), self._album_rotation if self.library_variant == "classic" else 0.)
 
     def freeze_navigation_cover(self):
         self._accumulate_album_rotation()
         self._navigation_cover_frozen = True
+        self.now_playing_island._sync_clock()
         self._sync_album_rotation()
         # The navigation layer owns a frozen copy of this page. Do not keep
         # repainting scenery or missing covers behind its invisible target.
@@ -884,6 +1043,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def resume_navigation_cover(self):
         self._navigation_cover_frozen = False
+        self.now_playing_island._sync_clock()
         self._sync_album_rotation()
         self._sync_background_animation()
         self._sync_artwork_skeleton()
@@ -926,7 +1086,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def set_notice(self, message):
         self._notice = str(message or '')
-        self._layout(); self.update()
+        self.scroll.setToolTip(self._notice)
 
     def _toggle_library_expanded(self, expanded):
         self.set_library_expanded(expanded, animate=True)
@@ -991,6 +1151,9 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         if not all(isinstance(row,LibraryCollection) and row.song is not None for row in rows):
             raise TypeError("Playlist tracks require immutable song collections")
         self._playlist_data[collection.key]=(rows,bool(loading),str(error),bool(has_more))
+        page = getattr(self, "playlist_page", None)
+        if page is not None:
+            page.set_rows(collection, rows, loading=loading or has_more, error=error)
 
     def set_account(self, account: AccountSnapshot):
         if not isinstance(account, AccountSnapshot):
@@ -999,19 +1162,27 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             self._finish_section_motion()
             self._selected_group_key=None;self._peer_order=[]
             self._notice = self._message = self._error = ""
+            self.scroll.setToolTip("")
             self._artwork.clear()
             self._artwork_pending.clear()
             self._catalog = ()
             self._catalog_loading.clear()
             self._results = ()
             self._playlist_data.clear(); self._expanded_groups.clear(); self._expanded_playlists.clear()
+            if getattr(self, "playlist_page", None) is not None:
+                self.close_playlist_page()
             self._selected_collection = None
             self._search_timer.stop()
             self._has_more = False
             self._more_requested = False
+            self._highlight_query = ""
+            self._history_index = None
+            self._search_rendered = False
+            self._search_row_keys = ()
             blocked = self.search.blockSignals(True)
             self.search.clear()
             self.search.blockSignals(blocked)
+            self._variant_view.restore_catalog_section()
             self._rebuild_rows()
         self._account = account
         source = next((item for item in ENTRY_SOURCES if item.source_id == account.source_id), ENTRY_SOURCES[0])
@@ -1033,11 +1204,174 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def set_search_results(self, collections: tuple[LibraryCollection, ...]):
         values = tuple(collections)
-        if not all(isinstance(item,LibraryCollection) for item in values):
+        if not all(isinstance(item, LibraryCollection) for item in values):
             raise TypeError("Search results must be immutable LibraryCollection values")
-        self._results = values
         if self.search.text().strip():
+            self._show_search_rows(values, time.perf_counter(), phase="publish")
+        else:
+            self._results = values
+
+    def _show_search_rows(self, rows, started, *, phase):
+        """Publish search rows. Reuse widgets when the identity did not change."""
+        rows = tuple(rows)
+        keys = tuple(row.key for row in rows)
+        same_widgets = (len(self._rows) == len(keys) and not self._groups and not self._shelves
+                        and all(getattr(row, "collection", None) is not None and row.collection.key == key
+                                for row, key in zip(self._rows, keys)))
+        self._results = rows
+        self._highlight_query = self.search.text().strip()
+        if self._search_rendered and keys == self._search_row_keys and same_widgets:
+            for row, item in zip(self._rows, rows):
+                row.collection = item
+                cover = getattr(row, "cover", None)
+                if cover is not None:
+                    cover.setAccessibleName(f"播放{item.title}")
+                    cover.setToolTip(cover.accessibleName())
+                row.update()
+            self._layout()
+            self.update()
+            detail = "reuse"
+        else:
             self._rebuild_rows(preserve_scroll=True)
+            detail = "rebuild"
+        if started is not None:
+            log_search_phase(phase, started, rows=len(rows), query_chars=len(self._highlight_query), detail=detail)
+
+    def _history(self):
+        source = self._account.source_id if self._account is not None else ""
+        history = self._search_histories.get(source)
+        if history is None:
+            store = self._search_history_store
+            items, on_change = (), None
+            if store is not None:
+                load, save = store
+                try:
+                    items = tuple(load(source) or ())
+                except Exception:
+                    items = ()
+                on_change = lambda values, source=source: save(source, tuple(values))
+            history = SearchHistory(items=items, on_change=on_change)
+            self._search_histories[source] = history
+        return history
+
+    def set_search_history_store(self, load, save):
+        """Keep recent searches across runs: ``load(source)`` / ``save(source, items)``."""
+        self._search_history_store = (load, save)
+        self._search_histories = {}
+        self._place_search_history()
+
+    def _search_history_wanted(self) -> bool:
+        if self.playlist_page_open or self.search.text().strip():
+            return False
+        variant = getattr(self, "_variant_view", None)
+        in_search = (self.library_variant != "classic" and variant is not None and variant.section == "search")
+        return in_search and bool(self._history().items)
+
+    def _place_search_history(self):
+        panel = getattr(self, "search_history_panel", None)
+        if panel is None:
+            return
+        if self._search_history_wanted():
+            panel.set_items(self._history().items)
+            panel.setGeometry(self.scroll.geometry())
+            panel.show()
+            panel.raise_()
+            self.scroll.hide()
+        elif panel.isVisible():
+            panel.hide()
+            if not self.playlist_page_open:
+                self.scroll.show()
+
+    def _choose_history_query(self, query):
+        self.search.setText(query)
+        self._submit_search()
+
+    def _clear_search_history(self):
+        self._history().clear()
+        self._place_search_history()
+
+    def _search_waiting_empty(self):
+        if self._visual_items() or self._error or not self.search.text().strip():
+            return False
+        return self._search_timer.isActive() or self._loading or "search" in self._catalog_loading
+
+    def _search_status_message(self):
+        if self._search_waiting_empty():
+            return "正在搜索当前平台…"
+        return ""
+
+    def _focus_result(self, index):
+        if not self._rows:
+            return
+        index = max(0, min(len(self._rows) - 1, index))
+        row = self._rows[index]
+        row.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.scroll.ensureWidgetVisible(row)
+
+    def _result_index(self, widget):
+        while widget is not None and widget is not self:
+            for index, row in enumerate(self._rows):
+                if widget is row:
+                    return index
+            widget = widget.parentWidget()
+        return None
+
+    def _activate_result(self, index):
+        row = self._rows[index]
+        activate = getattr(row, "_activate", None)
+        if callable(activate):
+            activate("default")
+            return
+        row.activate()
+
+    def _move_search_key(self, widget, event):
+        if event.modifiers() != Qt.KeyboardModifier.NoModifier or not self.search.text().strip() or not self._rows:
+            return False
+        index = self._result_index(widget)
+        if index is None:
+            return False
+        key = event.key()
+        if key == Qt.Key.Key_Down:
+            if index < len(self._rows) - 1:
+                self._focus_result(index + 1)
+            return True
+        if key == Qt.Key.Key_Up:
+            if index == 0:
+                self.search.setFocus(Qt.FocusReason.OtherFocusReason)
+            else:
+                self._focus_result(index - 1)
+            return True
+        if key in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+            self._activate_result(index)
+            return True
+        return False
+
+    def _recall_history(self, step):
+        items = self._history().items
+        if not items:
+            return False
+        if self._history_index is None:
+            if step > 0:
+                return False
+            self._history_draft = self.search.text()
+            self._history_index = len(items) - 1
+        else:
+            nxt = self._history_index + step
+            if nxt >= len(items):
+                self._history_index = None
+                self._set_history_text(self._history_draft)
+                return True
+            self._history_index = max(0, nxt)
+        self._set_history_text(items[self._history_index])
+        return True
+
+    def _set_history_text(self, text):
+        self._history_applying = True
+        try:
+            self.search.setText(text)
+            self.search.setCursorPosition(len(self.search.text()))
+        finally:
+            self._history_applying = False
 
     def _catalog_groups(self):
         grouped = {}
@@ -1068,10 +1402,13 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         for row in self._visual_items():
             row.hide();row.setParent(None);row.deleteLater()
         self._rows,self._groups,self._shelves = [],[],[]
-        if self.search.text().strip():
+        if self.library_variant != "classic":
+            self._variant_view.rebuild()
+        elif self.search.text().strip():
             for collection in self._results:
                 source_id=self._account.source_id if self._account else 'netease'
                 row=_CollectionRow(collection,source_id,self.content)
+                row.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
                 row.activated.connect(self._collection_activated)
                 row.queueRequested.connect(self.queueNextRequested)
                 row.cover.image=self._artwork.get(collection.key,QImage())
@@ -1107,6 +1444,10 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             self._section_overlay.show();self._section_overlay.raise_()
             self._section_motion.setDuration(640 if old_selected and self._selected_group_key else 360)
             self._section_motion.setStartValue(0.);self._section_motion.setEndValue(1.);self._section_motion.start()
+        self._search_rendered = bool(self.search.text().strip())
+        self._search_row_keys = tuple(item.key for item in self._results) if self._search_rendered else ()
+        if not self._search_rendered:
+            self._highlight_query = ""
         self._request_visible_artwork();self.update()
 
     def _visual_items(self):
@@ -1121,19 +1462,30 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             self._section_overlay.fraction=float(value);self._section_overlay.update()
 
     def _load_more_clicked(self):
-        if self._has_more and not self._more_requested and not self._loading:
+        if self._visible_has_more() and not self._more_requested and not self._loading:
             self._more_requested=True
             self.moreRequested.emit()
 
-    def set_has_more(self, has_more: bool):
+    def set_has_more(self, has_more: bool, *, groups=None):
         self._has_more = bool(has_more)
+        self._catalog_more = dict(groups) if groups is not None else None
         self._more_requested = False
         self._layout()
 
+    def _visible_has_more(self):
+        if self.library_variant != "sidebar" or self.search.text().strip():
+            return self._has_more
+        section = self._variant_view.section
+        if section not in {"recommended", "personal"}:
+            return False
+        return bool(self._catalog_more.get(section)) if self._catalog_more is not None else self._has_more
+
     def _scroll_changed(self, value):
         self._request_visible_artwork()
+        if self.library_variant != "classic":
+            self.update(self.scroll.geometry())
         bar = self.scroll.verticalScrollBar()
-        if (self._has_more and not self._more_requested and not self._loading and not self._catalog_loading and
+        if (self._visible_has_more() and not self._more_requested and not self._loading and not self._catalog_loading and
                 bar.maximum() > 0 and value >= bar.maximum() - 160):
             self._more_requested = True
             self.moreRequested.emit()
@@ -1221,10 +1573,55 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._sync_artwork_skeleton()
         self.update()
 
-    def set_error(self, message: str):
+    def set_error(self, message: str, recovery: str = ""):
         self._loading = False
+        self._recovery_label = recovery if message else ""
         self._error = str(message)
+        self._error_toast.present(self._error, time.monotonic())
+        if self._error and self._visual_items():
+            if not self._error_toast_timer.isActive():
+                self._error_toast_timer.start()
+        else:
+            self._error_toast_timer.stop()
         self._layout()
+        self.update()
+
+    def _error_toast_anchor(self) -> float:
+        """Top of the bottom player card, or the window bottom when it is not there."""
+        view = getattr(self, "_variant_view", None)
+        if view is not None and self.library_variant != "classic":
+            player = QRectF(view.player)
+            if player.isValid() and player.height() > 1.0 and player.center().y() > self.height() * 0.45:
+                return player.top()
+        island = getattr(self, "now_playing_island", None)
+        if island is not None and island.isVisible() and island.y() > self.height() * 0.45:
+            return float(island.y())
+        return float(self.height() - 8.0)
+
+    def _library_error_toast_visible(self) -> bool:
+        return bool(self._visual_items()) and self._error_toast.opacity(time.monotonic()) > 0.001
+
+    def paint_library_error_toast(self, painter: QPainter) -> None:
+        """Shared pill for every layout. Empty pages keep their own message."""
+        if not self._error:
+            return
+        now = time.monotonic()
+        opacity = self._error_toast.opacity(now)
+        if opacity <= 0.001:
+            return
+        font = _entry_font(13)
+        rect = error_toast_rect(self.width(), self._error_toast_anchor(), self._error, font)
+        paint_library_error_toast(painter, self, rect, self._error, opacity)
+
+    def _advance_error_toast(self) -> None:
+        now = time.monotonic()
+        if self._visual_items() and self._error and self._error_toast.finished(now):
+            self._error = ""
+            self._error_toast.clear()
+            self._error_toast_timer.stop()
+            self._layout()
+        elif self._error_toast.opacity(now) <= 0.001:
+            self._error_toast_timer.stop()
         self.update()
 
     def set_artwork(self, key: str, image: QImage):
@@ -1256,6 +1653,9 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             if row.collection.key == key:
                 row.cover.image = artwork
                 row.cover.update()
+        page = getattr(self, "playlist_page", None)
+        if page is not None:
+            page.artwork_changed(key)
         for group in self._groups:
             group.update()
         for shelf in self._shelves:
@@ -1266,21 +1666,36 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.update()
 
     def _search_changed(self, text):
+        started = time.perf_counter()
         self._search_timer.stop()
         self._has_more = False
         self._more_requested = False
         self._error = ""
-        self._results = ()
-        self._rebuild_rows()
-        if text.strip():
-            self.search.set_expanded(True)
-            self._search_timer.start()
-        else:
+        query = text.strip()
+        if not self._history_applying:
+            self._history_index = None
+        if not query:
+            self._highlight_query = ""
+            self._results = ()
+            self._variant_view.restore_catalog_section()
+            self._rebuild_rows()
             self.searchRequested.emit("")
+            self._place_search_history()
+            return
+        self._highlight_query = query
+        self.close_playlist_page()
+        self._place_search_history()
+        self.search.set_expanded(True)
+        self._search_timer.start()
+        self._show_search_rows(local_collection_matches(self._catalog, query), started, phase="local_paint")
 
     def _submit_search(self):
         self._search_timer.stop()
-        self.searchRequested.emit(self.search.text().strip())
+        query = self.search.text().strip()
+        if query:
+            self._history().remember(query)
+        self._history_index = None
+        self.searchRequested.emit(query)
 
     def _activate_search_button(self):
         if not self.search.expanded:
@@ -1299,6 +1714,9 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         """Use existing safe navigation/search actions, never retry playback."""
         if self._visual_items() or not self._error:
             return
+        if self._recovery_label == "重试":
+            self.retryRequested.emit()
+            return
         if self.search.text().strip() and self.search.isEnabled():
             self._submit_search()
         else:
@@ -1307,6 +1725,8 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     def _focus_empty_search(self):
         """Help the user begin or edit the existing platform search."""
         if self.search.isEnabled():
+            if self.library_variant != "classic":
+                self._variant_view.select_section("search")
             self.set_toolbar_expanded(True)
             self.search.set_expanded(True, focus=True)
             self.search.selectAll()
@@ -1314,6 +1734,17 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     def _collection_activated(self, collection, mode, rect):
         if self._opening or self._section_overlay is not None or not self.isVisible():
             return
+        if mode == "default" and collection.kind in {"playlist", "daily"} and collection.song is None:
+            # Personal and recommended playlists (and the daily mix) open
+            # their song list first; the personal radio keeps playing at once.
+            self.open_playlist_page(collection)
+            return
+        self._start_collection(collection, mode, rect)
+
+    def _start_collection(self, collection, mode, rect):
+        if self.search.text().strip():
+            # Choosing a result is the clearest sign the search was useful.
+            self._history().remember(self.search.text().strip())
         self._opening = True
         self._opening_cover = next((cover for cover in self.findChildren(_CollectionCover)
             if cover.isVisible() and rect.contains(cover.mapToGlobal(cover.rect().center()))), None)
@@ -1328,6 +1759,9 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def finish_open_transition(self):
         self._opening = False
+        page = getattr(self, "playlist_page", None)
+        if page is not None:
+            page.reset_shrink()
         self.content.setEnabled(self._section_overlay is None)
         for row in self._rows:
             row.setEnabled(True)
@@ -1357,6 +1791,82 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.update()
 
     def _layout(self):
+        self._layout_body()
+        self._place_playlist_page()
+        self._place_search_history()
+
+    def _place_playlist_page(self):
+        page = getattr(self, "playlist_page", None)
+        if page is None or not page.isVisible():
+            return
+        page.setGeometry(self.scroll.geometry())
+        page.raise_()
+
+    @property
+    def playlist_page_open(self) -> bool:
+        page = getattr(self, "playlist_page", None)
+        return page is not None and page.collection is not None and page.isVisible()
+
+    def open_playlist_page(self, collection):
+        """Show one playlist's songs over the list area; the controller fills it."""
+        self.playlist_page.open(collection)
+        self.scroll.hide()
+        self._place_playlist_page()
+        self.playlistPageRequested.emit(collection)
+
+    def close_playlist_page(self):
+        if getattr(self, "playlist_page", None) is None or self.playlist_page.collection is None:
+            return
+        self.playlist_page.close_page()
+        self.scroll.show()
+        self._layout()
+        self._request_visible_artwork()
+
+    def page_song_keys(self) -> frozenset:
+        page = getattr(self, "playlist_page", None)
+        if page is None or page.collection is None:
+            return frozenset()
+        return frozenset(row.key for row in page.rows)
+
+    def _page_artwork_needed(self, key, url):
+        image = self._artwork.get(key)
+        if image is not None and not image.isNull():
+            self.playlist_page.artwork_changed(key)
+        elif key not in self._artwork_pending:
+            self._artwork_pending.add(key)
+            self.artworkNeeded.emit(key, url)
+
+    def _is_now_playing_row(self, item) -> bool:
+        track, song = self._now_playing, getattr(item, "song", None)
+        if track is None or song is None:
+            return False
+        return (str(getattr(track, "title", "")) == song.title
+                and str(getattr(track, "artist", "")) == song.artist)
+
+    def _play_all_from_page(self, collection, rect):
+        if self._opening or not self.isVisible():
+            return
+        self._start_collection(collection, "default", rect)
+
+    def _song_from_page(self, collection, rows, index, rect, how):
+        if self._opening or not self.isVisible():
+            self.playlist_page.reset_shrink()
+            return
+        self._opening = True
+        self.playlistSongRequested.emit(collection, rows, index, rect, how)
+
+    def _layout_body(self):
+        if hasattr(self, "_variant_view"):
+            self.now_playing_island.setVisible(self.library_variant == "sidebar")
+            self._variant_view.set_visible(self.library_variant != "classic")
+        if self.library_variant != "classic":
+            self._update_background()
+            self._variant_view.layout()
+            return
+        self.source_button.login_style = "classic"
+        self.search.show()
+        self.progress_button.show()
+        self.expand_button.show()
         if self._section_overlay is not None:
             self._finish_section_motion()
         self._update_background()
@@ -1377,7 +1887,10 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         has_items = bool(self._visual_items())
         skeleton = bool(self._catalog_loading if not query else "search" in self._catalog_loading)
         skeleton = skeleton or (self._loading and not has_items)
-        footer = 44 if (has_items or skeleton) and (self._error or self._notice) else 12
+        if self._search_waiting_empty() or (query and self._error and not has_items):
+            skeleton = False
+        # Playback errors float above the player. They no longer reserve a strip.
+        footer = 12
         self.scroll.setGeometry(16, 210, self.width()-32,max(1,self.height()-210-footer))
         peer_layout = bool(self._selected_group_key and not self._library_expanded and not query)
         block_height = sum(224 for _ in self._shelves) + 124*len(self._rows)
@@ -1409,13 +1922,16 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             top += 216
         self.more_button.setVisible(self._has_more and not skeleton)
         self.more_button.setGeometry(max(8,(self.content.width()-180)//2),top+4,180,44)
-        empty_ready = not has_items and not skeleton and not self._loading and not self._error and self.search.isEnabled()
+        empty_ready = (not has_items and not skeleton and not self._loading and not self._error
+                       and self.search.isEnabled() and not self._search_waiting_empty())
         self.empty_action.setVisible(empty_ready)
         if empty_ready:
             self.empty_action.raise_()
         self.empty_action.setText("修改搜索词" if query else "搜索歌曲")
         self.empty_action.setAccessibleName(self.empty_action.text())
-        hint = "尝试歌曲名、歌手名或歌单名" if query else "可搜索当前平台的歌曲与歌单"
+        query_text = self.search.text().strip()
+        shown = query_text if len(query_text) <= 18 else query_text[:18] + "…"
+        hint = f"没有找到“{shown}”。试试歌名、歌手或歌单名" if query else "可搜索当前平台的歌曲与歌单"
         self.empty_action.setAccessibleDescription(hint)
         hint_height = 28 if self.scroll.height() >= 118 else 0
         block_height = 26 + hint_height + 12 + 44
@@ -1425,13 +1941,20 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.empty_action.setGeometry((self.width() - 160) // 2, empty_y + 26 + hint_height + 12, 160, 44)
         recovery_ready = not has_items and not skeleton and bool(self._error) and not self._loading
         self.recovery_action.setVisible(recovery_ready)
-        self.recovery_action.setText("重新搜索" if query and self.search.isEnabled() else "切换平台")
+        if self._recovery_label:
+            self.recovery_action.setText(self._recovery_label)
+        else:
+            self.recovery_action.setText("重新搜索" if query and self.search.isEnabled() else "切换平台")
         self.recovery_action.setAccessibleName(self.recovery_action.text())
         self.recovery_action.setGeometry(self.empty_action.geometry())
         if recovery_ready:
             self.recovery_action.raise_()
 
     def _layout_search(self):
+        if self.library_variant != "classic":
+            if hasattr(self, "_variant_view"):
+                self._variant_view.layout_search()
+            return
         self.search.setGeometry(self.search.strip_geometry(QRect(24, 104, self.width()-48, 44)))
         query = bool(self.search.text().strip())
         if query != getattr(self, "_search_query_padding", None):
@@ -1443,11 +1966,29 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.clear_search_button.setGeometry(self.search.width()-88, 0, 44, 44)
         self.progress_button.layout_strip(QRect(24, 104, self.width()-48, 44))
 
-    def set_background_context(self, settings_getter, run_background=None):
+    def set_background_context(self, settings_getter, run_background=None, *, palette_visible=None):
         """Share the app's existing animation settings and cold-work runner."""
         self._background_settings_getter = settings_getter
+        self.now_playing_island.set_context(settings_getter)
         self._background_runner = run_background
+        self._background_palette_visible = palette_visible
         self.on_background_setting_changed()
+
+    @property
+    def backdrop_variant(self) -> str:
+        return resolve_backdrop_variant(self._backdrop_variant)
+
+    def set_backdrop_variant(self, name: str | None):
+        """Refresh scenery without replacing the catalog or playback state."""
+        if name is not None:
+            name = str(name).strip().lower()
+            if name not in BACKDROP_VARIANTS:
+                raise ValueError(f"Unknown backdrop variant: {name!r}")
+        self._backdrop_variant = name
+        self._background_renderer.set_backdrop_variant(name)
+        self._background_key = self._background_source_key = None
+        self.on_background_setting_changed()
+        self.update()
 
     def _background_setting(self, key, default):
         getter = self._background_settings_getter
@@ -1460,15 +2001,76 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             value = .74
         return max(0., min(1., value)) if math.isfinite(value) else .74
 
+    def _sync_library_chrome(self) -> None:
+        from local.theme_tokens import chrome_qss, hex_rgb
+        from local.ui_theme import active_tokens, bind_theme_updates
+
+        bind_theme_updates(self, self._on_theme_tokens)
+        tokens = active_tokens(self)
+        if tokens.dark and tokens.shade >= 0.999:
+            sheets = {
+                "queue": "QPushButton { color: white; background: transparent; border: none; }",
+                "expand": "QPushButton {color:#f1f3f8;background:transparent;border:none;}",
+                "account": "color: #f1f2f5; background: transparent;",
+                "action": "QPushButton { color: #f3f4f7; background: transparent; border: none; padding: 0 16px; }",
+                "scroll": "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; } QScrollBar:vertical { background: transparent; width: 10px; margin: 4px 2px; } QScrollBar::handle:vertical { background: #444a56; border-radius: 3px; min-height: 28px; } QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; } QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }",
+            }
+        else:
+            qss = chrome_qss(tokens)
+            handle = hex_rgb(tokens.muted)
+            sheets = {
+                "queue": qss["button"],
+                "expand": qss["button"],
+                "account": qss["label"],
+                "action": qss["button"],
+                "scroll": (
+                    "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; } "
+                    "QScrollBar:vertical { background: transparent; width: 10px; margin: 4px 2px; } "
+                    f"QScrollBar::handle:vertical {{ background: {handle}; border-radius: 3px; min-height: 28px; }} "
+                    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; } "
+                    "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+                ),
+            }
+        if hasattr(self, "queue_button"):
+            self.queue_button.setStyleSheet(sheets["queue"])
+        if hasattr(self, "expand_button"):
+            self.expand_button.setStyleSheet(sheets["expand"])
+        if hasattr(self, "account_name_label"):
+            self.account_name_label.setStyleSheet(sheets["account"])
+        for name in ("empty_action", "recovery_action", "more_button"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setStyleSheet(sheets["action"])
+        if hasattr(self, "scroll"):
+            self.scroll.setStyleSheet(sheets["scroll"])
+        search = getattr(self, "search", None)
+        if search is not None and hasattr(search, "_set_phase"):
+            search._set_phase(search._phase)
+
+    def _on_theme_tokens(self) -> None:
+        self._background_key = None
+        self._sync_library_chrome()
+        island = getattr(self, "now_playing_island", None)
+        if island is not None:
+            island.update()
+        if self._update_background():
+            self.update()
+        self.update()
+
     def on_background_setting_changed(self, key="", value=None):
-        if key and key not in {"v2_music_flow_intensity", "v2_animation_fps"}:
+        self.now_playing_island.sync_settings()
+        self._sync_library_chrome()
+        if key and key not in {"v2_music_flow_intensity", "v2_animation_fps", "v2_theme_mode",
+                               "v2_music_ambience_style", "v2_music_glass_level",
+                               "v2_theme_dark_start", "v2_theme_dark_end"}:
             return
         self._sync_background_animation()
         if self._update_background():
             self.update()
 
     def _background_should_animate(self):
-        return (not self._background_closing and not self._navigation_cover_frozen
+        return (self.backdrop_variant == "classic"
+                and not self._background_closing and not self._navigation_cover_frozen
                 and self.isVisible() and not self.isMinimized()
                 and self._now_playing is not None and self._now_playing.is_playing
                 and self._background_intensity() > 0.)
@@ -1502,7 +2104,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         """Use provider colors now; prepare each new cover away from paint."""
         track = self._now_playing
         if track is None:
-            self._background_palette = None
+            self._set_background_palette(None)
             self._background_palette_current_key = None
             self._background_palette_pending = None
             return
@@ -1511,13 +2113,13 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         key = (image.cacheKey(), primary.rgba(), secondary.rgba())
         if key != self._background_palette_current_key:
             self._background_palette_current_key = key
-            self._background_palette = artwork_surface_palette(QImage(), primary, secondary)
+            self._set_background_palette(artwork_surface_palette(QImage(), primary, secondary))
             self._background_palette_key = None
         if key == self._background_palette_key:
             return
         cached = cached_artwork_surface_palette(image, primary, secondary)
         if cached is not None or image.isNull():
-            self._background_palette = cached or self._background_palette
+            self._set_background_palette(cached or self._background_palette)
             self._background_palette_key = key
             return
         if key == self._background_palette_failed_key or key == self._background_palette_worker_key:
@@ -1525,8 +2127,19 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._background_palette_pending = (key, QImage(image), primary, secondary)
         self._start_background_palette_worker()
 
+    def _set_background_palette(self, palette):
+        if self._background_palette is palette:
+            return
+        self._background_palette = palette
+        self.backgroundPaletteChanged.emit(palette)
+
+    def _palette_consumer_visible(self):
+        return callable(self._background_palette_visible) and self._background_palette_visible()
+
     def _start_background_palette_worker(self):
-        if (self._background_closing or not self.isVisible() or self._background_palette_worker_key is not None
+        external = self._palette_consumer_visible()
+        if ((self._background_closing or not self.isVisible()) and not external
+                or self._background_palette_worker_key is not None
                 or self._background_palette_pending is None):
             return
         key, image, primary, secondary = self._background_palette_pending
@@ -1557,9 +2170,10 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         if token != self._background_palette_worker_token or key != self._background_palette_worker_key:
             return
         self._background_palette_worker_key = None
-        if not self._background_closing and key == self._background_palette_current_key:
+        if (not self._background_closing or self._palette_consumer_visible()) and key == self._background_palette_current_key:
             if palette is not None:
-                self._background_palette, self._background_palette_key = palette, key
+                self._background_palette_key = key
+                self._set_background_palette(palette)
                 if self._update_background():
                     self.update()
             else:
@@ -1576,25 +2190,25 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def _update_background(self):
         """One bounded scene raster, frozen whenever playback is not visible."""
-        source = self.source_button.source
-        palette = self._background_palette if self._now_playing is not None else None
-        if palette is not None:
-            colors = palette.ambient_colors or (palette.primary, palette.secondary)
-        else:
-            colors = (QColor("#303a43"), QColor(source.color), QColor("#d1d7dd"))
-        weights = palette.ambient_weights if palette else ()
-        intensity = self._background_intensity() if palette else 0.
-        seconds = self._background_seconds if palette else 0.
-        key = (self.width(), self.height(), source.source_id if palette is None else None,
-               tuple(color.rgba() for color in colors), weights, intensity, seconds)
+        active = self._background_palette if self._now_playing is not None else None
+        palette = active or idle_surface_palette()
+        colors = palette.ambient_colors or (palette.primary, palette.secondary)
+        weights = palette.ambient_weights
+        intensity = self._background_intensity() if active else 0.
+        seconds = self._background_seconds if active else 0.
+        from local.ui_theme import active_tokens
+        tokens = active_tokens(self)
+        key = (self.width(), self.height(), None,
+               tuple(color.rgba() for color in colors), weights, intensity, seconds, self.backdrop_variant,
+               tokens.dark, round(tokens.shade, 3))
         if key == self._background_key:
             return False
-        if (palette is None or (not self._navigation_cover_frozen
+        if (active is None or (not self._navigation_cover_frozen
                 and not self._background_should_animate() and self.isVisible()
                 and self._background_key is not None and key[3:5] != self._background_key[3:5])):
             # A deliberate paused song/artwork change still gets its own
             # static colors; it must not need a running timer to settle them.
-            self._background_renderer = AlbumFlowBackgroundRenderer()
+            self._background_renderer = AlbumFlowBackgroundRenderer(self._backdrop_variant)
         live_owner = self if self._background_should_animate() and glass_owner_is_live(self) else None
         frame = self._background_renderer.render(
             self.size(), colors, seconds, intensity=intensity, weights=weights,
@@ -1605,16 +2219,114 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             # A pending worker retains the displayed source. Do not detach
             # and reapply the same reading veil on every unchanged tick.
             return False
-        self._background_frame = frame.copy()
-        with QPainter(self._background_frame) as painter:
-            painter.fillRect(self._background_frame.rect(), QColor(12, 14, 20, 142))
+        if not tokens.dark:
+            from local.backdrop_variants import paint_light_backdrop
+            self._background_frame = paint_light_backdrop(frame.size(), colors, weights)
+        else:
+            self._background_frame = frame.copy()
+            with QPainter(self._background_frame) as painter:
+                veil = 142 if self.backdrop_variant == "classic" else 28
+                painter.fillRect(self._background_frame.rect(), QColor(12, 14, 20, veil))
         self._background_source_key = source_key
         return True
 
+    def _push_page(self, bar, step, coast=False):
+        flick = self._page_flick
+        flick.on_step = self._on_page_flick
+        flick.cancel()
+        previous = bar.value()
+        flick.observe(step, time.monotonic())
+        span = max(1, self.scroll.viewport().height())
+        committed, overscroll = flick.absorb(
+            previous, previous + step, bar.minimum(), bar.maximum(), span)
+        if committed != previous:
+            bar.setValue(int(round(committed)))
+        if overscroll:
+            self._place_page(overscroll)
+        elif coast and committed == previous + step:
+            flick.arm_coast(committed, bar.minimum(), bar.maximum(), span=span)
+
+    def _on_page_flick(self, result):
+        bar = self.scroll.verticalScrollBar()
+        if result[0] == "overscroll":
+            self._place_page(result[1])
+            return
+        bar.setValue(int(round(max(bar.minimum(), min(bar.maximum(), result[1])))))
+        self._place_page(result[2])
+
+    def _place_page(self, offset):
+        x = -self.scroll.horizontalScrollBar().value()
+        y = -self.scroll.verticalScrollBar().value()
+        if abs(offset) >= 0.5:
+            y += int(round(offset))
+        if self.content.pos() != QPoint(x, y):
+            self.content.move(x, y)
+
+    def _filter_library_scroll(self, event):
+        kind = event.type()
+        if kind == QEvent.Type.Wheel:
+            pixels = event.pixelDelta().y()
+            angles = event.angleDelta().y()
+            bar = self.scroll.verticalScrollBar()
+            step = -pixels if pixels else int(-angles / 120.0 * max(62, bar.singleStep()))
+            if step and bar.maximum() > bar.minimum():
+                self._push_page(bar, step, coast=bool(pixels))
+                event.accept()
+                return True
+            return False
+        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            bar = self.scroll.verticalScrollBar()
+            y = event.position().y()
+            self._page_drag = (y, time.monotonic(), bar.value(), False, y)
+            return False
+        if kind == QEvent.Type.MouseMove and self._page_drag is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            origin_y, started, origin, dragging, last_y = self._page_drag
+            delta = event.position().y() - origin_y
+            if not dragging and abs(delta) < 8.0:
+                return False
+            moved = event.position().y() - last_y
+            self._page_drag = (origin_y, started, origin, True, event.position().y())
+            bar = self.scroll.verticalScrollBar()
+            self._page_flick.cancel()
+            self._page_flick.observe(-moved, time.monotonic())
+            committed, overscroll = self._page_flick.absorb(
+                origin, origin - delta, bar.minimum(), bar.maximum(), max(1, self.scroll.viewport().height()))
+            if committed != bar.value():
+                bar.setValue(int(round(committed)))
+            self._place_page(overscroll)
+            event.accept()
+            return True
+        if kind == QEvent.Type.MouseButtonRelease and self._page_drag is not None:
+            _origin_y, started, _origin, dragging, _last_y = self._page_drag
+            self._page_drag = None
+            if not dragging:
+                return False
+            bar = self.scroll.verticalScrollBar()
+            if abs(self._page_flick.overscroll) > 0.5:
+                self._page_flick._arm_edge()
+            else:
+                self._page_flick.arm_coast(bar.value(), bar.minimum(), bar.maximum(),
+                                           span=max(1, self.scroll.viewport().height()))
+            event.accept()
+            return True
+        return False
+
     def eventFilter(self, watched, event):
+        if hasattr(self, "scroll") and watched is self.scroll.viewport() and self._filter_library_scroll(event):
+            return True
         if watched is self.search and event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
             self.backRequested.emit()
             return True
+        if (watched is self.search and event.type() == QEvent.Type.KeyPress
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            if event.key() == Qt.Key.Key_Up and self._recall_history(-1):
+                return True
+            if event.key() == Qt.Key.Key_Down:
+                if self._history_index is not None and self._recall_history(1):
+                    return True
+                if self.search.text().strip() and self._rows:
+                    self._focus_result(0)
+                    return True
         if watched is self.search and event.type() == QEvent.Type.EnabledChange:
             self._layout()
         if watched is self.search and event.type() in {QEvent.Type.FocusIn, QEvent.Type.MouseButtonPress}:
@@ -1643,6 +2355,10 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape and self.playlist_page_open:
+            self.close_playlist_page()
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Escape:
             self.backRequested.emit()
             event.accept()
@@ -1658,11 +2374,19 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def hideEvent(self, event):
         self._end_page_resize()
+        page_flick = getattr(self, "_page_flick", None)
+        if page_flick is not None:
+            page_flick.cancel()
+        for shelf in getattr(self, "_shelves", ()):
+            strip = getattr(shelf, "_strip_flick", None)
+            if strip is not None:
+                strip.cancel()
         if self._logout_confirmation is not None:
             self._logout_confirmation.reject()
         self._finish_section_motion()
         self._artwork_skeleton_timer.stop()
         self._background_timer.stop()
+        self._variant_view.status_timer.stop()
         self._background_clock.reset(time.monotonic())
         self._album_rotation_timer.stop()
         self._album_rotation_sample = None
@@ -1677,20 +2401,24 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._variant_view.sync_status_pulse()
         self._background_closing = False
         self._prepare_background_palette()
         self._sync_background_animation()
         self._sync_album_rotation()
         if self._now_playing is not None and not self._background_should_animate():
-            self._background_renderer = AlbumFlowBackgroundRenderer()
+            self._background_renderer = AlbumFlowBackgroundRenderer(self._backdrop_variant)
             self._background_key = None
         self._update_background()
+        self._sync_library_chrome()
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         self._request_visible_artwork()
         if self.search.text().strip() and not self._results:
             self._search_timer.start()
 
     def closeEvent(self, event):
+        self.now_playing_island.suspend()
+        self._variant_view.status_timer.stop()
         self._finish_section_motion()
         self._artwork_skeleton_timer.stop()
         self._background_closing = True
@@ -1709,6 +2437,8 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange and hasattr(self, "_background_timer"):
+            self.now_playing_island._sync_clock()
+            self._variant_view.sync_status_pulse()
             self._sync_background_animation()
             self._sync_album_rotation()
             self._sync_artwork_skeleton()
@@ -1733,6 +2463,9 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             painter.restore()
             if not navigation_capture:
                 paint_liquid_glass(painter, panel, radius=24, border_color=QColor("#454b56"))
+            if self.library_variant != "classic":
+                self._variant_view.paint(painter)
+                return
             avatar = self._account_avatar_rect
             painter.setBrush(QColor("#292d36"))
             painter.setPen(QPen(QColor("#414651"), 1))
@@ -1757,8 +2490,9 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             if not self._visual_items() and not self._catalog_skeleton.isVisible():
                 painter.setFont(_entry_font(17))
                 painter.setPen(QColor("#b8b8b8"))
-                message = self._error or (self._message or "正在加载音乐库…" if self._loading else
-                                         ("未找到歌曲或歌单" if self.search.text().strip() else "暂无可显示的歌单"))
+                message = self._error or self._search_status_message() or (
+                    self._message or "正在加载音乐库…" if self._loading else
+                    ("未找到歌曲或歌单" if self.search.text().strip() else "暂无可显示的歌单"))
                 if self.empty_action.isVisible() or self.recovery_action.isVisible():
                     if self.recovery_action.isVisible():
                         # Long provider diagnostics may wrap; reserve only
@@ -1776,8 +2510,5 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
                 else:
                     painter.drawText(QRectF(24, self.scroll.y(), self.width() - 48, self.scroll.height()),
                                      Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, message)
-            elif self._error or self._notice:
-                painter.setFont(_entry_font(13))
-                painter.setPen(QColor("#e4b5ad") if self._error else QColor("#969cab"))
-                painter.drawText(QRectF(24, self.height() - 36, self.width() - 48, 25), Qt.AlignmentFlag.AlignCenter,
-                                 painter.fontMetrics().elidedText(self._error or self._notice or self._message, Qt.TextElideMode.ElideRight, self.width() - 48))
+            elif self._error:
+                self.paint_library_error_toast(painter)

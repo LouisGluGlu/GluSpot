@@ -3,6 +3,11 @@
 #ifndef AppVersion
   #define AppVersion "6.414"
 #endif
+; The shown version can be short ("6.50"); comparisons use the numeric
+; file version stamped into GluSpot.exe ("6.500.0.0" sorts after 6.417).
+#ifndef AppFileVersion
+  #define AppFileVersion AppVersion
+#endif
 #ifndef PayloadDir
   #error PayloadDir must point to a completed GluSpot onedir build
 #endif
@@ -101,7 +106,7 @@ Name: "{app}\GluSpot"
 
 [INI]
 Filename: "{app}\gluspot-install.ini"; Section: "GluSpot"; Key: "InstallPath"; String: "{app}"
-Filename: "{app}\gluspot-install.ini"; Section: "GluSpot"; Key: "Version"; String: "{#AppVersion}"
+Filename: "{app}\gluspot-install.ini"; Section: "GluSpot"; Key: "Version"; String: "{#AppFileVersion}"
 
 [UninstallDelete]
 Type: files; Name: "{app}\gluspot-install.ini"
@@ -689,7 +694,7 @@ begin
   if Existing = '' then exit;
   Key := Lowercase(ExpandFileName(Target)) + '|' + Existing;
   if ApprovedTarget = Key then exit;
-  if CompareVersion('{#AppVersion}', Existing) > 0 then begin ApprovedTarget := Key; exit; end;
+  if CompareVersion('{#AppFileVersion}', Existing) > 0 then begin ApprovedTarget := Key; exit; end;
   // A silent run cannot stand in for the user's explicit overwrite choice.
   if WizardSilent then begin Result := False; exit; end;
   Result := MsgBox('已存在 GluSpot ' + Existing + '。当前安装包版本为 {#AppVersion}。' + #13#10#13#10 +

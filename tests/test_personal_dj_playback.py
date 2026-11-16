@@ -774,6 +774,11 @@ class DJPlaybackTests(unittest.TestCase):
                 self.start()
                 failed = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "dj_lyrics")
                 self.tasks.completed.emit(failed, None, error)
+                if error == "request_failed":
+                    self.assertEqual(self.owned.track.lyrics, ("加载歌词中",))
+                    retry = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "dj_lyrics")
+                    self.assertNotEqual(retry, failed)
+                    self.tasks.completed.emit(retry, None, error)
                 self.assertEqual(self.owned.track.lyrics, ("暂无歌词",))
                 self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
                 self.assertTrue(self.owned.track.is_playing)
@@ -781,7 +786,9 @@ class DJPlaybackTests(unittest.TestCase):
                 self.assertIsNone(self.owned._lyric_payload)
                 self.owned._end_current_stream()
                 self.run_latest(self.tasks, "stream")
-                self.run_latest(self.tasks, "lyrics")
+                # DJ and the following stream reuse one genuine visible-song
+                # request; either context may have started it first.
+                self.run_latest(self.tasks, self.owned._lyrics_request_pending[0][0])
                 self.assertEqual(self.owned.track.lyrics, ("真实歌词",))
                 self.assertTrue(self.owned.track.is_playing)
 

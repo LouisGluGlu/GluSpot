@@ -17,6 +17,95 @@ from api.lyrics import is_structured_lyric_metadata
 from api.lyric_metadata import is_explicit_lyric_credit as _is_credit_line
 
 
+from functools import lru_cache
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QFont, QImage, QPainter
+from PIL import Image, ImageFilter
+
+SURFACE_FONT_FAMILIES = ('Segoe UI', 'Microsoft YaHei UI')
+LYRIC_PIXEL_SIZE = 38
+LYRIC_LINE_SPACING = 1.45
+LYRIC_PREVIOUS_ALPHA = .35
+LYRIC_NEXT_ALPHA = .25
+LYRIC_BLUR_RADII = (0.0, 3.0, 6.0)
+
+
+def surface_pixel_size(width):
+    """One lyric/dot token, capped at the reference surface's 38px."""
+    return min(float(LYRIC_PIXEL_SIZE), max(26.0, float(width) * .0875))
+
+
+def surface_font(size, weight=QFont.Weight.Bold):
+    font = QFont()
+    font.setFamilies(list(SURFACE_FONT_FAMILIES))
+    font.setPixelSize(max(1, int(round(size))))
+    font.setWeight(weight)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    return font
+
+
+def intro_dot_radius(pixel_size):
+    return max(4.0, max(1, round(pixel_size)) * .17)
+
+
+@lru_cache(maxsize=96)
+def _intro_raster(pixel_size, dpr, degree, rgba):
+    radius = intro_dot_radius(pixel_size)
+    dot_radius = radius * (1.15 if degree == 1 else 1.30)
+    stride = radius * 3.35
+    bleed = math.ceil(LYRIC_BLUR_RADII[degree] * 3.0)
+    width = 2 * dot_radius + 2 * stride + 2 * bleed
+    height = 2 * dot_radius + 2 * bleed
+    source = QImage(max(1, math.ceil(width * dpr)), max(1, math.ceil(height * dpr)),
+                    QImage.Format.Format_ARGB32_Premultiplied)
+    source.setDevicePixelRatio(dpr)
+    source.fill(Qt.GlobalColor.transparent)
+    ink = QColor.fromRgba(rgba)
+    with QPainter(source) as layer:
+        layer.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        layer.setPen(Qt.PenStyle.NoPen)
+        layer.setBrush(ink)
+        for index in range(3):
+            layer.drawEllipse(QPointF(bleed + dot_radius + index * stride, bleed + dot_radius),
+                              dot_radius, dot_radius)
+    source = source.convertToFormat(QImage.Format.Format_RGBA8888)
+    pixels = Image.frombytes('RGBA', (source.width(), source.height()), bytes(source.bits()))
+    alpha = pixels.getchannel('A').filter(ImageFilter.GaussianBlur(LYRIC_BLUR_RADII[degree] * dpr))
+    pixels = Image.new('RGBA', pixels.size, (ink.red(), ink.green(), ink.blue(), 0))
+    pixels.putalpha(alpha)
+    image = QImage(pixels.tobytes(), source.width(), source.height(), source.width() * 4,
+                   QImage.Format.Format_RGBA8888).copy()
+    image.setDevicePixelRatio(dpr)
+    return image, dot_radius, bleed
+
+
+def paint_intro_countdown(painter, *, center, pixel_size, color, opacity, blur_layers, scale):
+    """Paint three equal circles; scale is the source raster's device scale.
+
+    A three-color sequence preserves the wide countdown's per-dot reading ink.
+    Blur layers are (degree, weight) pairs from the existing lyric surface.
+    """
+    radius = intro_dot_radius(pixel_size)
+    stride = radius * 3.35
+    colors = (color,) * 3 if isinstance(color, QColor) else color
+    for degree, weight in blur_layers:
+        if weight <= 0:
+            continue
+        painter.save()
+        painter.setOpacity(painter.opacity() * opacity * weight)
+        if degree:
+            image, dot_radius, bleed = _intro_raster(
+                pixel_size, max(1.0, float(scale)), max(0, min(2, int(degree))), colors[0].rgba())
+            painter.drawImage(QPointF(center.x() - stride - dot_radius - bleed,
+                                     center.y() - dot_radius - bleed), image)
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            for index, ink in enumerate(colors):
+                painter.setBrush(ink)
+                painter.drawEllipse(QPointF(center.x() + (index - 1) * stride, center.y()), radius, radius)
+        painter.restore()
+
+
 INTRO_COUNTDOWN_TEXT = "· · ·"
 INTRO_COUNTDOWN_MIN_START_SECONDS = 5.0
 
@@ -69,6 +158,7 @@ _INLINE_SINGLE_WORD_TRANSLATION_RE = re.compile(
 _SINGER_JOIN_RE = re.compile(r"\s*(?:[+＋＆&、/,，]|与|和)\s*")
 _POSSIBLE_SINGER_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]{2,6}\Z")
 _PAREN_CONTENT_RE = re.compile(r"\(([^()]*)\)|（([^（）]*)）")
+_ROLE_TAGS = frozenset(("男", "女", "合", "男声", "女声", "合唱"))
 _PAREN_METADATA_RE = re.compile(
     r"^(?:feat(?:uring)?\.?|ft\.?|prod(?:uced)?\.?|remix|live|instrumental|"
     r"作词|作曲|编曲|演唱|翻译|译者)(?:\s|[:：.]|$)",
@@ -87,6 +177,7 @@ class SingerLyricRow:
     singer: str | None = None
     alignment: str = "left"
     dual_group_index: int | None = None
+    role_tag: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,15 +207,30 @@ class DisplayLyricLayers:
     translation_text: str | None = None
     parenthetical_text: str | None = None
     parenthetical_translation_text: str | None = None
+    role_tag: str | None = None
 
 
-def _split_parenthetical_subrow(text: str) -> tuple[str, str | None, tuple[int, ...]]:
+def _split_parenthetical_subrow(text: str) -> tuple[str, str | None, tuple[int, ...], str | None]:
     annotations: list[str] = []
     kept: list[tuple[str, int]] = []
     cursor = 0
     scanned = 0
     nesting = 0
+    role_tag = None
+    # Role tags are one classification of the shared parenthetical scanner.
+    # Width normalization is only for matching; source offsets stay raw.
+    leading = len(text) - len(text.lstrip())
+    role_match = _PAREN_CONTENT_RE.match(text.translate(str.maketrans("（）", "()")), leading)
+    if role_match is not None and role_match.group(1) in _ROLE_TAGS:
+        if not text[role_match.end():].strip():
+            # A standalone token has no sung remainder: retain it as content.
+            return text, None, tuple(range(len(text))), None
+        role_tag = role_match.group(1)
+        cursor = role_match.end()
+        scanned = cursor
     for match in _PAREN_CONTENT_RE.finditer(text):
+        if match.start() < cursor:
+            continue
         for char in text[scanned:match.start()]:
             if char in "(（":
                 nesting += 1
@@ -161,6 +267,7 @@ def _split_parenthetical_subrow(text: str) -> tuple[str, str | None, tuple[int, 
         "".join(char for char, _index in compact),
         " ".join(annotations) or None,
         tuple(source_index for _char, source_index in compact),
+        role_tag,
     )
 
 
@@ -204,14 +311,14 @@ def split_display_layers(
         index for index, part in enumerate(parts) if _PARENTHETICAL_LABEL_RE.match(part)
     )
     explicit_translations = _explicit_translation_payloads(source_text or original)
-    first_content_index = next((index for index, (body, paren, _offsets) in enumerate(split_parts) if body or paren), None)
+    first_content_index = next((index for index, (body, paren, _offsets, _role) in enumerate(split_parts) if body or paren), None)
     if first_content_index is None:
         return DisplayLyricLayers(
             original, "\n".join(parts), "",
             primary_source_offsets=(0,),
-            parenthetical_text=" ".join(paren for _body, paren, _offsets in split_parts if paren) or None,
+            parenthetical_text=" ".join(paren for _body, paren, _offsets, _role in split_parts if paren) or None,
         )
-    first_body_index = next((index for index, (body, _paren, _offsets) in enumerate(split_parts) if body), None)
+    first_body_index = next((index for index, (body, _paren, _offsets, _role) in enumerate(split_parts) if body), None)
     if (
         not split_parts[first_content_index][0]
         and first_body_index is not None
@@ -223,7 +330,7 @@ def split_display_layers(
         # A leading backing-vocal annotation can precede a normal original.
         # It owns the whole row only when the next body is its translation.
         first_content_index = first_body_index
-    first_body, first_parenthetical, _first_offsets = split_parts[first_content_index]
+    first_body, first_parenthetical, _first_offsets, role_tag = split_parts[first_content_index]
     first_content = first_body or first_parenthetical or ""
     # A separately timed backing vocal can be attached to the preceding sung
     # row by the song presenter. Keep its explicitly paired, parenthesized
@@ -256,7 +363,7 @@ def split_display_layers(
     primary_parentheses: list[str] = []
     translated_parentheses: list[str] = []
     translated_body: str | None = None
-    for index, (source, (body, parenthetical, offsets)) in enumerate(zip(parts, split_parts)):
+    for index, (source, (body, parenthetical, offsets, _role)) in enumerate(zip(parts, split_parts)):
         if index in parenthetical_pairs:
             primary_parentheses.append(parenthetical or "")
             continue
@@ -308,6 +415,7 @@ def split_display_layers(
         translation_text=translated_body,
         parenthetical_text=" ".join(primary_parentheses) or None,
         parenthetical_translation_text=" ".join(translated_parentheses) or None,
+        role_tag=role_tag,
     )
 
 
@@ -375,13 +483,20 @@ def analyze_duet_lyric_rows(
     initial: list[SingerLyricRow] = []
     for index, (start, text) in enumerate(rows):
         value = str(text or "")
-        prefix = _line_singer_prefix(value, aliases)
-        singer, body = prefix if prefix is not None else (None, value)
-        initial.append(SingerLyricRow(index, float(start), value, body, singer))
+        role_tag = split_display_layers(value).role_tag
+        if role_tag is not None:
+            singer = {"男声": "男", "女声": "女", "合唱": "合"}.get(role_tag, role_tag)
+            # Classification already established the exact closed token.
+            # Remove only it, retaining backing vocals and companion subrows.
+            body = value.lstrip()[len(role_tag) + 2:].lstrip()
+        else:
+            prefix = _line_singer_prefix(value, aliases)
+            singer, body = prefix if prefix is not None else (None, value)
+        initial.append(SingerLyricRow(index, float(start), value, body, singer, role_tag=role_tag))
 
     solo_names = list(dict.fromkeys(
         row.singer for row in initial
-        if row.singer is not None and "+" not in row.singer
+        if row.singer is not None and "+" not in row.singer and row.singer != "合"
     ))
     first_sung_index = next(
         (row.source_index for row in initial if row.original_text != INTRO_COUNTDOWN_TEXT),
@@ -397,7 +512,7 @@ def analyze_duet_lyric_rows(
     inherited_side = "left"
     for row in initial:
         if row.singer is not None:
-            inherited_side = "left" if "+" in row.singer else sides[row.singer]
+            inherited_side = "left" if "+" in row.singer or row.singer == "合" else sides[row.singer]
         aligned.append(replace(row, alignment=inherited_side))
 
     groups: list[DualLyricGroup] = []
@@ -407,6 +522,8 @@ def analyze_duet_lyric_rows(
         if (
             first.singer is not None
             and second.singer is not None
+            and (first.role_tag is None and second.role_tag is None
+                 or {first.singer, second.singer} == {"男", "女"})
             and math.isfinite(first.start_seconds)
             and math.isfinite(second.start_seconds)
             and 0.0 <= second.start_seconds - first.start_seconds <= 1.0
@@ -702,7 +819,7 @@ def present_timed_lyric_rows(
         ) if value}
         for part_index, part in enumerate(parts):
             payload = _TRANSLATION_LABEL_RE.sub("", part).strip()
-            body, parenthetical, _offsets = _split_parenthetical_subrow(payload)
+            body, parenthetical, _offsets, _role = _split_parenthetical_subrow(payload)
             if (body or parenthetical) in companions:
                 translated_subrows.add((row_index, part_index))
 
@@ -817,7 +934,7 @@ def _attach_standalone_parenthetical_rows(
             while insertion < len(parts) and _PARENTHETICAL_LABEL_RE.match(parts[insertion]):
                 insertion += 1
                 if insertion < len(parts) and _TRANSLATION_LABEL_RE.match(parts[insertion]):
-                    body, parenthetical, _offsets = _split_parenthetical_subrow(
+                    body, parenthetical, _offsets, _role = _split_parenthetical_subrow(
                         _TRANSLATION_LABEL_RE.sub("", parts[insertion]),
                     )
                     if not body and parenthetical:

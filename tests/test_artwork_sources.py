@@ -462,7 +462,7 @@ class ArtworkProviderLadderTests(unittest.TestCase):
 
     def test_expired_generation_cannot_publish_into_retry(self):
         clock = Clock()
-        self.provider._resolve_netease_art_url.side_effect = ["https://test/old.jpg", "https://test/new.jpg"]
+        self.provider._resolve_netease_art_url.return_value = "https://test/new.jpg"
         with patch("api.providers.time.monotonic", clock):
             self.assertTrue(self.schedule())
             old_worker = ManualThread.jobs.pop(0)
@@ -473,9 +473,11 @@ class ArtworkProviderLadderTests(unittest.TestCase):
             self.assertTrue(self.schedule())
             new_worker = ManualThread.jobs.pop(0)
             old_worker()
+            self.provider._resolve_netease_art_url.assert_not_called()
             self.assertNotIn("track", self.provider._current_art_url_by_track_id)
             new_worker()
         self.assertEqual(self.provider._current_art_url_by_track_id["track"], "https://test/new.jpg")
+        self.provider._resolve_netease_art_url.assert_called_once()
         self.provider._schedule_queue_album_art_prefetch.assert_called_once_with("https://test/new.jpg")
 
     def test_metadata_workers_and_track_urls_are_bounded(self):
@@ -563,8 +565,6 @@ class ArtworkVisualPriorityTests(unittest.TestCase):
         provider._last_raw_timeline_at = provider._local_seek_at = 0.0
         provider._art_cache = {}
         provider.netease_position = provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_music_player_mode": "netease", "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False, "v2_enable_dual_line_lyrics": False,
@@ -582,8 +582,8 @@ class ArtworkVisualPriorityTests(unittest.TestCase):
         provider = self.provider(self.png(48, 0xFF806020))
         first = asyncio.run(provider._read_visual_data())
         provider._last_data = first
-        provider._current_art_url_by_track_id = {first.track.track_id: ART_URL}
-        provider._current_art_lookup_sources = {first.track.track_id: "cover-art-archive"}
+        provider._current_art_url_by_track_id = {provider._artwork_track_key("Song", "Artist"): ART_URL}
+        provider._current_art_lookup_sources = {provider._artwork_track_key("Song", "Artist"): "cover-art-archive"}
         provider._queue_album_art_bytes = lambda _track: original
         second = asyncio.run(provider._read_visual_data())
         self.assertEqual(second.track.album_art_source, "cover-art-archive-original")
@@ -632,6 +632,9 @@ class ArtworkVisualPriorityTests(unittest.TestCase):
         first = asyncio.run(provider._read_visual_data())
         self.assertEqual(first.track.album_art_source, "thumbnail")
         self.assertNotEqual(first.track.album_art_lookup_state, "ready")
+        provider._schedule_current_netease_art_lookup.assert_not_called()
+        provider._current_art_first_seen["song|artist"] -= 1.1
+        asyncio.run(provider._read_visual_data())
         provider._schedule_current_netease_art_lookup.assert_called_once()
 
     def test_1417_smtc_image_is_usable_without_new_search(self):
@@ -660,6 +663,9 @@ class ArtworkPlayerUrlUpgradeTests(unittest.TestCase):
         self.thread_patch = patch("api.providers.threading.Thread", ManualThread)
         self.thread_patch.start()
         self.addCleanup(self.thread_patch.stop)
+        timer_patch = patch("api.providers.threading.Timer", ManualTimer)
+        timer_patch.start()
+        self.addCleanup(timer_patch.stop)
 
     def test_normalized_original_cache_wins_supplied_preview(self):
         self.provider._queue_art_cache[self.original_url] = self.original

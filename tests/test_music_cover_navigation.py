@@ -315,6 +315,9 @@ class MusicCoverNavigationControllerTests(MusicLibraryControllerTests):
         self.open()
         cover = self.window._shelves[0].tiles[0][1]
         cover.click()
+        # A playlist opens its page; the page's large cover plays it.
+        page = self.window.playlist_page.canvas
+        self.window.playlist_page.request_play_all(page.global_rect(page.cover_rect()))
         self.assertFalse(self.window.isVisible())
         self.assertIsNotNone(self.controller._opening)
         self.assertEqual(sum(call[0] == "surface" for call in self.island.calls), 1)
@@ -332,9 +335,13 @@ class MusicCoverNavigationControllerTests(MusicLibraryControllerTests):
     def test_playlist_handoff_captures_clicked_cover_once_before_playable_reply(self):
         self.open()
         cover = self.window._shelves[0].tiles[0][1]
-        clicked_rect = cover.artwork_rect().toAlignedRect()
+        cover.click()
+        # The playlist page's large cover is the one that grows into the window.
+        page = self.window.playlist_page.canvas
+        page.resize(600, 800)
+        clicked_rect = page.cover_rect().toAlignedRect()
         with patch.object(self.controller, "_present_music_surface", wraps=self.controller._present_music_surface) as present:
-            cover.click()
+            self.window.playlist_page.request_play_all(page.global_rect(page.cover_rect()))
             self.assertEqual(present.call_count, 1)
             mode, frame = present.call_args.args
             self.assertEqual(mode, "window")

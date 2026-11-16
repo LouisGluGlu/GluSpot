@@ -5,11 +5,18 @@ import time
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QRectF, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QLineEdit, QScrollArea, QVBoxLayout, QWidget
 
 from local.liquid_glass import GlassCaptureMixin, GlassPushButton, paint_liquid_glass, widget_glass_level
+from local.music_control_glass import paint_control_overlay
 from local.music_source_icons import paint_music_source_icon
 from local.song_collection_controller import SongCollectionState
+
+
+def _panel_ink(surface) -> QColor:
+    """Text on the submenu glass: the window buttons' ink."""
+    getter = getattr(surface, "_panel_glass_ink", None)
+    return QColor(getter()) if callable(getter) else QColor(surface._scene_control_ink())
 
 
 class CollectionGlassButton(GlassPushButton):
@@ -47,18 +54,20 @@ class CollectionGlassButton(GlassPushButton):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             face = QRectF(self.rect()).adjusted(2, 2, -2, -2)
-            image = self.surface._surface_glass_backdrop()
-            target = face.translated(QPointF(self.mapTo(self.surface, QPoint())))
-            paint_liquid_glass(painter, face, radius=16., light=self.surface._surface_glass_light(),
-                material_level=widget_glass_level(self.surface),
-                refractive=True, backdrop=image,
-                backdrop_rect=self.surface._surface_glass_source_rect(target, image),
-                hovered=self.underMouse(), pressed=self.isDown(), cache_token=id(self),
-                material_owner=self, material_role='collection-row', material_transition=.1,
-                material_scene=self.surface._visual_track_identity)
-            ink = self.surface._scene_control_ink()
-            if not self.isEnabled():
-                painter.setOpacity(.5)
+            ink = _panel_ink(self.surface)
+            # The panel is already liquid glass. A playlist row is a soft
+            # wash on hover/press only; a command button keeps a faint pill.
+            wash = QColor(ink)
+            resting = 0 if self.playlist is not None else 20
+            wash.setAlpha(resting + (22 if self.isDown() else 12 if self.underMouse() and self.isEnabled() else 0))
+            if wash.alpha():
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(wash)
+                radius = 16. if self.playlist is not None else face.height() / 2
+                painter.drawRoundedRect(face, radius, radius)
+            contained = bool(getattr(self.playlist, "contains_track", False))
+            if contained or not self.isEnabled():
+                painter.setOpacity(.38 if contained else .5)
             painter.setPen(ink)
             scale = self._click_scale()
             painter.translate(face.center())
@@ -98,9 +107,15 @@ class CollectionGlassButton(GlassPushButton):
                 painter.drawText(text, Qt.AlignmentFlag.AlignVCenter, title)
                 detail = QRectF(text.left(), text.bottom() + 2, text.width(), 20)
                 painter.setFont(self.surface._surface_font(12))
-                subtitle = f"{self.playlist.track_count} 首歌曲" if self.playlist.track_count else "添加当前歌曲"
+                subtitle = "已在歌单" if contained else (
+                    f"{self.playlist.track_count} 首歌曲" if self.playlist.track_count else "添加当前歌曲")
                 painter.setOpacity(painter.opacity() * .65)
                 painter.drawText(detail, Qt.AlignmentFlag.AlignVCenter, subtitle)
+                if contained:
+                    painter.setOpacity(1.)
+                    painter.setFont(self.surface._surface_font(16))
+                    painter.drawText(face.adjusted(0, 0, -16, 0),
+                                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "✓")
             if self.hasFocus():
                 painter.setOpacity(1.)
                 painter.setPen(QPen(ink, 1.2))
@@ -130,6 +145,11 @@ class SongPlaylistPanel(GlassCaptureMixin, QWidget):
         self.title = QLabel("添加到歌单", header)
         self.title.setFont(surface._surface_font(16))
         row.addWidget(self.title, 1)
+        self.create_button = CollectionGlassButton(surface, "新建歌单", header)
+        self.create_button.setAccessibleName("新建歌单")
+        self.create_button.setFixedSize(96, 40)
+        self.create_button.clicked.connect(self._begin_create)
+        row.addWidget(self.create_button)
         self.close_button = CollectionGlassButton(surface, "×", header)
         self.close_button.setAccessibleName("关闭歌单选择")
         self.close_button.setMinimumHeight(40)
@@ -137,6 +157,18 @@ class SongPlaylistPanel(GlassCaptureMixin, QWidget):
         self.close_button.clicked.connect(self.hide)
         row.addWidget(self.close_button)
         layout.addWidget(header)
+        self.search = QLineEdit(self)
+        self.search.setPlaceholderText("搜索歌单")
+        self.search.setFont(surface._surface_font(13))
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(lambda _text: self.refresh())
+        layout.addWidget(self.search)
+        self.creator = QLineEdit(self)
+        self.creator.setPlaceholderText("新歌单名称，回车创建")
+        self.creator.setFont(surface._surface_font(13))
+        self.creator.returnPressed.connect(self._create_playlist)
+        self.creator.hide()
+        layout.addWidget(self.creator)
         self.message = QLabel(self)
         self.message.setWordWrap(True)
         self.message.setMinimumHeight(36)
@@ -180,10 +212,26 @@ class SongPlaylistPanel(GlassCaptureMixin, QWidget):
 
     def _add(self, playlist_id):
         state = self._bound_state()
-        if not state.available or state.busy:
+        playlist = next((item for item in state.playlists if item.playlist_id == playlist_id), None)
+        if playlist is None or playlist.contains_track or not state.available or state.busy:
             return False
         return self.controller.add_to_playlist(playlist_id, self.track_id,
                                               expected_authority=self.authority)
+
+    def _begin_create(self):
+        self.creator.show()
+        self.creator.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _create_playlist(self):
+        name = self.creator.text().strip()
+        if not name:
+            return
+        creator = getattr(self.controller, "create_playlist", None)
+        if not callable(creator):
+            return
+        if creator(name, self.track_id, expected_authority=self.authority):
+            self.creator.clear()
+            self.creator.hide()
 
     def _animate(self, value):
         self._opacity.setOpacity(float(value))
@@ -194,7 +242,9 @@ class SongPlaylistPanel(GlassCaptureMixin, QWidget):
         self.place()
         self.show()
         self.raise_()
-        self.close_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        # Keyboard focus (Escape, Tab) without lighting a focus ring on ×.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
         self._motion.setStartValue(0.)
         self._motion.setEndValue(1.)
         self._motion.start()
@@ -238,8 +288,14 @@ class SongPlaylistPanel(GlassCaptureMixin, QWidget):
             self.scroll.setWidget(body)
             if old is not None:
                 old.deleteLater()
+        query = self.search.text().strip() if hasattr(self, "search") else ""
         for button in self._row_buttons.values():
-            button.setEnabled(not state.busy and state.available)
+            playlist = button.playlist
+            contained = bool(getattr(playlist, "contains_track", False))
+            button.setVisible(not query or query in playlist.title)
+            button.setEnabled(not contained and not state.busy and state.available)
+            if contained:
+                button.setToolTip(f"{playlist.title} · 已在歌单")
         self._visible_artwork()
         self.more.setText("正在读取…" if state.playlists_pending else "加载更多" if state.playlist_has_more else "刷新歌单")
         self.more.setEnabled(state.available and not state.playlists_pending and not state.busy)
@@ -254,11 +310,19 @@ class SongPlaylistPanel(GlassCaptureMixin, QWidget):
             self._load()
 
     def _sync_ink(self):
-        ink = self.surface._scene_control_ink()
+        ink = _panel_ink(self.surface)
         if ink.rgba() != self._ink_key:
             self._ink_key = ink.rgba()
-            for label in (self.title, self.message):
-                label.setStyleSheet(f"color:{ink.name()};background:transparent;")
+            self.title.setStyleSheet(f"color:{ink.name()};background:transparent;")
+            self.message.setStyleSheet(
+                f"color:rgba({ink.red()},{ink.green()},{ink.blue()},150);background:transparent;")
+            rgb = f"{ink.red()},{ink.green()},{ink.blue()}"
+            field = (f"QLineEdit {{color:{ink.name()};background:rgba({rgb},20);border:none;"
+                     f"border-radius:12px;padding:6px 12px;}}"
+                     f"QLineEdit:focus {{background:rgba({rgb},30);}}")
+            if hasattr(self, "search"):
+                self.search.setStyleSheet(field)
+                self.creator.setStyleSheet(field)
             self.scroll.setStyleSheet(
                 "QScrollArea, QScrollArea > QWidget > QWidget {background:transparent;}"
                 "QScrollBar:vertical {background:transparent;width:6px;margin:2px 0;}"
@@ -314,14 +378,19 @@ class SongPlaylistPanel(GlassCaptureMixin, QWidget):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-            image = self.surface._surface_glass_backdrop()
-            target = rect.translated(self.x(), self.y())
-            paint_liquid_glass(painter, rect, radius=22, light=self.surface._surface_glass_light(),
-                              material_level=widget_glass_level(self.surface),
-                              refractive=True, backdrop=image,
-                              backdrop_rect=self.surface._surface_glass_source_rect(target, image),
-                              cache_token=id(self), material_owner=self, material_role='playlist-panel',
-                              material_scene=self.surface._visual_track_identity, material_transition=.1)
+            panel_glass = getattr(self.surface, "_paint_panel_glass", None)
+            if callable(panel_glass):
+                # The same liquid glass as the window's buttons and device menu.
+                panel_glass(painter, self, rect, 24.)
+            else:
+                image = self.surface._surface_glass_backdrop()
+                target = rect.translated(self.x(), self.y())
+                paint_liquid_glass(painter, rect, radius=22, light=self.surface._surface_glass_light(),
+                                  material_level=widget_glass_level(self.surface),
+                                  refractive=True, backdrop=image,
+                                  backdrop_rect=self.surface._surface_glass_source_rect(target, image),
+                                  cache_token=id(self), material_owner=self, material_role='playlist-panel',
+                                  material_scene=self.surface._visual_track_identity, material_transition=.1)
 
 
 class MusicSongCollectionMixin:
@@ -361,16 +430,30 @@ class MusicSongCollectionMixin:
         self.update()
 
     def _song_collection_geometry(self, rect, now=None, *, shifted=True):
+        now = time.monotonic() if now is None else now
+        cache = getattr(self, "_frame_geometry_cache", None)
+        key = ("collection", rect.x(), rect.y(), rect.width(), rect.height(), now, shifted)
+        if cache is not None and key in cache:
+            return QRectF(cache[key])
+        result = self._song_collection_geometry_uncached(rect, now, shifted=shifted)
+        if cache is not None:
+            cache[key] = QRectF(result)
+        return result
+
+    def _song_collection_geometry_uncached(self, rect, now=None, *, shifted=True):
         if not self._song_collection_state().track_id:
             return QRectF()
         now = time.monotonic() if now is None else now
-        scale = self._surface_scale(rect)
-        side = max(36., 44. * scale)
-        margin = max(10., 18. * scale)
+        unit = self._control_unit(rect)
+        side = max(34., 5.4 * unit)
+        margin = 2.4 * unit
+        columns = 1. if rect.width() < 440. else 2.
         lane = self._footer_dj_lane_width(rect, now)
-        gap = max(8., 10. * scale) if lane > 0 else 0.
-        face = QRectF(rect.right() - margin - lane - gap - side * 2.5,
-                      rect.bottom() - margin - side, side * 2.5, side)
+        gap = max(8., 1.2 * unit) if lane > 0 else 0.
+        right = float(rect.x()) + float(rect.width())
+        bottom = float(rect.y()) + float(rect.height())
+        face = QRectF(right - margin - lane - gap - side * columns,
+                      bottom - margin - side, side * columns, side)
         if shifted:
             reveal = self._control_reveal_at(now)
             # DJ can remain independently visible during speech/status. This
@@ -378,7 +461,7 @@ class MusicSongCollectionMixin:
             if self._owned_personal_dj_enabled is not None:
                 shift = self._personal_dj_control_shift(rect, reveal)
             else:
-                shift = QPointF(14. * scale * (1. - reveal),
+                shift = QPointF(0.,
                                (rect.bottom() - face.top() + 4.) * (1. - reveal))
             face.translate(shift)
         return face
@@ -391,6 +474,8 @@ class MusicSongCollectionMixin:
         face = self._song_collection_geometry(rect, now)
         if not face.isValid():
             return {}
+        if rect.width() < 440.:
+            return {"favorite": QRectF(face)}
         return {"favorite": QRectF(face.left(), face.top(), face.width() / 2., face.height()),
                 "playlist_add": QRectF(face.center().x(), face.top(), face.width() / 2., face.height())}
 
@@ -414,43 +499,35 @@ class MusicSongCollectionMixin:
         return moving or active or lane_active
 
     def _paint_song_collection_control(self, painter, rect):
+        face = self._song_collection_geometry(rect)
+        if not face.isValid() or self._control_reveal_at(time.monotonic()) <= .001:
+            return
+        paint_control_overlay(painter, face.adjusted(-20., -15., 20., 15.),
+            lambda layer: self._draw_song_collection_control(layer, rect))
+
+    def _draw_song_collection_control(self, painter, rect):
         state = self._song_collection_state()
         now = time.monotonic()
         reveal = self._control_reveal_at(now)
         face = self._song_collection_geometry(rect, now)
-        if not face.isValid() or reveal <= .001:
-            return
+        motion = self._glass_feedback.state("collection")
+        offset = motion.offset if motion is not None else QPointF()
+        face.translate(offset)
         painter.save()
         painter.setOpacity(reveal)
-        image = self._surface_glass_backdrop()
-        paint_liquid_glass(painter, face, radius=face.height()/2., light=self._surface_glass_light(),
-                          material_level=widget_glass_level(self),
-                          refractive=True, backdrop=image,
-                          backdrop_rect=self._surface_glass_source_rect(face, image), cache_token=(id(self), "collection"),
-                          material_owner=self, material_role='collection',
-                          material_scene=self._visual_track_identity,
-                          material_dirty=painter.worldTransform().mapRect(face), material_transition=.1)
+        # Wide layout G draws one shared plate behind the heart, playlist and DJ.
+        # Narrow keeps this capsule. The DJ status lamp stays on the waveform icon.
+        if self._content_layout_is_narrow():
+            # Heart and add share one flat capsule, the same material as transport.
+            self._paint_theme_plate(painter, face, face.height() / 2.0)
         for key, target in self._song_collection_rects(rect, now).items():
             painter.save()
-            started = self._song_collection_clicks.get(key)
-            if started is not None:
-                frame = self._transport_feedback_frame(max(0., now - started),
-                    self.TRANSPORT_LIGHT_EXPAND_SECONDS + self.TRANSPORT_LIGHT_FADE_SECONDS)
-                if frame is not None:
-                    painter.translate(target.center())
-                    painter.scale(frame[0], frame[0])
-                    painter.translate(-target.center())
-            hovered = self._hovered_window_button == key
-            pressed = self._pressed_window_button == key
-            if hovered or pressed:
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(255, 255, 255, 30 if pressed else 15))
-                painter.drawEllipse(target.center(), target.height()*.43, target.height()*.43)
+            target.translate(offset)
             enabled = state.available and not state.busy and (key != "favorite" or state.liked is not None)
-            ink = QColor("#ff3e4c") if key == "favorite" and state.liked is True else self._scene_control_ink()
+            ink = QColor("#ff3e4c") if key == "favorite" and state.liked is True else self._surface_glass_ink(target)
             if not enabled:
-                painter.setOpacity(painter.opacity() * .5)
-            side = target.height() * (.63 if key == "favorite" else .61)
+                painter.setOpacity(painter.opacity() * .38)
+            side = target.height() * 0.62
             glyph = QRectF(target.center().x()-side/2., target.center().y()-side/2., side, side)
             paint_music_source_icon(painter, glyph, "heart_filled" if key == "favorite" and state.liked else "heart_outline" if key == "favorite" else "playlist_add", tint=ink)
             painter.restore()

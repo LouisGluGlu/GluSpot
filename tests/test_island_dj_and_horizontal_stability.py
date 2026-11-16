@@ -57,6 +57,8 @@ class IslandDjAndHorizontalTests(unittest.TestCase):
             xs.append(visual._island_lyric_row_x(rect, 500., True,
                       {"whole_row": True, "elapsed": i / 10., "span": 4.}))
         self.assertTrue(all(a >= b for a, b in zip(xs, xs[1:])))
+        # The line begins at the left edge and finishes with its last glyph
+        # on the right edge.
         self.assertEqual(xs[0], rect.left())
         self.assertEqual(xs[-1], rect.right() - 500.)
 
@@ -72,7 +74,6 @@ class IslandDjAndHorizontalTests(unittest.TestCase):
 
     def test_actual_low_perception_phase_stays_stable_with_paused_source_clock(self):
         visual = fixtures.IslandLyricFollowGeometryTests._visual()
-        visual.music_surface_reading_strategy = "low_perception"
         visual.media_position_seconds = 2.
         visual.media_is_playing = False
         poses, fronts = [], []
@@ -88,6 +89,30 @@ class IslandDjAndHorizontalTests(unittest.TestCase):
         self.assertGreater(fronts[0], 0.)
         self.assertEqual(len(set(fronts)), 1)
         self.assertEqual(len(set(poses)), 1)
+
+    def test_compact_overflow_fades_both_ends_and_a_short_line_does_not(self):
+        visual = fixtures.IslandLyricFollowGeometryTests._visual()
+        long_text = "穿过整夜的街灯以后还是会在路口等你回头看一眼才肯把这句话说完"
+        seen = []
+
+        def capture(painter, rect, draw, *, fade_left, fade_right):
+            seen.append((fade_left, fade_right))
+            draw(painter)
+
+        image = QImage(420, 80, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        with patch("local.island_stack_visual.paint_faded_text", side_effect=capture), QPainter(image) as painter:
+            visual._paint_live_lyric_text(
+                painter, QRectF(16, 8, 360, 48), long_text, 16,
+                visual._music_lyric_base_text_color(), visual._music_lyric_text_color(), True,
+                {"progress": 0.35}, centered=True, edge_fade=True,
+            )
+            visual._paint_live_lyric_text(
+                painter, QRectF(16, 8, 360, 48), "晚风", 16,
+                visual._music_lyric_base_text_color(), visual._music_lyric_text_color(), True,
+                {"progress": 0.2}, centered=True, edge_fade=True,
+            )
+        self.assertEqual(seen, [(True, True)])
 
     def test_live_whole_row_painter_no_longer_uses_metadata_marquee(self):
         visual = fixtures.IslandLyricFollowGeometryTests._visual()

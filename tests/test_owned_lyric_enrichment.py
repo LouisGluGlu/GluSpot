@@ -276,10 +276,13 @@ class OwnedLyricEnrichmentTests(unittest.TestCase):
     def test_stale_failed_official_response_cannot_spawn_a_new_song_fallback(self):
         self.service.lyrics.side_effect = OnlineMusicError("timeout", "netease")
         token, action = self.start()
-        result = action()
+        # The first transport failure is retried inside the pending budget;
+        # its late worker completion still belongs to the old song.
+        with self.assertRaises(OnlineMusicError) as failure:
+            action()
         self.player.send_playback_command("next")
         before = self.player.track
-        self.tasks.completed.emit(token, result, None)
+        self.tasks.completed.emit(token, None, failure.exception.code)
         self.assertEqual(self.player.track, before)
         self.assertFalse(any(token[0] == "lyrics_enrichment" for token, _ in self.prefetch.jobs))
 

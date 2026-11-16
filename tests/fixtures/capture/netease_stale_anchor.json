@@ -1,0 +1,59 @@
+{
+  "provenance": "Deterministic mock trace; not a Windows or live NetEase recording.",
+  "description": "Stale SMTC anchors with pause/resume and explicit seeks.",
+  "events": [
+    {
+      "description": "Initial anchor was updated one second before receipt.",
+      "sample": {"session_id": "mock:cloudmusic.exe", "track_id": "song:A", "position_seconds": 10.0, "observed_at": 100.0, "wall_time": 1000.0, "updated_at": 999.0, "is_playing": true, "end_seconds": 180.0},
+      "now": 100.0, "expected": 11.0
+    },
+    {"description": "Interpolate without another source event.", "now": 104.0, "expected": 15.0},
+    {
+      "description": "Polling the unchanged anchor must not reset interpolation.",
+      "sample": {"session_id": "mock:cloudmusic.exe", "track_id": "song:A", "position_seconds": 10.0, "observed_at": 104.5, "wall_time": 1004.5, "updated_at": 999.0, "is_playing": true, "end_seconds": 180.0},
+      "now": 104.5, "expected": 15.5
+    },
+    {
+      "description": "Pause repeats the old anchor and freezes the predicted position.",
+      "sample": {"session_id": "mock:cloudmusic.exe", "track_id": "song:A", "position_seconds": 10.0, "observed_at": 106.0, "wall_time": 1006.0, "updated_at": 999.0, "is_playing": false, "end_seconds": 180.0},
+      "now": 106.0, "expected": 17.0
+    },
+    {"description": "Paused time does not advance.", "now": 110.0, "expected": 17.0},
+    {
+      "description": "Resume repeats the same anchor and restarts from the frozen position.",
+      "sample": {"session_id": "mock:cloudmusic.exe", "track_id": "song:A", "position_seconds": 10.0, "observed_at": 112.0, "wall_time": 1012.0, "updated_at": 999.0, "is_playing": true, "end_seconds": 180.0},
+      "now": 112.0, "expected": 17.0
+    },
+    {"now": 114.0, "expected": 19.0},
+    {
+      "description": "A new forward seek anchor replaces the prediction.",
+      "sample": {"session_id": "mock:cloudmusic.exe", "track_id": "song:A", "position_seconds": 60.0, "observed_at": 115.0, "wall_time": 1015.0, "updated_at": 1015.0, "is_playing": true, "end_seconds": 180.0},
+      "now": 115.0, "expected": 60.0
+    },
+    {
+      "sample": {"session_id": "mock:cloudmusic.exe", "track_id": "song:A", "position_seconds": 60.0, "observed_at": 116.0, "wall_time": 1016.0, "updated_at": 1015.0, "is_playing": true, "end_seconds": 180.0},
+      "now": 116.0, "expected": 61.0
+    },
+    {
+      "description": "A new backward seek anchor takes effect immediately.",
+      "sample": {"session_id": "mock:cloudmusic.exe", "track_id": "song:A", "position_seconds": 5.0, "observed_at": 118.0, "wall_time": 1018.0, "updated_at": 1018.0, "is_playing": true, "end_seconds": 180.0},
+      "now": 118.0, "expected": 5.0
+    },
+    {
+      "description": "A fresh paused observation remains fixed.",
+      "sample": {"session_id": "mock:cloudmusic.exe", "track_id": "song:A", "position_seconds": 7.0, "observed_at": 120.0, "wall_time": 1020.0, "updated_at": 1020.0, "is_playing": false, "end_seconds": 180.0},
+      "now": 120.0, "expected": 7.0
+    },
+    {
+      "description": "An external seek while paused replaces the frozen position.",
+      "sample": {"session_id": "mock:cloudmusic.exe", "track_id": "song:A", "position_seconds": 2.0, "observed_at": 123.0, "wall_time": 1023.0, "updated_at": 1023.0, "is_playing": false, "end_seconds": 180.0},
+      "now": 123.0, "expected": 2.0
+    },
+    {"now": 125.0, "expected": 2.0},
+    {
+      "sample": {"session_id": "mock:cloudmusic.exe", "track_id": "song:A", "position_seconds": 2.0, "observed_at": 126.0, "wall_time": 1026.0, "updated_at": 1023.0, "is_playing": true, "end_seconds": 180.0},
+      "now": 126.0, "expected": 2.0
+    },
+    {"now": 128.0, "expected": 4.0}
+  ]
+}

@@ -18,6 +18,7 @@ class LibraryHorizontalCatalogTests(unittest.TestCase):
 
     def setUp(self):
         self.window=MusicLibraryWindow()
+        self.window.set_library_variant("classic")  # Horizontal shelves belong to classic.
         self.window.set_account(AccountSnapshot('netease',True,'horizontal-account','横向歌单'))
         self.catalog=(LibraryCollection('fm','fm','私人漫游',''),
             LibraryCollection('daily','daily','每日推荐',''),
@@ -55,6 +56,13 @@ class LibraryHorizontalCatalogTests(unittest.TestCase):
         self.window._expand_group('recommended');self.settle()
         collection,cover,_=self.window._shelves[0].tiles[0]
         QTest.mouseClick(cover,Qt.MouseButton.LeftButton)
+        # The playlist page opens; its own large cover starts playback.
+        self.assertEqual(self.played.count(),0)
+        page=self.window.playlist_page
+        self.assertTrue(self.window.playlist_page_open)
+        page.canvas.resize(600,800)
+        target=page.canvas.play_all_rect().center().toPoint()
+        QTest.mouseClick(page.canvas,Qt.MouseButton.LeftButton,pos=target)
         self.assertEqual(self.played.count(),1)
         payload=self.played.at(0)
         self.assertEqual(payload[:2],[collection,'default'])
@@ -66,7 +74,14 @@ class LibraryHorizontalCatalogTests(unittest.TestCase):
         shelf=self.window._shelves[0]
         self.assertEqual(tuple(item.kind for item,_,_ in shelf.tiles),('fm','daily'))
         QTest.mouseClick(shelf.tiles[1][1],Qt.MouseButton.LeftButton)
+        # The daily mix opens its page; the radio (fm) still plays at once.
+        self.assertTrue(self.window.playlist_page_open);self.assertEqual(self.played.count(),0)
+        self.window.playlist_page.request_play_all(shelf.tiles[1][1].geometry())
         self.assertEqual(self.played.at(0)[:2],[self.catalog[1],'default'])
+        self.window.finish_open_transition();self.window.close_playlist_page()
+        QTest.mouseClick(shelf.tiles[0][1],Qt.MouseButton.LeftButton)
+        self.assertEqual(self.played.count(),2)
+        self.assertEqual(self.played.at(1)[:2],[self.catalog[0],'default'])
         self.assertEqual(self.browsed.count(),0)
 
     def test_expand_all_only_builds_three_collection_shelves_and_emits_saved_preference(self):

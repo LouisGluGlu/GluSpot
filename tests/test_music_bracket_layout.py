@@ -16,7 +16,6 @@ class _BracketOwner(QWidget):
         self._music_windowed_preference = False
         self.music_intro_cleanup_enabled = False
         self.enable_dual_line_lyrics = True
-        self.music_surface_reading_strategy = "gold"
         self.media_track_id = "attached-brackets"
         self.media_is_playing = True
         self.media_position_seconds = 1.0
@@ -96,7 +95,6 @@ class MusicBracketLayoutTests(unittest.TestCase):
         self.assertAlmostEqual(bracket_top, last.y() + last.height())
 
     def test_unread_bracket_is_painted_immediately_below_its_sentence_block(self):
-        self.owner.music_surface_reading_strategy = "low_perception"
         self.render(960, 540, 100.0)
         captured = {}
         original = self.window._paint_parenthetical_highlight
@@ -156,7 +154,6 @@ class MusicBracketLayoutTests(unittest.TestCase):
         owner.timed_lyric_units = [(), (), (), ()]
         owner.timed_lyric_timing_kinds = ["line"] * 4
         owner.enable_dual_line_lyrics = True
-        owner.music_surface_reading_strategy = "gold"
 
     def test_short_parenthetical_reads_across_main_to_next_quarter_then_blurs(self):
         self._short_parenthetical_fixture(self.owner)

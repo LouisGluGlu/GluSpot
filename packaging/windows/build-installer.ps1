@@ -12,6 +12,8 @@ $taskPython = Join-Path $taskRoot '.venv\Scripts\python.exe'
 $taskBranding = Get-Content -LiteralPath (Join-Path $taskRoot 'local\branding.py') -Raw -Encoding UTF8
 if ($taskBranding -notmatch 'APP_VERSION = "([0-9.]+)"') { throw 'Cannot read GluSpot version.' }
 $taskVersion = $Matches[1]
+if ($taskBranding -notmatch 'APP_FILE_VERSION = "([0-9.]+)"') { throw 'Cannot read GluSpot file version.' }
+$taskFileVersion = $Matches[1]
 if (-not $PayloadDirectory) {
     $taskPayloadName = "GluSpot-$taskVersion"
     if ($LegacyWindows7) { $taskPayloadName += '-Win7-x64' }
@@ -59,7 +61,7 @@ if ($ReuseAssets) {
     & $taskPython (Join-Path $PSScriptRoot 'prepare-installer-assets.py') $taskAssets --brand-only
     if ($LASTEXITCODE -ne 0) { throw 'Installer artwork preparation failed.' }
 }
-$taskDefines = @("/DAppVersion=$taskVersion", "/DPayloadDir=$taskPayload", "/DArtifactDir=$(Join-Path $taskRoot 'release')", "/DInstallerAssets=$taskAssets")
+$taskDefines = @("/DAppVersion=$taskVersion", "/DAppFileVersion=$taskFileVersion", "/DPayloadDir=$taskPayload", "/DArtifactDir=$(Join-Path $taskRoot 'release')", "/DInstallerAssets=$taskAssets")
 if ($LegacyWindows7) { $taskDefines += @('/DPayloadMinVersion=6.1sp1', '/DInstallerSuffix=-Win7', '/DLegacyWindows7=1') }
 & $CompilerPath @taskDefines (Join-Path $PSScriptRoot 'gluspot-installer.iss')
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed ($LASTEXITCODE)." }

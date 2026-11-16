@@ -68,7 +68,7 @@ class ProtectedCredentialStore:
     """Only a dedicated encrypted file is written; no settings or plaintext fallback."""
     _magic = b"GLUSPOT-ACCOUNT-DPAPI-1\n"
     _max_bytes = 2 * 1024 * 1024
-    _sources = frozenset(("netease", "qq", "kugou", "qishui"))
+    _sources = frozenset(("netease", "qq", "kugou", "qishui", "apple_music"))
 
     def __init__(self, root: Path | str | None = None, protector: CredentialProtector | None = None):
         if root is None:

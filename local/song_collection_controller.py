@@ -11,6 +11,7 @@ from PySide6.QtGui import QImage
 from api.online_music import AccountSnapshot, CatalogPage, OnlineMusicError, OnlinePlaylist, OnlineSong
 from api.online_music_artwork import fetch_online_thumbnail
 from local.music_tasks import MusicTasks
+from local.spring_motion import song_already_in_playlist
 
 
 _CURRENT_AUTHORITY = object()
@@ -67,6 +68,8 @@ class SongCollectionController(QObject):
         self._state = SongCollectionState()
         self._tokens = {}
         self._playlist_offset = 0
+        self._contained_playlist_ids: set[str] = set()
+        self._pending_add_id = ""
         self._art_tasks = art_tasks
         self._artwork_lookup = artwork_lookup
         self._artwork = OrderedDict()
@@ -129,6 +132,8 @@ class SongCollectionController(QObject):
         self._selection = (song.source_id, song.song_id) if song else None
         self._observed_account = account_key
         self._playlist_offset = 0
+        self._contained_playlist_ids = set()
+        self._pending_add_id = ""
         self._art_queue.clear()
         self._art_pending.clear()
         self._art_attempts.clear()
@@ -228,7 +233,8 @@ class SongCollectionController(QObject):
         if self.tasks.submit(token, action):
             return True
         self._tokens.pop(kind, None)
-        pending = bool(self._tokens.get("status") or self._tokens.get("favorite") or self._tokens.get("add"))
+        pending = bool(self._tokens.get("status") or self._tokens.get("favorite")
+                       or self._tokens.get("add") or self._tokens.get("create"))
         self._set(replace(self._state, busy=pending,
                           playlists_pending=bool(self._tokens.get("playlists")),
                           message="服务繁忙，请稍后重试"))
@@ -262,13 +268,34 @@ class SongCollectionController(QObject):
     def add_to_playlist(self, playlist_id: str, expected_track_id: str, *, expected_authority=_CURRENT_AUTHORITY):
         if not self._ready(expected_track_id, expected_authority) or self._state.busy:
             return False
-        if not any(playlist.playlist_id == playlist_id for playlist in self._state.playlists):
+        playlist = next((item for item in self._state.playlists if item.playlist_id == playlist_id), None)
+        if playlist is None:
             self._set(replace(self._state, message="请选择列表中自己的歌单"))
             return False
+        if song_already_in_playlist(playlist_id, contains_track=playlist.contains_track,
+                                    remembered=self._contained_playlist_ids):
+            self._set(replace(self._state, message="已在歌单"))
+            return False
         song, user_id = self._song, self._state.user_id
+        self._pending_add_id = playlist_id
         self._set(replace(self._state, busy=True, message="正在添加到歌单…"))
         return self._submit("add", self._safe_action(lambda: self.service.add_song_to_playlist(
             song.source_id, song.song_id, playlist_id, expected_user_id=user_id)))
+
+    def create_playlist(self, title: str, expected_track_id: str, *, expected_authority=_CURRENT_AUTHORITY):
+        if not self._ready(expected_track_id, expected_authority) or self._state.busy:
+            return False
+        if not isinstance(title, str) or not title.strip():
+            self._set(replace(self._state, message="请输入歌单名称"))
+            return False
+        creator = getattr(self.service, "create_playlist", None)
+        if not callable(creator):
+            self._set(replace(self._state, message="此来源暂不支持新建歌单"))
+            return False
+        song, user_id, name = self._song, self._state.user_id, title.strip()
+        self._set(replace(self._state, busy=True, message="正在新建歌单…"))
+        return self._submit("create", self._safe_action(lambda: creator(
+            song.source_id, name, expected_user_id=user_id)))
 
     @staticmethod
     def _art_identity(playlist):
@@ -381,9 +408,12 @@ class SongCollectionController(QObject):
             return
         self._tokens.pop(kind, None)
         state = self._state
-        busy = bool(self._tokens.get("status") or self._tokens.get("favorite") or self._tokens.get("add"))
+        busy = bool(self._tokens.get("status") or self._tokens.get("favorite")
+                    or self._tokens.get("add") or self._tokens.get("create"))
         state = replace(state, busy=busy, playlists_pending=bool(self._tokens.get("playlists")))
         if error:
+            if kind == "add":
+                self._pending_add_id = ""
             self._set(replace(state, message=self._ERRORS.get(error, "操作暂未完成，请稍后重试"),
                               liked=None if kind == "favorite" else state.liked))
             return
@@ -423,6 +453,10 @@ class SongCollectionController(QObject):
             seen = {playlist.playlist_id for playlist in playlists}
             for playlist in page.items:
                 if isinstance(playlist, OnlinePlaylist) and playlist.source_id == state.source_id and playlist.playlist_id not in seen:
+                    if playlist.playlist_id in self._contained_playlist_ids and not playlist.contains_track:
+                        playlist = replace(playlist, contains_track=True)
+                    if playlist.contains_track:
+                        self._contained_playlist_ids.add(playlist.playlist_id)
                     playlists.append(playlist)
                     seen.add(playlist.playlist_id)
             self._playlist_offset = page.next_offset
@@ -430,7 +464,22 @@ class SongCollectionController(QObject):
                               playlist_has_more=page.has_more,
                               message="" if playlists else "尚无可添加的自建歌单"))
         elif kind == "add":
-            self._set(replace(state, message="已添加到歌单"))
+            added = self._pending_add_id
+            self._pending_add_id = ""
+            if added:
+                self._contained_playlist_ids.add(added)
+            playlists = tuple(replace(item, contains_track=True) if item.playlist_id == added else item
+                              for item in state.playlists)
+            self._set(replace(state, playlists=playlists, message="已添加到歌单"))
+        elif kind == "create":
+            if not isinstance(result, OnlinePlaylist) or result.source_id != state.source_id or not result.playlist_id:
+                self._set(replace(state, message="新建歌单未确认，请稍后重试"))
+                return
+            playlists = list(state.playlists)
+            if all(item.playlist_id != result.playlist_id for item in playlists):
+                playlists.insert(0, replace(result, contains_track=False))
+            self._set(replace(state, playlists=tuple(playlists), playlists_loaded=True,
+                              message=f"已新建「{result.title}」"))
 
     def close(self):
         self._closed = True

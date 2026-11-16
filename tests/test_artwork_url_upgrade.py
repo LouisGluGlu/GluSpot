@@ -40,6 +40,11 @@ class ArtworkUrlUpgradeTests(unittest.TestCase):
         original = "https://p1.music.126.net/object/123.jpg?param=80y80"
         self.assertEqual(normalize_artwork_url(original, "invalid"), original)
 
+    def test_imageview_thumbnail_is_upgraded_without_carrying_small_transform(self):
+        original = "https://p2.music.126.net/object/123.jpg?imageView=&thumbnail=32y32&type=webp&quality=80"
+        self.assertEqual(normalize_artwork_url(original), "https://p2.music.126.net/object/123.jpg?param=2560y2560")
+        self.assertEqual(normalize_artwork_url(original + "&token=signed"), original + "&token=signed")
+
 
 if __name__ == "__main__":
     unittest.main()

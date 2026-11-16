@@ -21,7 +21,6 @@ class MusicRippleDirtyRegionTests(unittest.TestCase):
 
     def setUp(self):
         self.owner = SyntheticOwner("unit-slow")
-        self.owner.music_surface_reading_strategy = "gold"
         self.window = MusicSurfaceWindow(self.owner)
         self.window.resize(960, 540)
         self.window._fullscreen = True
@@ -57,8 +56,8 @@ class MusicRippleDirtyRegionTests(unittest.TestCase):
             self.window._paint_transport_spatial_light(painter, QRectF(self.window.rect()), at)
         return image
 
-    def test_gold_and_plain_annuli_cover_every_changed_ripple_pixel_at_1x_and_2x(self):
-        for command, duration in (("obo_reveal", 3.0), ("next", 1.72)):
+    def test_transport_and_artwork_annuli_cover_every_changed_ripple_pixel_at_1x_and_2x(self):
+        for command, duration in (("art_loading", 1.72), ("next", 1.72)):
             for dpr in (1, 2):
                 for elapsed in (0.25, duration * 0.55, duration * 0.80):
                     with self.subTest(command=command, dpr=dpr, elapsed=elapsed):
@@ -90,10 +89,10 @@ class MusicRippleDirtyRegionTests(unittest.TestCase):
                         self.assertIsNone(missing.getbbox(), f"light leaked outside dirty region: {missing.getbbox()}")
 
     def test_large_ring_skips_transparent_center_and_clears_at_end(self):
-        self._activate("obo_reveal", 20.0, 3.0)
+        self._activate("next", 20.0, 3.0)
         old_at, new_at = 21.5, 21.508
         frame = self.window._transport_feedback_frame(old_at - 20.0, 3.0)
-        ring = self.window._transport_light_ink_region("obo_reveal", frame[1], old_at)
+        ring = self.window._transport_light_ink_region("next", frame[1], old_at)
         origin = self.window._transport_light_origin(old_at)
         radius = self.window._transport_light_max_radius(origin, old_at) * frame[1]
         self.assertFalse(ring.contains(QPoint(round(origin.x()), round(origin.y()))))
@@ -106,11 +105,11 @@ class MusicRippleDirtyRegionTests(unittest.TestCase):
         self.assertFalse(dirty.contains(QPoint(round(origin.x()), round(origin.y()))))
         self.assertLess(sum(rect.width() * rect.height() for rect in dirty),
                         self.window.width() * self.window.height())
-        old_region = QRegion(self.window._transport_light_ink_regions["obo_reveal"])
+        old_region = QRegion(self.window._transport_light_ink_regions["next"])
         with patch.object(self.window, "update") as update:
             self.window._update_transport_feedback_regions(23.01)
-        self.assertNotIn("obo_reveal", self.window._transport_feedback)
-        self.assertNotIn("obo_reveal", self.window._transport_light_ink_regions)
+        self.assertNotIn("next", self.window._transport_feedback)
+        self.assertNotIn("next", self.window._transport_light_ink_regions)
         old_pixel = next(iter(old_region)).center()
         self.assertTrue(any(
             isinstance(call.args[0], QRegion) and call.args[0].contains(old_pixel)

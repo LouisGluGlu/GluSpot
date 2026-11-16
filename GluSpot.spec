@@ -5,7 +5,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 
 
 ROOT = Path(SPECPATH)
-APP_VERSION = "6.418"
+APP_VERSION = "6.50"
 AIRPLAY_EXE = ROOT / "build" / "native-airplay" / "GluSpotAirPlay.exe"
 AIRPLAY_LICENSES = AIRPLAY_EXE.parent / "licenses"
 DISCOVERY_LICENSES = ROOT / "build" / "audio-licenses"
@@ -63,7 +63,11 @@ a = Analysis(
     [str(ROOT / "local" / "main.py")],
     pathex=[str(ROOT)],
     # UIAutomation loads its bundled DLLs through ctypes from its bin directory.
-    binaries=[(str(AIRPLAY_EXE), "native")] + collect_dynamic_libs("uiautomation"),
+    binaries=[(str(AIRPLAY_EXE), "native")] + collect_dynamic_libs("uiautomation") + [
+    (str(path), ".")
+    for path in (ROOT / "native" / "apple_music_companion" / "bin" / "Release" / "net48").glob("*")
+    if path.is_file() and path.suffix.lower() in {".exe", ".dll", ".js"}
+],
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[str(ROOT / "packaging" / "windows" / "hooks")],

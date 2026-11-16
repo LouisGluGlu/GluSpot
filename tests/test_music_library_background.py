@@ -38,9 +38,10 @@ class MusicLibraryBackgroundTests(unittest.TestCase):
         self.pixel_service.start()
         self.addCleanup(self.pixel_service.stop)
         self.window = MusicLibraryWindow()
+        self.window.set_backdrop_variant("classic")
         self.window.resize(760, 720)
         self.window.set_account(AccountSnapshot("netease", True, "background-account", "背景账号"))
-        self.settings = {"v2_music_flow_intensity": .74, "v2_animation_fps": 60}
+        self.settings = {"v2_music_flow_intensity": .74, "v2_animation_fps": 60, "v2_theme_mode": "dark"}
         self.work = []
         self.window.set_background_context(self.settings.get, lambda name, prepare: self.work.append(prepare))
         with patch("local.music_library_window.time.monotonic", return_value=100.):
@@ -194,9 +195,10 @@ class MusicLibraryPixelWorkerTests(unittest.TestCase):
         from tests.test_liquid_glass_tasks import ControlledTasks
         self.store = GlassPixelTasks(tasks=ControlledTasks())
         self.window = MusicLibraryWindow()
+        self.window.set_backdrop_variant("classic")  # Animated worker handoff contract.
         self.window.show()
         self.window._background_timer.stop()
-        self.window.set_background_context({'v2_music_flow_intensity': .74}.get)
+        self.window.set_background_context({'v2_music_flow_intensity': .74, 'v2_theme_mode': 'dark'}.get)
 
     def tearDown(self):
         self.store.close()

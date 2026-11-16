@@ -102,6 +102,9 @@ class FinderMaterialRefreshTests(unittest.TestCase):
     def test_expanded_shell_has_no_stretched_texture_ridge_or_inferred_border(self):
         visual = self.visual
         visual.expanded = True
+        # Legacy multi-item frame; the current runtime retires these extras.
+        visual._runtime_extras_retired = False
+        visual._finder_bar_active = lambda: False
         visual._group_frame_should_snap_to_target = lambda *_args: True
         texture = QImage(128, 24, QImage.Format.Format_ARGB32)
         with QPainter(texture) as painter:
@@ -134,7 +137,10 @@ class FinderMaterialRefreshTests(unittest.TestCase):
         with patch.object(visual, "_paint_compact_lyric_viewport", side_effect=lambda _p, rect: lyrics.append(rect)), \
                 QPainter(image) as painter:
             visual._paint_finder_bar_music(painter, surface)
-        self.assertEqual(image.pixelColor(3, 12), visual._finder_bar_backdrop())
+        # Within one level: the invisible hit floor (alpha 1) sits beneath.
+        painted, backdrop = image.pixelColor(3, 12), visual._finder_bar_backdrop()
+        for a, b in ((painted.red(), backdrop.red()), (painted.green(), backdrop.green()), (painted.blue(), backdrop.blue())):
+            self.assertLessEqual(abs(a - b), 1)
         self.assertGreaterEqual(lyrics[0].left(), visual.music_cover_rect.right() + 24.)
         self.assertAlmostEqual(visual._finder_bar_fade_opacity(surface, lyrics[0].left()), 222. / 255.)
         self.assertTrue(surface.contains(visual.music_cover_rect))

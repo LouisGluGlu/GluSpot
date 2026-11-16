@@ -58,7 +58,8 @@ class SurfaceEdgeAndFrameTests(unittest.TestCase):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(Qt.GlobalColor.white)
-            painter.drawRoundedRect(QRectF(self.window.rect()), radius, radius)
+            # The window's corners are continuous-curvature (squircle) corners.
+            painter.drawPath(self.window._smooth_corner_path(QRectF(self.window.rect()), radius))
         return image, expected
 
     def test_corner_coverage_matches_antialiased_path_at_each_dpr(self):
@@ -67,7 +68,7 @@ class SurfaceEdgeAndFrameTests(unittest.TestCase):
             for dpr in (1.0, 1.25, 1.5, 1.75, 2.0, 2.625):
                 with self.subTest(size=size, dpr=dpr):
                     image, expected = self._edge_images(dpr)
-                    side = math.ceil(self.window._surface_corner_radius()*dpr)+3
+                    side = math.ceil(self.window._surface_corner_radius()*1.8*dpr)+3
                     points = {(x, y) for cy in (0, image.height()-side)
                               for cx in (0, image.width()-side)
                               for y in range(cy, cy+side) for x in range(cx, cx+side)}

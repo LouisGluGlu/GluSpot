@@ -159,10 +159,16 @@ def online_artwork_thumbnail_bytes(content: bytes, side: int = 320) -> bytes:
         return content
     image = image.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
-    data = QByteArray()
-    buffer = QBuffer(data)
+    # QBuffer(QByteArray) aliases an implicitly shared buffer. Saving into that
+    # alias is the flaky Windows 0xC0000005 in the queue-artwork tests. The
+    # buffer owns its bytes; copy them only after save has finished.
+    buffer = QBuffer()
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-    return bytes(data) if image.save(buffer, "PNG") else b""
+    if not image.save(buffer, "PNG"):
+        buffer.close()
+        return b""
+    buffer.close()
+    return bytes(buffer.data())
 
 
 def fetch_online_thumbnail(url: str) -> QImage:

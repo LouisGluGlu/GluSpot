@@ -90,8 +90,6 @@ class MusicCacheClearTests(unittest.TestCase):
         provider._last_refresh_at = 100.0
         provider._source_app_foreground_at = 0.0
         provider.netease_position = provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_music_player_mode": "netease", "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False, "v2_enable_dual_line_lyrics": False,
@@ -129,7 +127,7 @@ class MusicCacheClearTests(unittest.TestCase):
         provider._current_art_lookup_sources["track"] = "netease"
         provider._current_art_lookup_failed_until["track"] = 1000
         provider._current_art_lookup_generations["track"] = (object(), 1000)
-        provider._netease_art_source_failed_until = 1000
+        provider._current_art_lookup_attempts = {"track": 2}
         resolver = provider._musicbrainz_artwork_resolver
         resolver._cache["old"] = (1000, "url")
         resolver._failed_until = 1000
@@ -153,7 +151,7 @@ class MusicCacheClearTests(unittest.TestCase):
         self.assertEqual(provider._current_art_url_by_track_id, {})
         self.assertEqual(provider._current_art_lookup_generations, {})
         self.assertEqual(provider._queue_art_failed_until, {})
-        self.assertEqual(provider._netease_art_source_failed_until, 0)
+        self.assertEqual(provider._current_art_lookup_attempts, {})
         self.assertEqual(resolver._cache, {})
         self.assertEqual(resolver._failed_until, 0)
         self.assertEqual(provider._last_refresh_at, 0)
@@ -210,7 +208,7 @@ class MusicCacheClearTests(unittest.TestCase):
                         raise TimeoutError("test download release missing")
                 return cover
 
-        with patch("api.providers.threading.Thread", ManualThread), patch(
+        with patch("api.providers.threading.Thread", ManualThread), patch("api.providers.threading.Timer", ManualTimer), patch(
             "api.providers.urlopen", side_effect=[Response(True), Response(False)]
         ):
             provider._schedule_queue_album_art_prefetch(url)

@@ -29,7 +29,7 @@ class _Surface(QWidget):
     def _personal_dj_reveal_at(self, now):
         return 1.
 
-    def _future_lyric_color(self, rect):
+    def _album_accent_color(self, rect):
         return QColor(90, 160, 200)
 
     def _set_dj_voice_selector_hover(self, value):

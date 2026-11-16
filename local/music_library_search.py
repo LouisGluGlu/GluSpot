@@ -87,11 +87,21 @@ class LibrarySearch(QLineEdit):
         self._phase = max(0., min(1., float(value)))
         self._extent = _ease(self._phase / self.GEOMETRY_END)
         self._ink = _ease((self._phase - self.GEOMETRY_END) / (1. - self.GEOMETRY_END))
+        from local.theme_tokens import hex_rgb
+        from local.ui_theme import active_tokens
+        tokens = active_tokens(self)
+        if tokens.dark and tokens.shade >= 0.999:
+            pairs = ((QPalette.ColorRole.Text, "#f3f4f7"),
+                     (QPalette.ColorRole.PlaceholderText, "#b4bac7"),
+                     (QPalette.ColorRole.HighlightedText, "#ffffff"),
+                     (QPalette.ColorRole.Highlight, "#526680"))
+        else:
+            pairs = ((QPalette.ColorRole.Text, hex_rgb(tokens.text)),
+                     (QPalette.ColorRole.PlaceholderText, hex_rgb(tokens.muted)),
+                     (QPalette.ColorRole.HighlightedText, "#ffffff"),
+                     (QPalette.ColorRole.Highlight, "#0a84ff"))
         palette = self.palette()
-        for role, color in ((QPalette.ColorRole.Text, "#f3f4f7"),
-                            (QPalette.ColorRole.PlaceholderText, "#b4bac7"),
-                            (QPalette.ColorRole.HighlightedText, "#ffffff"),
-                            (QPalette.ColorRole.Highlight, "#526680")):
+        for role, color in pairs:
             ink = QColor(color)
             ink.setAlphaF(self._ink)
             palette.setColor(role, ink)
@@ -159,8 +169,16 @@ class LibraryProgress(QAbstractButton):
         self.setToolTip("收起搜索" if expanded else "歌曲进度")
         track = getattr(self.parentWidget(), "_now_playing", None)
         position, duration = self._times(track)
-        self.setAccessibleDescription(f"{int(position)//60}:{int(position)%60:02} / {int(duration)//60}:{int(duration)%60:02}")
+        if self.progress_available(track):
+            self.setAccessibleDescription(f"{int(position)//60}:{int(position)%60:02} / {int(duration)//60}:{int(duration)%60:02}")
+        else:
+            self.setAccessibleDescription("进度不可用")
         self.update()
+
+    @staticmethod
+    def progress_available(track) -> bool:
+        """A missing external clock must not paint 0:00 or an empty bar."""
+        return str(getattr(track, "position_source", "") or "") != "external-title-only"
 
     @staticmethod
     def _times(track):
@@ -192,7 +210,8 @@ class LibraryProgress(QAbstractButton):
     def paintEvent(self, event):
         track = getattr(self.parentWidget(), "_now_playing", None)
         position, duration = self._times(track)
-        fraction = position / duration if duration else 0.
+        known = self.progress_available(track)
+        fraction = position / duration if known and duration else 0.
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             extent = self.search._extent
@@ -205,15 +224,25 @@ class LibraryProgress(QAbstractButton):
                                   hovered=self.underMouse(), pressed=self.isDown(),
                                   material_level=widget_glass_level(self))
                 painter.setOpacity(1.)
-            pen = QPen(QColor(255, 255, 255, 52), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            painter.drawPath(self._track_path())
-            if fraction > 0.:
-                pen.setColor(QColor("#e9edf5"))
+            if known:
+                from local.ui_theme import active_tokens
+                tokens = active_tokens(self)
+                if tokens.dark and tokens.shade >= 0.999:
+                    track_color, played_color, time_color = QColor(255, 255, 255, 52), QColor("#e9edf5"), QColor("#b4bac7")
+                else:
+                    track_color = QColor(*tokens.muted)
+                    track_color.setAlpha(90)
+                    played_color = QColor(*tokens.text)
+                    time_color = QColor(*tokens.muted)
+                pen = QPen(track_color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
                 painter.setPen(pen)
-                painter.drawPath(self._track_path(fraction))
-            if extent < 1. and self.width() >= 120:
-                ink = QColor("#b4bac7")
+                painter.drawPath(self._track_path())
+                if fraction > 0.:
+                    pen.setColor(played_color)
+                    painter.setPen(pen)
+                    painter.drawPath(self._track_path(fraction))
+            if known and extent < 1. and self.width() >= 120:
+                ink = time_color if known else QColor("#b4bac7")
                 ink.setAlphaF(1 - extent)
                 painter.setPen(ink)
                 font = self.font()
@@ -224,6 +253,9 @@ class LibraryProgress(QAbstractButton):
                 painter.drawText(rect, Qt.AlignmentFlag.AlignLeft, clock(position))
                 painter.drawText(rect, Qt.AlignmentFlag.AlignRight, clock(duration))
             if self.hasFocus() and self.window().testAttribute(Qt.WidgetAttribute.WA_KeyboardFocusChange):
+                from local.ui_theme import active_tokens
+                focus = active_tokens(self)
+                ring = QColor(233, 237, 245, 110) if focus.dark and focus.shade >= 0.999 else QColor(*focus.text, 120)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.setPen(QPen(QColor(233, 237, 245, 110), 1))
+                painter.setPen(QPen(ring, 1))
                 painter.drawRoundedRect(QRectF(self.rect()).adjusted(2, 2, -2, -2), 20, 20)

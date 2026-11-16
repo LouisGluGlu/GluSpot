@@ -22,7 +22,6 @@ class _Owner(QWidget):
         self.album_art.fill(self.album_color)
         self.media_is_playing = True
         self.media_position_seconds = 1.0
-        self.music_surface_reading_strategy = "gold"
         self.music_intro_cleanup_enabled = False
         self.enable_dual_line_lyrics = False
         self._music_windowed_preference = False

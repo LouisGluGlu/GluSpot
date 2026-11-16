@@ -458,13 +458,23 @@ class _OutputRow(QAbstractButton):
             face = QColor(self.ink)
             face.setAlpha(round(10 * self.progress) + (9 if self.isDown() else 5 if self.underMouse() else 0))
         backdrop, sample = widget_glass_backdrop(self, bounds) if refractive else (None, None)
-        paint_liquid_glass(painter, bounds, radius=18, base_color=face,
-                          material_level=widget_glass_level(self),
-                          face_opacity=1. if selected else min(1., .8 * widget_glass_level(self) / 50.),
-                          light=light, active=self.progress > .5,
-                          refractive=refractive, backdrop=backdrop, backdrop_rect=sample, cache_token=id(self),
-                          hovered=self.underMouse(), pressed=self.isDown(),
-                          opacity=1.0 if self.isEnabled() else .48)
+        if self.property("sharedPanelGlass") and not selected:
+            # The panel is already liquid glass. A row is only a soft state
+            # fill on it: nothing at rest, a faint wash on hover or press.
+            wash = QColor(self.ink)
+            wash.setAlpha(26 if self.isDown() else 16 if self.underMouse() else 0)
+            if wash.alpha():
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(wash)
+                painter.drawRoundedRect(bounds, 18, 18)
+        else:
+            paint_liquid_glass(painter, bounds, radius=18, base_color=face,
+                               material_level=widget_glass_level(self),
+                               face_opacity=1. if selected else min(1., .8 * widget_glass_level(self) / 50.),
+                               light=light, active=self.progress > .5,
+                               refractive=refractive, backdrop=backdrop, backdrop_rect=sample, cache_token=id(self),
+                               hovered=self.underMouse(), pressed=self.isDown(),
+                               opacity=1.0 if self.isEnabled() else .48)
         if self.hasFocus():
             painter.setPen(QPen(self.accent, 1.3))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -535,7 +545,7 @@ class _OutputRow(QAbstractButton):
         elif self.state == "available":
             plus = QRectF(self.width() - 34, (self.height() - 20) / 2, 20, 20)
             self._paint_action_feedback(painter, self.join_button, plus.adjusted(-8, -8, 8, 8))
-            color = QColor(0, 157, 205) if self.isEnabled() else QColor(self.muted)
+            color = QColor(ink) if self.isEnabled() else QColor(self.muted)  # same ink as the glass text
             painter.setPen(QPen(color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(plus)
@@ -580,6 +590,7 @@ class _OutputRow(QAbstractButton):
         painter.restore()
 
 class AudioOutputPanel(GlassCaptureMixin, QWidget):
+    PANEL_RADIUS = 30.0
     """Cached frosted popup that queues actions through published route state."""
 
     dismissed = Signal()
@@ -891,7 +902,7 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
             background = QColor(*(round(a * .22 + b * .78) for a, b in zip(backdrop.getRgb()[:3], target.getRgb()[:3])))
         factory = getattr(parent, "_surface_font", None)
         font = factory(13, QFont.Weight.Normal) if callable(factory) else self._label_font
-        scene_ink = getattr(parent, "_scene_control_ink", None)
+        scene_ink = getattr(parent, "_panel_glass_ink", None) or getattr(parent, "_scene_control_ink", None)
         shared_ink = scene_ink() if self._song_page and callable(scene_ink) else None
         key = (background.rgba(), light, font.toString(), shared_ink.rgba() if shared_ink is not None else None, self._glass_level)
         if key == self._style_key:
@@ -1127,6 +1138,14 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
             pose = self.render_pose
             shape = self._pose_path()
             painter.setClipPath(shape)
+            panel_glass = getattr(self.parentWidget(), "_paint_panel_glass", None)
+            if self._song_page and callable(panel_glass):
+                # The window's own liquid glass: blurred, lensed scene and one
+                # theme veil, clipped to the unfolding shape.
+                panel_glass(painter, self, QRectF(self.rect()), self.PANEL_RADIUS)
+                if self._scroll_opacity.opacity() < 1:
+                    self._paint_unfolding_rows(painter, pose)
+                return
             if not self._song_page or self._material.isNull():
                 fallback = QColor(self._background)
                 if self._song_page:

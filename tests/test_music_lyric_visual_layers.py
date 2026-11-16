@@ -20,7 +20,6 @@ class _LayerOwner(QWidget):
         self._music_windowed_preference = False
         self.music_intro_cleanup_enabled = False
         self.enable_dual_line_lyrics = True
-        self.music_surface_reading_strategy = "gold"
         self.track_title = "Visual layers"
         self.artist = "Test singer"
         self.media_track_id = "visual-layers"
@@ -71,7 +70,6 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.owner.timed_lyric_timing_kinds = ["line"] * 4
 
     def _reading_lane_lyrics(self):
-        self.owner.music_surface_reading_strategy = "low_perception"
         self.owner.media_position_seconds = 25.0
         self.owner.timed_lyrics = [
             (0.0, "Past line\n翻译：过去"),
@@ -253,6 +251,22 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         # unread until the primary lyric reaches its final fifth.
         self.assertTrue(all(progress == 0.0 for _y, _weight, progress in captured))
 
+    def test_repeat_count_never_enters_above_its_clear_annotation_lane(self):
+        self._four_rows("Don't do it to me (x3)")
+        self.owner.media_position_seconds = 4.0
+        captured = []
+
+        def capture(_painter, row, text, _font, _layout, _progress, **_kwargs):
+            if text == "x3":
+                captured.append(row.top())
+
+        with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture):
+            for instant in (100., 100.02, 100.10, 100.30, 100.60):
+                with patch("local.music_surface_window.time.monotonic", return_value=instant):
+                    self._render()
+        self.assertGreaterEqual(len(captured), 3)
+        self.assertGreaterEqual(min(captured), captured[-1] - .1)
+
     def test_bracket_translation_sits_below_bracket_and_reads_together(self):
         self._four_rows("Shine (echo) on me\n翻译：照耀（回声）我")
         self.owner.media_position_seconds = 4.0
@@ -429,7 +443,6 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertAlmostEqual(painted["照耀我"][1], expected, places=4)
 
     def test_low_perception_line_timing_reads_estimated_primary_and_translation(self):
-        self.owner.music_surface_reading_strategy = "low_perception"
         self._four_rows("One line to sing\n一句歌词")
         self.owner.media_position_seconds = 1.0
         lifted = {}
@@ -456,7 +469,6 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertLess(lifted["一句歌词"][0], 1.0)
 
     def test_low_perception_real_unit_timing_reads_primary_and_translation(self):
-        self.owner.music_surface_reading_strategy = "low_perception"
         self._four_rows("Hello world\n你好世界")
         self.owner.timed_lyric_units[0] = (
             SimpleNamespace(start_seconds=0.0, end_seconds=0.8, text="Hello "),

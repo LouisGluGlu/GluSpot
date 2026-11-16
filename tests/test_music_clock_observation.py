@@ -25,8 +25,6 @@ class MusicClockObservationTests(unittest.TestCase):
         session = FakeSession("Generic.Music", "Song", "Artist", True, 10.0, 180.0)
         session.timeline.last_updated_time = datetime(2026, 9, 30, tzinfo=timezone.utc)
         provider.lyrics_store = FakeLyricsStore()
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider._music_player_adapter_for = lambda *_args: "system"
         provider._is_source_app_foreground = lambda *_args: False
         provider._thumbnail_for_track = lambda *_args: asyncio.sleep(0, result=b"")

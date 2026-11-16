@@ -925,7 +925,9 @@ class AudioOutputSurfaceTests(unittest.TestCase):
         with patch.object(self.window, "_fullscreen_geometry", return_value=target):
             self.window.toggle_presentation_mode()
         self.assertIsNotNone(self.window._pending_fullscreen)
-        point = self.window._transition_control_rects()["library"].center()
+        # The morph draws inside a fixed canvas; the button sits on the moving surface.
+        point = (self.window._transition_control_rects()["library"].center()
+                 + self.window._mode_surface_rect().topLeft())
         event = SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton, position=lambda: point,
             globalPosition=lambda: QPointF(self.window.mapToGlobal(point.toPoint())), accept=lambda: None)
         self.window.mousePressEvent(event)

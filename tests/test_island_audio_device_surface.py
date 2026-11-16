@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
 from api.providers import EmptyIslandDataProvider, empty_visual_data
 from local.island_audio_device_motion import IslandAudioDeviceMotion, IslandDevicePayload
-from local.island_stack_visual import IslandKind, IslandStackVisual, Message, SpringRect, StackVisual
+from local.island_stack_visual import IslandKind, IslandStackVisual, SpringRect, StackVisual
 
 
 PAYLOAD = IslandDevicePayload("buds", "我的 AirPods", "airpods", 70)
@@ -222,7 +222,7 @@ class IslandAudioDeviceSurfaceTests(unittest.TestCase):
         self._notice()
         # Existing live lyrics read the cached route for display compensation.
         # Isolate the new device/background path from that established reader.
-        with patch.object(self.visual, "_paint_compact_lyric_viewport"), patch.object(self.visual, "_sample_background_luma", side_effect=AssertionError("Desktop sampling forbidden")), patch.object(self.visual.data_provider, "get_audio_route_snapshot", side_effect=AssertionError("Provider reads forbidden"), create=True):
+        with patch.object(self.visual, "_paint_compact_lyric_viewport"), patch.object(self.visual.data_provider, "get_audio_route_snapshot", side_effect=AssertionError("Provider reads forbidden"), create=True):
             self._image()
             self.visual._audio_device_ink(QRectF(30, 20, 30, 20))
 
@@ -404,29 +404,6 @@ class IslandAudioDeviceSurfaceTests(unittest.TestCase):
             self.visual.on_audio_device_event(self._route(), device)
         self.assertEqual(self.visual._audio_device_motion.pose.payload, PAYLOAD)
         self.assertEqual(self.visual._audio_device_event_serial, 1)
-
-    def test_nonmusic_main_message_retains_identity_size_and_paint_priority(self):
-        self._notice()
-        self.visual.messages = [Message("Chat", "Sender", "An actual message", QColor("white"), QColor("gray"), serial=1)]
-        self.visual._music_enabled_for_stack = lambda: False
-        self.visual._plugin_enabled = lambda: False
-        self.visual._empty_island_display_mode = lambda: "bar"
-        self.assertEqual(self.visual._main_kind(), IslandKind.MESSAGE)
-        base_size = self.visual._base_main_size_for_kind(IslandKind.MESSAGE, 300.0)
-        self.assertEqual(self.visual._main_size_for_kind(IslandKind.MESSAGE, 300.0), base_size)
-        rect = QRectF(12.0, 10.0, 300.0, 50.0)
-        message = self.visual.messages[0]
-        visual = StackVisual("actual-message", IslandKind.MESSAGE, rect, False, message, 10)
-        motion = SpringRect(rect)
-        motion.opacity = 1.0
-        self.visual.motions = {visual.key: motion}
-        image = QImage(self.visual.size(), QImage.Format.Format_ARGB32_Premultiplied)
-        image.fill(Qt.GlobalColor.transparent)
-        message_paint, notice_paint = Mock(), Mock()
-        with patch.object(self.visual, "_build_visuals", return_value=[visual]), patch.object(self.visual, "_paint_stage"), patch.object(self.visual, "_paint_taskbar_drop_hint"), patch.object(self.visual, "_paint_message", message_paint), patch.object(self.visual, "_paint_audio_device_idle_island", notice_paint), patch.object(self.visual, "_update_interaction_mask"), patch("local.island_stack_visual.time.monotonic", return_value=self.now):
-            self.visual.render(image)
-        message_paint.assert_called_once()
-        notice_paint.assert_not_called()
 
     def test_empty_text_and_time_use_inline_name_without_live_lyrics(self):
         self._notice()

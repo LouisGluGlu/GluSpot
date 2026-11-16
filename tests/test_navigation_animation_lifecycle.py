@@ -127,6 +127,8 @@ class LibraryNavigationClockTests(unittest.TestCase):
 
     def setUp(self):
         self.window = MusicLibraryWindow()
+        self.window.set_library_variant("classic")
+        self.window.set_backdrop_variant("classic")
         self.window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
         self.window.set_account(AccountSnapshot("netease", True, "fixture", "测试账号"))
         self.window.set_background_context({"v2_music_flow_intensity": .74, "v2_animation_fps": 60}.get)

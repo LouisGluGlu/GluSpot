@@ -97,7 +97,8 @@ class LiquidGlassWidgetTests(unittest.TestCase):
         self.assertAlmostEqual(face.red(), 162, delta=1)
         self.assertAlmostEqual(face.green(), 41, delta=1)
         self.assertAlmostEqual(face.blue(), 79, delta=1)
-        self.assertAlmostEqual(face.alpha(), 255 * GLASS_FACE_OPACITY, delta=1)
+        from local.theme_tokens import glass_face_opacity
+        self.assertAlmostEqual(face.alpha(), 255 * glass_face_opacity(50, light=False), delta=1)
         button.setStyleSheet("QPushButton { border: none; background: transparent; border-radius: 12px; }")
         for color in (QColor("red"), QColor("blue")):
             self.owner._background_cache.fill(color)

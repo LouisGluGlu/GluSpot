@@ -195,3 +195,23 @@ class TopNotchAnchorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FullscreenShortTopTests(TopNotchAnchorTests):
+    """Fullscreen with no visible bar: a thin top bar that opens on hover."""
+
+    def test_fullscreen_top_waits_as_a_thin_bar_and_opens_under_the_pointer(self):
+        visual = self.visual
+        visual._fullscreen_placement_active = True
+        with patch.object(visual, "underMouse", return_value=False):
+            self.assertEqual(visual._main_kind(), IslandKind.THIN_BAR)
+        with patch.object(visual, "underMouse", return_value=True):
+            self.assertNotEqual(visual._main_kind(), IslandKind.THIN_BAR)
+        visual.expanded = True
+        with patch.object(visual, "underMouse", return_value=False):
+            self.assertNotEqual(visual._main_kind(), IslandKind.THIN_BAR)
+        visual.expanded = False
+        visual._fullscreen_placement_active = False
+        with patch.object(visual, "underMouse", return_value=False):
+            self.assertFalse(visual._fullscreen_short_top_active())
+

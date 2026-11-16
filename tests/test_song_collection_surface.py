@@ -236,7 +236,7 @@ class SongCollectionSurfaceTests(unittest.TestCase):
         self.assertNotIn("favorite", self.window._button_rects)
         self.assertFalse(self.window._song_collection_geometry(QRectF(self.window.rect())).isValid())
 
-    def test_chooser_keeps_real_cover_rows_stable_during_busy_and_uses_scene_ink(self):
+    def test_chooser_keeps_real_cover_rows_stable_during_busy_and_uses_panel_glass_ink(self):
         from local.music_song_collection import CollectionGlassButton
         cover = QImage(32, 32, QImage.Format.Format_ARGB32)
         cover.fill(QColor("blue"))
@@ -245,7 +245,8 @@ class SongCollectionSurfaceTests(unittest.TestCase):
         self.collection.state = replace(self.collection.state, playlists=tuple(
             OnlinePlaylist("netease", str(i), f"歌单 {i}", f"https://example.test/{i}.png", 20 + i)
             for i in range(10)), playlists_loaded=True)
-        with patch.object(self.window, "_scene_control_ink", return_value=QColor("#121212")):
+        # The chooser is liquid glass like the window buttons; its text uses their ink.
+        with patch.object(self.window, "_panel_glass_ink", return_value=QColor("#121212")):
             self.activate("playlist_add")
             panel = self.window._song_playlist_panel
             panel.layout().activate()
@@ -261,10 +262,10 @@ class SongCollectionSurfaceTests(unittest.TestCase):
             self.assertIs(panel._row_buttons["0"], first)
             self.assertFalse(first.isEnabled())
         self.collection.request_playlist_artwork.assert_not_called()
-        with patch.object(self.window, "_scene_control_ink", return_value=QColor("#ffffff")):
+        with patch.object(self.window, "_panel_glass_ink", return_value=QColor("#ffffff")):
             self.render()
             self.assertIn("#ffffff", panel.title.styleSheet())
-            self.assertIn("#ffffff", panel.message.styleSheet())
+            self.assertIn("255,255,255", panel.message.styleSheet())
         panel.hide()
         self.assertFalse(panel._pulse.isActive())
 
@@ -323,6 +324,7 @@ class SongCollectionSurfaceTests(unittest.TestCase):
         with patch("local.music_surface_window.paint_music_source_icon") as paint:
             self.window._paint_library_back
             self.window._control_layer_cache.clear()
+            self.window._visible_control_layers.clear()
             self.render()
         self.assertTrue(any(call.args[2] == "login" for call in paint.call_args_list))
         self.assertTrue(self.window.return_to_library())

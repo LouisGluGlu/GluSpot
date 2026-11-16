@@ -25,6 +25,7 @@ class LibraryLoadingRecoveryTests(unittest.TestCase):
         self.service, self.player = Service(), Player()
         self.tasks, self.art_tasks = FakeTasks(), FakeTasks()
         self.window = MusicLibraryWindow()
+        self.window.set_library_variant("classic")  # Aggregate catalog/shelf recovery.
         self.controller = MusicLibraryController(self.settings, self.service, self.player, Island(), Entry(),
             window=self.window, tasks=self.tasks, art_tasks=self.art_tasks)
 

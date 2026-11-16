@@ -30,7 +30,7 @@ class LyricPresentationStore(QObject):
     def __init__(self, owner, *, tasks=None):
         super().__init__(owner)
         self.owner = owner
-        self.tasks = tasks if tasks is not None else MusicTasks(self, worker_count=1)
+        self.tasks = tasks if tasks is not None else MusicTasks(self, worker_count=1, task_timeout_seconds=5.)
         self.tasks.completed.connect(self._completed)
         close_tasks = self.tasks.close
         self.destroyed.connect(lambda *_args: close_tasks())
@@ -40,9 +40,12 @@ class LyricPresentationStore(QObject):
         self.last_valid = None
         self.base = None
         self.active = None
+        self.active_snapshot = None
         self.pending = None
         self.failed = None
+        self.retried = None
         self.generation = 0
+        self.request_serial = 0
         self.closed = False
         self.hits = self.misses = self.discarded = self.submitted = 0
         self.prepare_seconds = 0.
@@ -56,6 +59,7 @@ class LyricPresentationStore(QObject):
             self.generation += 1
             self.pending = None
             self.failed = None
+            self.retried = None
             self.current = None
             if self.previous_compatible() is None:
                 self.last_valid = None
@@ -82,23 +86,34 @@ class LyricPresentationStore(QObject):
         self._start()
         return None
 
-    def previous_compatible(self):
+    def previous_compatible(self, *, translated=None):
         """Retain a valid island image during a settings/timing-only update.
 
         Island playback indexes belong to the owner's raw rows. Never reuse
         old indexed plans if text/timestamps/order changed, even on one song.
+        A surface can retain both companion states; island callers selecting
+        one state must not inherit the other while their worker is pending.
         """
-        result = self.last_valid
-        if result is None:
-            return None
-        source = result.source
         title = str(getattr(self.owner, "track_title", "") or "")
         artist = str(getattr(self.owner, "artist", "") or "")
         identity = str(getattr(self.owner, "media_track_id", "") or "") or f"{title}\x1f{artist}"
-        if ((source.identity, source.title, source.artist) == (identity, title, artist)
-                and source.timed == tuple(getattr(self.owner, "timed_lyrics", ()) or ())
-                and source.lines == tuple(getattr(self.owner, "lyrics", ()) or ())):
-            return result
+        timed = tuple(getattr(self.owner, "timed_lyrics", ()) or ())
+        lines = tuple(getattr(self.owner, "lyrics", ()) or ())
+        candidates = [self.last_valid]
+        if translated is not None:
+            # This cache is bounded to four entries. A previous matching
+            # selection can survive a source revision without reshaping or
+            # briefly showing a different companion state on the island.
+            candidates.extend(entry[0] for entry in reversed(self.cache.values()))
+        for result in candidates:
+            if result is None:
+                continue
+            source = result.source
+            if translated is not None and source.translated != bool(translated):
+                continue
+            if ((source.identity, source.title, source.artist) == (identity, title, artist)
+                    and source.timed == timed and source.lines == lines):
+                return result
         return None
 
     def _start(self):
@@ -106,8 +121,10 @@ class LyricPresentationStore(QObject):
             return
         generation, key, snapshot = self.pending
         self.pending = None
-        token = (generation, key)
+        self.request_serial += 1
+        token = (generation, key, self.request_serial)
         self.active = token
+        self.active_snapshot = snapshot
         def work():
             started = time.perf_counter()
             result = prepare_lyric_presentation(snapshot)
@@ -117,6 +134,7 @@ class LyricPresentationStore(QObject):
             self.submitted += 1
         else:
             self.active = None
+            self.active_snapshot = None
             self.failed = key
 
     @Slot(object, object, object)
@@ -124,15 +142,24 @@ class LyricPresentationStore(QObject):
         if self.closed or token != self.active:
             return
         self.active = None
-        generation, key = token
+        snapshot, self.active_snapshot = self.active_snapshot, None
+        generation, key, _serial = token
         # Recheck actual owner values, not just the last request. A provider
         # can change songs while this window is hidden and has no paint tick.
         if generation != self.generation or key[0] != lyric_owner_signature(self.owner):
             self.discarded += 1
         elif error is not None or value is None:
             self.failed = key
+            # Publish failure so a cached loading sentinel can leave the
+            # skeleton immediately. One bounded retry may still recover ink;
+            # it never reopens a visible loader or replaces established text.
+            if self.retried != key:
+                self.retried = key
+                self.pending = (generation, key, snapshot)
+            self.changed.emit()
         else:
             result, byte_count, self.prepare_seconds = value
+            self.failed = None
             self.current = (key, result)
             self.last_valid = result
             if byte_count <= self.MAX_BYTES:

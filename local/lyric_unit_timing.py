@@ -432,7 +432,20 @@ def _aligned_offsets(text: str, units: Sequence[object]) -> tuple[int, ...] | No
             offsets.append(offsets[-1] + len(str(getattr(unit, "text", ""))))
         return tuple(offsets)
     if " ".join(source.split()) != " ".join(text.split()):
-        return None
+        # Some providers keep the role in the row but omit it from genuine
+        # units. Reuse the shared classification; arbitrary mismatches still
+        # fail closed and source unit text/clocks remain untouched.
+        from local.music_lyric_presentation import split_display_layers
+        role = split_display_layers(text).role_tag
+        if role is None:
+            return None
+        body_start = len(text) - len(text.lstrip()) + len(role) + 2
+        body_start += len(text[body_start:]) - len(text[body_start:].lstrip())
+        body = text[body_start:]
+        if " ".join(source.split()) != " ".join(body.split()):
+            return None
+        offsets = _aligned_offsets(body, units)
+        return tuple(body_start + offset for offset in offsets) if offsets is not None else None
     # Reconstruct a boundary mapping rather than assuming a collapsed source
     # space occupies the same number of display characters.
     mapping = [0] * (len(source) + 1)
@@ -568,13 +581,18 @@ def real_unit_row_finished_before_next_start(
     return finished < following and finished <= now < following
 
 
+HELD_NOTE_MIN_SECONDS = 1.2
+HELD_NOTE_MEDIAN_RATIO = 2.0
+HELD_NOTE_MEDIAN_MIN_UNITS = 3
+
+
 def explicit_slow_unit_groups(
     text: str,
     units: Sequence[object],
     *,
     min_duration: float = 0.8,
 ) -> tuple[TimedHighlightGroup, ...]:
-    """Select measured characters/words lasting at least the fixed 0.8 s cue.
+    """Select measured characters/words held long for their line (>= 1.2 s).
 
     ``min_duration`` remains accepted for historical callers; it no longer
     changes the product's highlight threshold.
@@ -582,6 +600,24 @@ def explicit_slow_unit_groups(
     offsets = _aligned_offsets(str(text), units)
     if offsets is None:
         return ()
+    # A held note is long for this line, not just over a fixed clock: twice
+    # the line's median word length, and never under 1.2 s. A slow line whose
+    # every word is long no longer lights up word after word.
+    lengths = []
+    for unit in units:
+        try:
+            raw_start = float(getattr(unit, "start_seconds"))
+            raw_end = getattr(unit, "end_seconds", None)
+            if raw_end is not None and str(getattr(unit, "text", "")).strip():
+                lengths.append(max(0.0, float(raw_end) - raw_start))
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            continue
+    lengths.sort()
+    # One or two words have no meaningful pace of their own (a lone held
+    # "shine" is its own median); those lines use the fixed floor only.
+    median = lengths[len(lengths) // 2] if len(lengths) >= HELD_NOTE_MEDIAN_MIN_UNITS else 0.0
+    held = max(HELD_NOTE_MIN_SECONDS, HELD_NOTE_MEDIAN_RATIO * median)
+    source = str(text)
     result: list[TimedHighlightGroup] = []
     current: TimedHighlightGroup | None = None
     for index, unit in enumerate(units):
@@ -626,7 +662,7 @@ def explicit_slow_unit_groups(
             spoken_characters
             and not bool(getattr(unit, "estimated", False))
             and end is not None and math.isfinite(start) and math.isfinite(end)
-            and end - start >= 0.8 - 1e-9
+            and end - start >= held - 1e-9
             and offsets[index + 1] - offsets[index] == len(token)
         )
         if not eligible:
@@ -634,7 +670,10 @@ def explicit_slow_unit_groups(
                 result.append(current)
                 current = None
             continue
-        if current is not None and current.end_offset == spoken_start and start >= current.start_seconds:
+        # Neighbouring held words separated only by spaces glow as one group,
+        # so a run of long notes rises and settles together.
+        joined = current is not None and not source[current.end_offset:spoken_start].strip()
+        if current is not None and joined and start >= current.start_seconds:
             current = TimedHighlightGroup(
                 current.start_offset, spoken_end, current.start_seconds,
                 max(current.end_seconds, end),
