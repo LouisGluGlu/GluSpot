@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, Pause, Play } from "@phosphor-icons/react";
+import { ArrowDown, ArrowUpRight, Pause, Play, WindowsLogo } from "@phosphor-icons/react";
 import { getTimedPhase, storyDuration } from "./storyTimeline.js";
 import { useScrollStory } from "./useScrollStory.js";
 
@@ -12,10 +12,64 @@ const MODES = [
 ];
 const VIEWS = ["音乐岛", "窗口", "全屏"];
 
-export function OpeningHero() {
+export function OpeningHero({ release }) {
+  const version = release?.version;
   return <section className="opening-page" aria-labelledby="opening-title">
     <img className="headline-light" src="/assets/chace-background-still.webp" alt="" aria-hidden="true" />
-    <h1 id="opening-title">让音乐<br />融入桌面</h1>
+    <div className="hero-aurora" aria-hidden="true" />
+    <div className="hero-copy">
+      <a className="hero-badge" href={release?.url} target="_blank" rel="noreferrer">
+        <b>{version ? `v${version}` : "新版本"}</b>
+        海平面光影 · Liquid Glass · 精确歌词
+      </a>
+      <h1 id="opening-title">让音乐<br />融入桌面</h1>
+      <p className="hero-sub">{"一座随歌声起伏的音乐岛。逐字读亮的歌词、跟着鼓点呼吸的光、从耳机到整个房间的同步播放——为 Windows 桌面而生。"}</p>
+      <div className="hero-actions">
+        <a className="primary-button" href={release?.url} target="_blank" rel="noreferrer">
+          <WindowsLogo size={22} weight="fill" />
+          <span>免费下载</span>
+          <ArrowUpRight size={18} />
+        </a>
+        <a className="ghost-button" href="#island">看看它如何工作 <ArrowDown size={18} /></a>
+      </div>
+      <ul className="hero-facts" aria-label="要点">
+        <li>开源免费 · MIT</li>
+        <li>Windows 10 1809+ / 11</li>
+        <li>安装版与便携版</li>
+      </ul>
+    </div>
+  </section>;
+}
+
+const FEATURES = [
+  { title: "四种岛态，随处停靠", text: "Free 自由漂浮，Top 贴住屏幕顶端，嵌进任务栏的空隙，或靠上 Finder 栏，从不挡住图标。",
+    media: "stack", images: ["islands/chace-top.png", "islands/alicks-free.png", "islands/noah-tasker.png"], glow: "#7ee0c3" },
+  { title: "逐字读亮的歌词", text: "有逐字时间就一个字一个字亮起，译文与粤拼在次行同步，缺哪项自动补另一项。",
+    media: "plain", images: ["lyrics/chace-translated.webp"], glow: "#8fb3ff" },
+  { title: "音乐高光，感知清晰", text: "慢唱的字会被单独点亮，副歌与和声各有呈现，读歌词像在看现场。",
+    media: "plain", images: ["highlight/music-highlight.png"], glow: "#f0b46a" },
+  { title: "从耳机，到整个房间", text: "本机、蓝牙与兼容 AirPlay 的 Wi-Fi 音箱一起播放，每台设备各自调音量。",
+    media: "cover", images: ["speaker-playback-light.webp"], glow: "#f08a4b", wide: true },
+  { title: "私人 DJ，歌与歌之间", text: "私人漫游里，播报在歌曲之间轻声衔接，岛上的小脸会眨眼、会笑。",
+    media: "pair", images: ["chace-belated-suffocation.jpg", "dj/chace-speaking-still.webp"], glow: "#16c777", wide: true },
+];
+
+export function FeatureGrid() {
+  return <section className="features section-shell" aria-labelledby="features-title">
+    <div className="features-head">
+      <span className="eyebrow">一座岛，一整个音乐世界</span>
+      <h2 id="features-title">每一处细节，<br />都为听歌而生。</h2>
+      <p>不只是一个播放器：它懂你的桌面，也懂正在播放的那首歌。</p>
+    </div>
+    <div className="feature-grid">
+      {FEATURES.map(item => <article key={item.title} className={`feature-card${item.wide ? " wide" : ""}`}>
+        <div className="feature-glow" style={{ background: item.glow }} aria-hidden="true" />
+        <div className={`feature-media ${item.media}`}>
+          {item.images.map(src => <img key={src} src={`/assets/${src}`} alt="" loading="lazy" />)}
+        </div>
+        <div className="feature-text"><h3>{item.title}</h3><p>{item.text}</p></div>
+      </article>)}
+    </div>
   </section>;
 }
 

@@ -10605,6 +10605,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         ``rect`` is in ``widget`` coordinates.
         """
         from local.liquid_glass_controls import SceneGlassPatches, paint_scene_glass
+        scene = self._panel_glass_scene()
         patches = getattr(widget, "_panel_glass_patches", None)
         if patches is None:
             patches = SceneGlassPatches(limit=3)
@@ -10613,11 +10614,31 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         painter.save()
         painter.translate(-offset)
         paint_scene_glass(
-            painter, QRectF(rect).translated(offset), patches, self._surface_glass_backdrop(),
+            painter, QRectF(rect).translated(offset), patches, scene,
             QRectF(self.rect()), dark=not self._surface_glass_light(),
             amount=min(1.0, self._control_plate_opacity() + self.PANEL_GLASS_LIFT), radius=radius,
         )
         painter.restore()
+
+    def _panel_glass_scene(self) -> QImage:
+        """The whole window's scene for a submenu's glass.
+
+        Button glass may sample a capture that holds pixels only around the
+        buttons (the narrow window's chrome backdrop). A submenu is far larger,
+        so it samples the unlit sea field or the full background instead;
+        sampling the button capture turned it black with blurred ghosts.
+        """
+        field = self._sea_glass_field()
+        if field is not None:
+            return field
+        cache = getattr(self, "_background_cache", None)
+        if isinstance(cache, QImage) and not cache.isNull():
+            return cache
+        return self._surface_glass_backdrop()
+
+    def _panel_scale(self) -> float:
+        """Submenus follow the window: 1.0 at the 666 px reference height."""
+        return max(0.72, min(1.0, float(self._surface_scale())))
 
     def _panel_glass_ink(self) -> QColor:
         """Submenu text: the button icons' ink (black on light glass, white on dark)."""

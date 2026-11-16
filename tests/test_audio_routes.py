@@ -2734,6 +2734,16 @@ class AirPlayDiscoveryTests(unittest.TestCase):
         device = receiver_from_service(self._info(SERVICE_TYPES[0]), SERVICE_TYPES[0])
         self.assertEqual(device, HOME)
 
+    def test_mac_limited_to_its_owner_is_marked_restricted(self):
+        # macOS AirPlay Receiver "Current User" advertises act=2; HomePods omit it.
+        mac = self._info(SERVICE_TYPES[0], "书房的 Mac mini", properties={
+            b"deviceid": b"B6:EE:80:32:AE:A4", b"model": b"Mac18,5", b"flags": b"0x204", b"act": b"2"})
+        self.assertTrue(receiver_from_service(mac, SERVICE_TYPES[0]).access_restricted)
+        self.assertFalse(receiver_from_service(self._info(SERVICE_TYPES[0]), SERVICE_TYPES[0]).access_restricted)
+        anyone = self._info(SERVICE_TYPES[0], "Mac", properties={b"deviceid": b"B6:EE:80:32:AE:A5",
+                                                              b"model": b"Mac18,5", b"act": b"0"})
+        self.assertFalse(receiver_from_service(anyone, SERVICE_TYPES[0]).access_restricted)
+
     def test_normal_ipv4_is_preferred_over_link_local_regardless_of_order(self):
         for service_type in SERVICE_TYPES:
             for addresses in (["169.254.107.134", "192.168.9.118"],

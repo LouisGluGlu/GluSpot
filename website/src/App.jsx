@@ -24,7 +24,7 @@ import {
   WindowsLogo,
   X,
 } from "@phosphor-icons/react";
-import { OpeningHero, IslandStory, SurfaceStory, HighlightStory } from "./StoryExperience.jsx";
+import { OpeningHero, IslandStory, SurfaceStory, HighlightStory, FeatureGrid } from "./StoryExperience.jsx";
 import { storyDuration } from "./storyTimeline.js";
 import { REPO, RELEASE_FALLBACK, loadLatestRelease } from "./releases.js";
 
@@ -757,20 +757,25 @@ export function App() {
           <a href="#player-story">播放体验</a>
           <a href="#download">下载</a>
         </nav>
-        <a
-          className="github-link"
-          aria-label="GitHub 开源项目"
-          href={REPO}
-          target="_blank"
-          rel="noreferrer"
-        >
-          <GithubLogo size={25} weight="fill" />
-          <span>GitHub</span>
-          <ArrowUpRight className="github-arrow" size={14} />
-        </a>
+        <div className="header-actions">
+          <a
+            className="github-link"
+            aria-label="GitHub 开源项目"
+            href={REPO}
+            target="_blank"
+            rel="noreferrer"
+          >
+            <GithubLogo size={22} weight="fill" />
+            <span>GitHub</span>
+          </a>
+          <a className="header-download" href={release.url} target="_blank" rel="noreferrer">
+            <WindowsLogo size={16} weight="fill" />
+            下载
+          </a>
+        </div>
       </header>
       <main inert={!introDone || settings === "open" || settings === "expanded"}>
-        <OpeningHero />
+        <OpeningHero release={release} />
         <IslandStory backdrop={DesktopBackdrop} motion={motion} opening={!introDone} />
         <SurfaceStory onPresentation={setPresentation} controller={surfaceController} motion={motion} enabled={settings === "closed"}>
           <div
@@ -991,6 +996,7 @@ export function App() {
         </SurfaceStory>
         <HighlightStory motion={motion && pageVisible} />
         <RoomExperience motion={motion && pageVisible} />
+        <FeatureGrid />
         <section
           className="sources-section section-shell"
           aria-labelledby="sources-title"

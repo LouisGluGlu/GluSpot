@@ -1,6 +1,6 @@
 {
   "name": "gluspot-website",
-  "version": "6.418.0",
+  "version": "6.50.0",
   "private": true,
   "type": "module",
   "scripts": {

@@ -6,13 +6,13 @@ import time
 
 from PIL import Image, ImageEnhance, ImageFilter
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen, QRegion
+from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRegion
 from PySide6.QtWidgets import (
     QAbstractButton, QGraphicsOpacityEffect, QInputDialog, QLabel,
     QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
+from api.audio_routes import ACCESS_RESTRICTED_HINT, AudioRouteDevice, AudioRouteSnapshot
 from local.audio_output_icons import paint_audio_output_icon, paint_audio_output_status
 from local.audio_output_panel_pose import output_panel_pose
 from local.music_lyric_motion import MotionSimulationClock
@@ -393,7 +393,8 @@ class _OutputRow(QAbstractButton):
         if not self.device.available:
             return "设备不可用"
         if self.device.transport == "airplay":
-            return "未连接"
+            # Say why a Mac set to "Current User" will refuse, before the try.
+            return "仅限本人 Apple ID" if self.device.access_restricted else "未连接"
         return "蓝牙音频" if self.device.is_bluetooth else "本地音频"
 
     def _layout_volume(self):
@@ -589,8 +590,65 @@ class _OutputRow(QAbstractButton):
                          Qt.AlignmentFlag.AlignVCenter, text)
         painter.restore()
 
+class _SearchingRow(QWidget):
+    """A spinner and shimmer line while discovery is still finding devices."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedHeight(40)
+        self.ink = QColor("white")
+        self.label_font = QFont()
+        self._started = time.monotonic()
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self.update)
+        self.setAccessibleName("正在查找设备")
+        self.hide()
+
+    def showEvent(self, event):
+        self._started = time.monotonic()
+        self._timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, event):
+        now = time.monotonic() - self._started
+        with QPainter(self) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            ink = QColor(self.ink)
+            spinner = QRectF(16, (self.height() - 16) / 2, 16, 16)
+            track = QColor(ink)
+            track.setAlpha(45)
+            painter.setPen(QPen(track, 2.0))
+            painter.drawEllipse(spinner)
+            arc = QColor(ink)
+            arc.setAlpha(210)
+            painter.setPen(QPen(arc, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawArc(spinner, int(-now * 360 * 16) % (360 * 16), 100 * 16)
+            font = QFont(self.label_font)
+            font.setPixelSize(12)
+            painter.setFont(font)
+            text = "正在查找附近的设备…"
+            text_rect = QRectF(44, 0, max(1., self.width() - 56), self.height())
+            # A soft light sweeps across the words while discovery runs.
+            phase = (now * .55) % 1.6 - .3
+            sweep = QLinearGradient(text_rect.left() + (phase - .25) * text_rect.width(), 0,
+                                    text_rect.left() + (phase + .25) * text_rect.width(), 0)
+            for stop, alpha in ((0., 120), (.5, 235), (1., 120)):
+                color = QColor(ink)
+                color.setAlpha(alpha)
+                sweep.setColorAt(stop, color)
+            painter.setPen(QPen(QBrush(sweep), 1.0))
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+
+
 class AudioOutputPanel(GlassCaptureMixin, QWidget):
     PANEL_RADIUS = 30.0
+    # mDNS answers usually arrive within a couple of seconds of a refresh.
+    SEARCH_SECONDS = 3.0
     """Cached frosted popup that queues actions through published route state."""
 
     dismissed = Signal()
@@ -689,6 +747,11 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
         self.empty_label = QLabel("暂无可用输出设备")
         self.empty_label.setMargin(12)
         self.rows_layout.addWidget(self.empty_label)
+        self.searching_row = _SearchingRow(self.rows_widget)
+        self.rows_layout.addWidget(self.searching_row)
+        self._searching_since = 0.0
+        self._notice_message = ""
+        self._status_text, self._status_error = "", False
         self.stop_button = GlassPushButton("停止投放")
         self.stop_button.setFixedHeight(30)
         self.stop_button.clicked.connect(self._stop)
@@ -1214,7 +1277,11 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
             anchor.x() - 42, max(12, anchor.y() - 42), 42, 42)
         # Qt logical pixels already follow DPI. The source circle only owns
         # the entry morph; device typography/layout stays stable in all modes.
-        desired_width = 360
+        # The footprint follows the window (typography stays fixed): about
+        # 290 px wide on a 960x540 window, 360 px at the reference size.
+        scale_of = getattr(parent, "_panel_scale", None)
+        scale = float(scale_of()) if callable(scale_of) else 1.0
+        desired_width = round(360 * scale)
         width = min(desired_width, max(80, parent.width() - 24)) if parent else desired_width
         self._row_height = 56
         right, top = self._source_rect.right(), self._source_rect.top()
@@ -1224,7 +1291,9 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
         # circle on both axes instead of clipping its right edge after rounding.
         self._anchor = QPoint(math.floor(x), math.floor(y))
         width = max(width, math.ceil(right) - self._anchor.x())
-        self._max_height = min(460, max(80, parent.height() - self._anchor.y() - 12)) if parent else 460
+        # Never cover most of the page: the list scrolls past this height.
+        limit = round(min(460, parent.height() * 0.62)) if parent and callable(scale_of) else 460
+        self._max_height = min(limit, max(80, parent.height() - self._anchor.y() - 12)) if parent else 460
         self.resize(width, self._max_height)
         if not was_visible:
             self._appearance_elapsed = 0.0
@@ -1233,12 +1302,18 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
             self._clear_row_hover()
         self._reveal_target = 1.0
         self._clock.reset(time.monotonic())
+        if not was_visible:
+            # Opening starts a discovery pass; show that it is still looking.
+            self._searching_since = time.monotonic()
+            self._notice_message = ""
         self.move(self._anchor)
         self.sync_snapshot()
         self._capture_material(force=True)
         self._apply_reveal_pose()
         self.show()
         self.raise_()
+        if self._status_text:
+            self._show_notice(self._status_text, self._status_error)
         self.layout().activate()
         self.rows_layout.activate()
         if self._snapshot:
@@ -1320,8 +1395,53 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
         else:
             super().keyPressEvent(event)
 
-    def _refresh(self):
+    def _begin_action(self) -> None:
+        """A new user action: its outcome may show the same message again."""
         self._action_error = ""
+        self._notice_message = ""
+
+    def status_message(self) -> str:
+        """The panel's current message, shown in the page's shared notice."""
+        return self._status_text
+
+    def _show_notice(self, message: str, error: bool) -> None:
+        # The red row at the bottom clipped long text. The shared boxed notice
+        # eases in under the panel, stays long enough to read and fades out.
+        self.status_label.hide()
+        self._status_text, self._status_error = message, error
+        if message == self._notice_message:
+            return
+        if message and not self.isVisible():
+            # Opening reads state before the panel shows; the next poll shows it.
+            return
+        self._notice_message = message
+        from local.glass_notice import notice_for
+        notice = notice_for(self.parentWidget())
+        if notice is None:
+            return
+        if message and self.isVisible():
+            notice.show_message(message, kind="error" if error else "info",
+                                anchor=self.geometry(), source=self)
+        elif not message:
+            notice.dismiss(source=self)
+
+    def _sync_searching(self) -> None:
+        # Only while discovery can still add a device: an "unavailable" route
+        # (program playback on the system default) has nothing to find.
+        snapshot = getattr(self, "_snapshot", None)
+        discovering = snapshot is None or snapshot.state != "unavailable"
+        searching = discovering and time.monotonic() - self._searching_since < self.SEARCH_SECONDS
+        self.searching_row.ink = QColor(self._ink)
+        self.searching_row.label_font = QFont(self._label_font)
+        if searching != self.searching_row.isVisible():
+            self.searching_row.setVisible(searching)
+            if searching:
+                self.empty_label.hide()
+            self._fit_to_content()
+
+    def _refresh(self):
+        self._searching_since = time.monotonic()
+        self._begin_action()
         try:
             self.provider.refresh_audio_outputs()
         except Exception:
@@ -1353,7 +1473,7 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
     def _select(self, device_id: str):
         if not self._route_action_current():
             return
-        self._action_error = ""
+        self._begin_action()
         try:
             if not self.provider.select_audio_output(device_id):
                 self._action_error = "无法切换到此设备，请刷新后重试。"
@@ -1364,7 +1484,7 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
     def _join(self, device_id: str):
         if not self._route_action_current(toggle_device_id=device_id):
             return
-        self._action_error = ""
+        self._begin_action()
         row = self._rows.get(device_id)
         removing = bool(row is not None and row.state == "active")
         error = "暂时无法将此设备移出同步播放。" if removing else "暂时无法将此设备加入同步播放。"
@@ -1379,7 +1499,7 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
     def _toggle_mute(self, device_id: str):
         if not self._route_action_current():
             return
-        self._action_error = ""
+        self._begin_action()
         try:
             accepted = self.provider.toggle_audio_output_mute(device_id)
         except Exception:
@@ -1391,7 +1511,7 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
     def _volume_changed(self, device_id: str, volume: float):
         if not self._route_action_current():
             return
-        self._action_error = ""
+        self._begin_action()
         try:
             accepted = self.provider.set_audio_output_volume(device_id, volume)
         except Exception:
@@ -1409,7 +1529,7 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
     def _stop(self):
         if not self._route_action_current():
             return
-        self._action_error = ""
+        self._begin_action()
         try:
             self.provider.stop_audio_cast()
         except Exception:
@@ -1420,7 +1540,7 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
         host, accepted = QInputDialog.getText(self, "添加 AirPlay 设备", "同一局域网中的 AirPlay 设备 IP 地址")
         if not accepted:
             return
-        self._action_error = ""
+        self._begin_action()
         try:
             if not self.provider.add_homepod(host.strip()):
                 self._action_error = "请填写有效的 AirPlay 设备 IP 地址。"
@@ -1454,6 +1574,7 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
     def sync_snapshot(self):
         """Read provider state; never discover or perform device I/O in the UI."""
         self._sync_surface_style()
+        self._sync_searching()
         try:
             snapshot = self.provider.get_audio_route_snapshot()
         except Exception:
@@ -1462,7 +1583,7 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
             self.status_label.setText("音频设备暂时不可用。")
             self.status_label.setToolTip(self.status_label.text())
             self.status_label.setAccessibleDescription(self.status_label.text())
-            self.status_label.show()
+            self._show_notice(self.status_label.text(), True)
             self.stop_button.setEnabled(False)
             for row in self._rows.values():
                 row.setEnabled(False)
@@ -1583,9 +1704,12 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
                 row.setToolTip(row.toolTip() + f" · 自动歌词补偿 {snapshot.cast_latency_seconds:.2f} 秒（根据投放缓冲估计）")
             if device.route_message:
                 row.setToolTip(row.toolTip() + " · " + device.route_message)
+            if device.access_restricted:
+                row.setToolTip(row.toolTip() + " · " + ACCESS_RESTRICTED_HINT)
             row.update()
         self.empty_label.setText("使用系统默认输出" if owned else "暂无可用输出设备")
-        self.empty_label.setVisible(not order)
+        self._sync_searching()
+        self.empty_label.setVisible(not order and not self.searching_row.isVisible())
         message = self._action_error or snapshot.status_message
         if (not self._action_error and snapshot.state not in {"error", "failed", "connecting", "reconfiguring"}
                 and message.startswith("选择程序内音乐的播放设备")):
@@ -1601,10 +1725,8 @@ class AudioOutputPanel(GlassCaptureMixin, QWidget):
         self.status_label.setText(message)
         self.status_label.setToolTip(message)
         self.status_label.setAccessibleDescription(message)
-        self.status_label.setVisible(bool(message))
         error = bool(self._action_error or snapshot.state in {"error", "failed"})
-        error_color = "#a22d2d" if relative_luminance(self._background) > .45 else "#ffb9b3"
-        self.status_label.setStyleSheet(f"color: {error_color if error else self._muted.name()};")
+        self._show_notice(message, error)
         self.stop_button.setText("停止投放")
         # Group membership is edited at each selected device icon. Retain the
         # existing stop action only for a single AirPlay casting destination.

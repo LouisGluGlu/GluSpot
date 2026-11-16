@@ -258,10 +258,10 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         self.provider.snapshot = replace(self.provider.snapshot, capture_scope="owned-player",
             status_message="选择程序内音乐的播放设备")
         self.panel.sync_snapshot()
-        self.assertTrue(self.panel.status_label.isHidden())
+        self.assertEqual(self.panel.status_message(), "")
         self.provider.snapshot = replace(self.provider.snapshot, state="error", status_message="设备连接失败")
         self.panel.sync_snapshot()
-        self.assertFalse(self.panel.status_label.isHidden())
+        self.assertEqual(self.panel.status_message(), "设备连接失败")
         self.assertEqual(self.panel.status_label.text(), "设备连接失败")
 
     def test_empty_rebuild_hides_departed_native_rows_before_deferred_delete(self):
@@ -813,7 +813,7 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         self.assertIn("电脑全部声音", self.panel.toolTip())
         self.provider.snapshot = replace(self.provider.snapshot, state="error", status_message="无法连接设备")
         self.panel.sync_snapshot()
-        self.assertTrue(self.panel.status_label.isVisible())
+        self.assertEqual(self.panel.status_message(), "无法连接设备")
         self.assertEqual(self.panel.status_label.text(), "无法连接设备")
 
     def test_row_capsule_keeps_uniform_volume_independent_material_and_native_selection(self):

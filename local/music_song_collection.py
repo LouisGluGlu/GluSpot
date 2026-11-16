@@ -255,8 +255,12 @@ class SongPlaylistPanel(GlassCaptureMixin, QWidget):
         surface = self.surface
         margin = 10
         anchor = surface._song_collection_geometry(QRectF(surface.rect()), shifted=False)
-        width = max(1, min(380, surface.width() - 2 * margin))
-        height = max(1, min(520, int(anchor.top()) - 2 * margin))
+        # The chooser follows the window instead of filling its right side.
+        scale_of = getattr(surface, "_panel_scale", None)
+        scale = float(scale_of()) if callable(scale_of) else 1.0
+        width = max(1, min(round(380 * scale), surface.width() - 2 * margin))
+        tallest = round(min(520 * scale, surface.height() * 0.66)) if callable(scale_of) else 520
+        height = max(1, min(tallest, int(anchor.top()) - 2 * margin))
         self.setGeometry(max(margin, surface.width() - margin - width),
                          max(margin, int(anchor.top()) - 8 - height), width, height)
 
@@ -267,7 +271,9 @@ class SongPlaylistPanel(GlassCaptureMixin, QWidget):
             self.hide()
             return
         self._sync_ink()
-        self.message.setText(state.message or ("选择自己创建的歌单" if state.playlists else "尚无可添加的自建歌单"))
+        # The quiet line is only guidance; results and errors go to the page's
+        # boxed notice (see MusicSongCollectionMixin._song_collection_changed).
+        self.message.setText("选择自己创建的歌单" if state.playlists else "尚无可添加的自建歌单")
         key = state.playlists
         if key != self._key:
             self._key = key
@@ -423,11 +429,37 @@ class MusicSongCollectionMixin:
             return SongCollectionState()
         return controller.context(track_id)
 
+    # Background reads on every song change stay silent; actions and errors
+    # are worth a notice.
+    SILENT_COLLECTION_MESSAGES = frozenset({"正在读取收藏状态…", "正在读取可收藏歌单…"})
+    COLLECTION_ERROR_WORDS = ("失败", "不可用", "超时", "无法", "暂不支持", "已变化", "重试", "请先登录",
+                              "请选择", "请输入", "未确认")
+
     def _song_collection_changed(self):
         panel = self._song_playlist_panel
         if panel is not None:
             panel.refresh()
+        self._notice_song_collection()
         self.update()
+
+    def _notice_song_collection(self):
+        state = self._song_collection_state()
+        message = "" if state.message in self.SILENT_COLLECTION_MESSAGES else str(state.message or "")
+        if message == getattr(self, "_collection_notice_message", ""):
+            return
+        self._collection_notice_message = message
+        from local.glass_notice import notice_for
+        notice = notice_for(self)
+        if not message:
+            notice.dismiss(source="collection")
+            return
+        panel = self._song_playlist_panel
+        if panel is not None and panel.isVisible():
+            anchor = panel.geometry()
+        else:
+            anchor = self._song_collection_geometry(QRectF(self.rect()), shifted=False).toAlignedRect()
+        error = any(word in message for word in self.COLLECTION_ERROR_WORDS)
+        notice.show_message(message, kind="error" if error else "info", anchor=anchor, source="collection")
 
     def _song_collection_geometry(self, rect, now=None, *, shifted=True):
         now = time.monotonic() if now is None else now

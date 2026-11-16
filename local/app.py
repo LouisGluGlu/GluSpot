@@ -300,6 +300,9 @@ class LocalIslandApp:
             _set_windows_process_identity()
             self.app = QApplication.instance() or QApplication(sys.argv)
             self.app.setApplicationName(APP_NAME)
+            # No hover text anywhere; notices carry messages that matter.
+            from local.no_tooltips import install as install_no_tooltips
+            install_no_tooltips(self.app)
             self.app.setQuitOnLastWindowClosed(view == "narrow")
             self.watchdog = MainThreadWatchdog(self.app)
             self.gc_scheduler = install_gc_scheduler(self.app, busy=self._visual_animation_busy)

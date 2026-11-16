@@ -10,7 +10,7 @@ import time
 
 from api.airplay_discovery import AirPlayDiscovery
 from api.audio_route_controller import AudioRouteController
-from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
+from api.audio_routes import ACCESS_RESTRICTED_HINT, AudioRouteDevice, AudioRouteSnapshot
 from api.audio_output_volume import AudioOutputVolumeHistory, output_volume_target
 from api.owned_pcm_process import OwnedPcmProcess
 from local.runtime_platform import legacy_qt_runtime
@@ -521,9 +521,12 @@ class OwnedAudioOutputController:
             return
         events = self._sender.poll_events()
         if any(event.get("event") in {"error", "stopped"} for event in events):
+            restricted = any(d.access_restricted and d.id in self._members for d in self.snapshot().devices)
             self._stop_group()
             self._members = ()
-            self._publish(state="error", status_message="同步播放已中断，已恢复程序内输出")
+            # A Mac limited to its owner refuses pairing; say how to allow it.
+            self._publish(state="error", status_message=(ACCESS_RESTRICTED_HINT if restricted
+                                                         else "同步播放已中断，已恢复程序内输出"))
             return
         if self._source_superseded(self._token):
             return

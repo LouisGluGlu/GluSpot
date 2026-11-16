@@ -46,8 +46,12 @@ def receiver_from_service(info, service_type: str) -> AudioRouteDevice | None:
     port = int(info.port)
     if not 1 <= port <= 65535:
         return None
+    # act=2: the receiver uses HomeKit access control limited to its owner
+    # (macOS "Allow AirPlay for: Current User"). HomePods omit "act".
+    restricted = properties.get("act", "").strip() == "2"
     return AudioRouteDevice("airplay:" + identity, label[:160] or "AirPlay", kind,
-                            "airplay", host=host, port=port, device_id=device_id)
+                            "airplay", host=host, port=port, device_id=device_id,
+                            access_restricted=restricted)
 
 
 def _usable_ipv4(value) -> bool:

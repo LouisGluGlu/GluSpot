@@ -32,6 +32,15 @@ class AudioRouteDevice:
     battery_percent: int | None = None
     battery_source: str = ""
     battery_observed_at: float | None = None
+    # An AirPlay receiver that admits only the owner's Apple ID (a Mac whose
+    # AirPlay Receiver is set to "Current User"). Windows cannot join it.
+    access_restricted: bool = False
+
+
+# Shown when a receiver that admits only its owner's Apple ID refuses us.
+ACCESS_RESTRICTED_HINT = ("这台 Mac 只允许同一 Apple ID 的设备隔空播放。请在 Mac 的"
+                          "「系统设置 → 通用 → 隔空投送与接力 → 隔空播放接收器」中，"
+                          "把「允许隔空播放」改为「同一网络上的任何人」。")
 
 
 @dataclass(frozen=True)

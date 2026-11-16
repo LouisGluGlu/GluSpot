@@ -1,5 +1,11 @@
 # Prototype Instructions
 
+## 2026-11-15 6.50 refresh (user: "用你觉得最好看的方式")
+
+- Supersedes the headline-only hero: a version badge, one value sentence, a primary download and a "how it works" button, and three quick facts over the album-light glow. The opening logo intro, the persistent island pill and both finite story chapters are unchanged.
+- A feature grid follows the multi-device room: island modes, word-by-word lyrics, music highlight, multi-device speakers, Personal DJ. It uses only existing native exports and supplied scenes.
+- `src/refresh.css` (loaded last) is the design layer: glass header with a download pill, readable type (body 16-21 px, captions 12-14 px instead of 9-11 px), accent eyebrow labels, larger rounded demo frames and a carded download finale. Keep new styling there rather than scattering overrides.
+
 ## Approved product direction
 
 - The bottom pill and first native island are the same persistent DOM element. As the page scrolls it grows along an upward arc, then settles downward into its desktop position. It must reverse along the same path when scrolling back; do not replace it with a separately appearing island or enlarge it against the bottom edge.

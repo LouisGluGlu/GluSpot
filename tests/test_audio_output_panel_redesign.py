@@ -246,7 +246,7 @@ class AudioOutputPanelRedesignTests(unittest.TestCase):
         self.assertTrue(row.isChecked())
         self.assertEqual(row.volume_feedback, "未确认")
         self.assertIn("音量", self.panel.status_label.text())
-        self.assertFalse(self.panel.status_label.isHidden())
+        self.assertIn("音量", self.panel.status_message())
 
     def test_unchanged_snapshot_timeout_retires_target_without_reissuing_commands(self):
         row = self._open()

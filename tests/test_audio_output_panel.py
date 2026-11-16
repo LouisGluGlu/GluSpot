@@ -94,6 +94,13 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertGreaterEqual(self.panel.x(), 12)
         self.assertLessEqual(self.panel.x() + self.panel.width(), self.owner.width() - 12)
 
+    def test_owner_only_mac_explains_how_to_allow_airplay(self):
+        mac = AudioRouteDevice("mac", "书房 Mac mini", "airplay", "airplay", access_restricted=True)
+        self.provider.snapshot = AudioRouteSnapshot(self.provider.devices + (mac,), active_id="local")
+        self._open()
+        self.assertEqual(self.panel._rows["mac"].subtitle, "仅限本人 Apple ID")
+        self.assertIn("同一网络上的任何人", self.panel._rows["mac"].toolTip())
+
     def test_request_acceptance_does_not_invent_connected_or_pending_state(self):
         self._open()
         self.panel._rows["homepod"].click()
@@ -394,7 +401,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertFalse(self.panel._rows["local"].isEnabled())
         self.panel.sync_snapshot()
         self.assertTrue(self.panel._rows["local"].isEnabled())
-        self.assertFalse(self.panel.status_label.isVisible())
+        self.assertEqual(self.panel.status_message(), "")
 
     def test_failure_retains_authoritative_active_output_and_exact_reason(self):
         self._open()
@@ -410,7 +417,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         self._open()
         self.assertEqual(self.panel.empty_label.text(), "使用系统默认输出")
         self.assertTrue(self.panel.empty_label.isVisible())
-        self.assertFalse(self.panel.status_label.isVisible())
+        self.assertEqual(self.panel.status_message(), "")
         self.assertEqual(self.panel.toolTip(), message)
         self.assertIn("暂不支持同步播放", self.panel.accessibleDescription())
         self.assertNotIn("电脑全部声音", self.panel.scope_label.text())
@@ -431,8 +438,14 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.status_label.text(), message)
         self.assertEqual(self.panel.status_label.toolTip(), message)
         self.assertEqual(self.panel.status_label.accessibleDescription(), message)
-        self.assertGreater(self.panel.status_label.y(), self.panel.scroll.y())
-        self.assertLessEqual(self.panel.status_label.height(), self.panel.status_label.maximumHeight())
+        # The full text goes to the page's boxed notice, kept inside the page;
+        # it no longer competes with the device list for the panel's height.
+        notice = self.owner._glass_notice
+        self.assertEqual(self.panel.status_message(), message)
+        self.assertEqual(notice.text(), message)
+        self.assertEqual(notice.kind(), "error")
+        self.assertTrue(self.owner.rect().contains(notice.geometry()))
+        self.assertTrue(self.panel.status_label.isHidden())
         self.assertTrue(self.panel.scroll.rect().isValid())
         self.assertLessEqual(self.panel.height(), self.panel._max_height)
 
@@ -440,15 +453,15 @@ class AudioOutputPanelTests(unittest.TestCase):
         message = "音频设备暂时不可用，请重试"
         self.provider.snapshot = AudioRouteSnapshot(state="error", capture_scope="owned-player", status_message=message)
         self._open()
-        self.assertTrue(self.panel.status_label.isVisible())
+        self.assertEqual(self.panel.status_message(), message)
         self.assertEqual(self.panel.status_label.text(), message)
 
     def test_snapshot_failure_reveals_message_when_default_status_was_hidden(self):
         self._open()
-        self.assertFalse(self.panel.status_label.isVisible())
+        self.assertEqual(self.panel.status_message(), "")
         with patch.object(self.provider, "get_audio_route_snapshot", side_effect=OSError("gone")):
             self.panel.sync_snapshot()
-        self.assertTrue(self.panel.status_label.isVisible())
+        self.assertEqual(self.panel.status_message(), "音频设备暂时不可用。")
         self.assertEqual(self.panel.status_label.text(), "音频设备暂时不可用。")
         self.assertFalse(self.panel.stop_button.isEnabled())
 
@@ -841,6 +854,24 @@ class AudioOutputSurfaceTests(unittest.TestCase):
         with patch.object(self.owner.data_provider, "get_audio_route_snapshot", side_effect=AssertionError("paint read")):
             frame = QImage(self.window.size(), QImage.Format.Format_RGB32)
             self.window.render(frame)
+
+    def test_submenu_glass_samples_the_whole_scene_and_follows_window_size(self):
+        # Button glass may sample a capture holding pixels only around the
+        # buttons; a submenu sampling it turned black with ghost rectangles.
+        background = QImage(96, 54, QImage.Format.Format_RGB32)
+        background.fill(QColor(30, 110, 120))
+        self.window._background_cache = background
+        chrome_only = QImage(96, 54, QImage.Format.Format_ARGB32_Premultiplied)
+        chrome_only.fill(Qt.GlobalColor.transparent)
+        with patch.object(self.window, "_surface_glass_backdrop", return_value=chrome_only),                 patch.object(self.window, "_sea_glass_field", return_value=None):
+            self.assertEqual(self.window._panel_glass_scene().cacheKey(), background.cacheKey())
+        self.window.resize(960, 540)
+        self.window._toggle_audio_output_panel()
+        panel = self.window._audio_output_panel
+        self.assertLessEqual(panel.width(), 300)
+        self.assertLessEqual(panel.height(), round(540 * .62))
+        self.window.resize(1600, 900)
+        self.assertEqual(self.window._panel_scale(), 1.0)
 
     def test_escape_closes_selector_before_returning_to_island(self):
         self.window._toggle_audio_output_panel()

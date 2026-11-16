@@ -16,7 +16,7 @@ import time
 from api.airplay_discovery import AirPlayDiscovery
 from api.airplay_process import AirPlayProcess
 from api.airplay_group_process import AirPlayGroupProcess
-from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
+from api.audio_routes import ACCESS_RESTRICTED_HINT, AudioRouteDevice, AudioRouteSnapshot
 from api.audio_output_volume import AudioOutputVolumeHistory, output_volume_target
 from api.windows_audio_sessions import MusicAudioSource, resolve_music_audio_source
 from api.windows_app_audio_routes import AppAudioRouteMigrationTimeout, WindowsAppAudioRoutes
@@ -1049,6 +1049,10 @@ class AudioRouteController:
         if terminal is not None:
             message = str(terminal.get("message") or
                           ("同步播放已中断" if self._group_mode else "HomePod 投放已中断"))[:240]
+            members = set(self._group_member_ids) if self._group_mode else {self._cast_id}
+            if any(d.access_restricted and d.id in members for d in self.snapshot().devices):
+                # A Mac limited to its owner refuses pairing; say how to allow it.
+                message = ACCESS_RESTRICTED_HINT
             self._end_cast()
             self._refresh_devices()
             self._publish(state="error", status_message=message, pending_id="")
