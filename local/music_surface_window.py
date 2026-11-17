@@ -10229,16 +10229,29 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         amount = max(0.0, min(1.0, float(amount)))
         return QColor(*(round(a + (b - a) * amount) for a, b in zip(start.getRgb(), end.getRgb())))
 
-    def _sea_ink_colors(self, ink: str) -> tuple[QColor, QColor]:
-        """(read, unread) for one ink: black reads over dark grey, white over grey-white.
+    def _sea_ink_colors(self, ink: str, field: QColor | None = None) -> tuple[QColor, QColor]:
+        """(read, unread) for one ink on one field colour.
 
-        The unread words are the same ink, translucent, so they stay clearly
-        readable on the field (a pale grey on a white field almost vanished)
-        while the read words still stand out.
+        Read words stay pure black or white. Unread words take the field's
+        own hue: on a dark field a pale tint of it, on a light field a deep
+        shade of it, translucent like before, so they belong to the colour
+        behind them while staying clearly readable. A grey field keeps the
+        neutral ink.
         """
-        if ink == "black":
-            return QColor(0, 0, 0), QColor(0, 0, 0, 148)
-        return QColor(255, 255, 255), QColor(255, 255, 255, 140)
+        dark_ink = ink == "black"
+        read = QColor(0, 0, 0) if dark_ink else QColor(255, 255, 255)
+        unread = QColor(0, 0, 0, 148) if dark_ink else QColor(255, 255, 255, 140)
+        if field is None or not field.isValid():
+            return read, unread
+        hue, saturation = field.hsvHueF(), field.hsvSaturationF()
+        if hue < 0 or saturation < 0.08:
+            return read, unread
+        tinted = QColor()
+        if dark_ink:
+            tinted.setHsvF(hue, max(0.55, min(0.85, saturation)), 0.26, 170 / 255)
+        else:
+            tinted.setHsvF(hue, max(0.16, min(0.32, saturation * 0.4)), 1.0, 150 / 255)
+        return read, tinted
 
     def _sea_lyric_colors(self):
         """(read, unread) blended across the colour change, or None."""
@@ -10246,8 +10259,8 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         if mix is None:
             return None
         plan = self._sea_plan
-        read_a, unread_a = self._sea_ink_colors(plan.before_ink)
-        read_b, unread_b = self._sea_ink_colors(plan.after_ink)
+        read_a, unread_a = self._sea_ink_colors(plan.before_ink, plan.before)
+        read_b, unread_b = self._sea_ink_colors(plan.after_ink, plan.after)
         return self._blend_rgba(read_a, read_b, mix), self._blend_rgba(unread_a, unread_b, mix)
 
     def _paint_background(

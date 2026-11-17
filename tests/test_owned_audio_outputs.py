@@ -114,6 +114,32 @@ class OwnedOutputControllerTests(unittest.TestCase):
         event.update(changes)
         return event
 
+    def test_a_headset_connecting_during_single_device_playback_takes_over(self):
+        self.choose("one")
+        self.assertEqual(self.bridge.device, "one")
+        self.backend.devices = self.backend.devices + (
+            AudioOutputDevice("buds", "Buds", "airpods-pro", is_bluetooth=True, volume=.4),)
+        self.controller._inventory()
+        self.assertEqual(self.bridge.device, "buds")
+        self.assertEqual(self.controller.snapshot().active_id, "buds")
+
+    def test_monitor_speakers_and_new_airplay_receivers_do_not_take_over(self):
+        self.choose("one")
+        self.backend.devices = self.backend.devices + (
+            AudioOutputDevice("monitor", "Monitor", "speaker", volume=.4),)
+        self.discovery.remote = self.discovery.remote + (
+            AudioRouteDevice("airplay:two", "Kitchen", "homepod", "airplay", host="192.168.1.3", device_id="CCDD"),)
+        self.controller._inventory()
+        self.assertEqual(self.bridge.device, "one")
+
+    def test_no_song_loaded_means_no_takeover(self):
+        self.choose("one")
+        self.bridge.token = ("", 0)
+        self.backend.devices = self.backend.devices + (
+            AudioOutputDevice("buds", "Buds", "airpods-pro", is_bluetooth=True, volume=.4),)
+        self.controller._inventory()
+        self.assertEqual(self.bridge.device, "one")
+
     def test_authenticated_receiver_taps_toggle_existing_source_without_reconnect(self):
         self.choose("airplay:one")
         self.ready()

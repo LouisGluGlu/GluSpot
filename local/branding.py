@@ -7,10 +7,10 @@ from pathlib import Path
 
 
 APP_NAME = "GluSpot"
-APP_VERSION = "6.50"
+APP_VERSION = "6.51"
 # Windows and the installer compare dotted numbers part by part, so the
 # shown "6.50" keeps the established three-digit minor: 6.417 < 6.500.
-APP_FILE_VERSION = "6.500.0.0"
+APP_FILE_VERSION = "6.510.0.0"
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BRAND_ASSET_DIR = ROOT_DIR / "assets" / "brand"
 APP_ICON_PATH = BRAND_ASSET_DIR / "gluspot-glu.ico"

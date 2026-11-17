@@ -1,6 +1,21 @@
 # Prototype Instructions
 
-## 2026-11-15 6.50 refresh (user: "用你觉得最好看的方式")
+## 2026-11-16 rebuild (user: "可以重构，使用更多炫技特效、真实地展示我现在的所有功能，做好滚动协调与多端适配")
+
+This section supersedes every earlier note below wherever they conflict (wheel interception, autoplaying chapters, the settings modal, `src/refresh.css`).
+
+- Structure: intro logo → hero → pinned island scene (`#island`) → pinned player scene (`#player`) → tag marquee → lyrics (`#lyrics`) → sea level (`#sea`) → Liquid Glass (`#glass`) → multi-device room (`#devices`) → sources bento with library search, two-way progress and Personal DJ (`#sources`, `#dj`) → detail grid (`#more`) → download (`#download`) → footer credits.
+- Scrolling is native. The two pinned scenes are tall runways with a `position: sticky` stage; progress comes from the scroll position (`pinProgress`) and is eased per frame (`approach`). Never call `preventDefault` on wheel, touch or keys, and never autoplay a chapter. Tabs and segmented controls scroll to `phaseCenter(step)`. `src/useScrollStory.js` and the gesture-release rules are gone; the old pure helpers stay in `storyTimeline.js` only because tests cover them.
+- The persistent island is still one fixed element (`.vessel`, portalled to `body`): a pill at the bottom of the hero that rises along an arc into the desktop and then follows the four island states. It reverses on the way back.
+- `prefers-reduced-motion`: scenes are not pinned (`.pin.still`), the tabs switch state in place, reveals and loops are off, and the installer GIF is replaced by the logo.
+- Files: `App.jsx` (shell, intro, header, footer), `IslandScene.jsx`, `PlayerScene.jsx`, `Sections.jsx`, `data.js`, `lib/motion.js` (shared frame loop, pinned-scene hook, reveal, magnetic buttons, pointer spotlight, visible-only video). CSS is `base.css`, `scenes.css`, `sections.css`; the player is sized with container query units so the same markup serves window, fullscreen and the narrow layout on phones.
+- Reveal state is written to `data-rv="in"`, not a class: React rewrites `className` on re-render and would undo it.
+- The display font is a glyph subset. Use it only for the wordmark, the hero headline and the download headline; other headings use the system stack.
+- Truthfulness: island, lyric, highlight and DJ media are production exports. The sea-level panel and the glass panel are labelled web illustrations (cover-sampled colour pairs in `data.js`, a fixed demo beat); do not present them as app captures. External players are described as "外部播放器 / 系统媒体" with no platform names. Airport Bar shows no lyrics. Library search and progress sync are labelled demos over the three showcase songs.
+- Breakpoints checked: 390×844, 820×1180, 1180×820, 1440×900, 1920×1080. Below 1024 px the island scene stacks; below 640 px the taskbar icons sit right so the island keeps its gap.
+- No new npm dependencies. The dev port 5173 can fall inside a Windows excluded port range; use another port (5273 was used) if `listen EACCES` appears.
+
+## 2026-11-15 6.50 refresh (superseded by the rebuild above)
 
 - Supersedes the headline-only hero: a version badge, one value sentence, a primary download and a "how it works" button, and three quick facts over the album-light glow. The opening logo intro, the persistent island pill and both finite story chapters are unchanged.
 - A feature grid follows the multi-device room: island modes, word-by-word lyrics, music highlight, multi-device speakers, Personal DJ. It uses only existing native exports and supplied scenes.

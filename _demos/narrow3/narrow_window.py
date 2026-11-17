@@ -1711,7 +1711,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                self._song_collection_state() if self.live else self.song_index in self.liked_songs,
                self.owner.media_is_playing, bool(self.owner.enable_dual_line_lyrics),
                not self._layout_snapshot.isNull(),
-               self._scene_control_ink().rgba())
+               self._scene_control_ink().rgba(),
+               # The output glyph (single / several / group) and its
+               # connection capsule are part of these bands.
+               tuple(self._audio_output_kinds), self._audio_connection_key())
         hidden = (self.visibility.opacity.target <= 0
                   and self.visibility.progress <= .001)
         if hidden and key == self._controls_key:
@@ -2492,6 +2495,35 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             hover_segments=tuple((self._glass_feedback.hover.get(key, 0.), slot)
                                  for key, slot in valid.items()), level=self._surface_glass_level())
 
+    def _audio_connection_key(self):
+        pose = self._audio_output_motion.pose
+        if pose is None:
+            return None
+        return (pose.device.id, round(pose.capsule, 2), round(pose.blue, 2), round(pose.new_scale, 2),
+                round(pose.old_opacity, 2), round(pose.final_opacity, 2))
+
+    def _paint_audio_connection(self, painter, audio):
+        """The device-connection capsule the full window shows: a device that
+        joins (solo cast or group play) slides its name out of the output
+        button, then folds back into the device glyph."""
+        pose = self._audio_output_motion.pose
+        panel = self._audio_output_panel
+        if audio is None or not audio.isValid() or pose is None or (panel is not None and panel.isVisible()):
+            return
+        from local.audio_output_motion import connection_capsule_rect, paint_connection_pose
+        scale = self._surface_scale()
+        font = self._surface_font(16.0 * scale, QFont.Weight.DemiBold)
+        connection = connection_capsule_rect(audio, pose, font, 16.0 * scale)
+        backdrop = self._surface_glass_backdrop()
+        paint_connection_pose(painter, audio, pose, font, available_left=16.0 * scale, refractive=True,
+                              material_level=self._surface_glass_level(), light=self._surface_glass_light(),
+                              ink=self._surface_glass_ink(connection), backdrop=backdrop,
+                              backdrop_rect=self._surface_glass_source_rect(connection, backdrop),
+                              material_owner=self, material_role="audio-connection",
+                              material_scene=self._visual_track_identity,
+                              material_dirty=painter.worldTransform().mapRect(connection),
+                              material_transition=.1)
+
     def _dj_status_light_rect(self, button: QRectF) -> QRectF:
         """Bottom-right of the resting waveform. Idle sits further inward."""
         return personal_dj_fixed_status_light(button, idle=not bool(self.dj_speaking))
@@ -2538,6 +2570,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                     rect.width() * .58, rect.height() * .58)))
             else:
                 self._paint_window_mode_icon(painter, icon, self._fullscreen, ink)
+        self._paint_audio_connection(painter, slots.get("audio_output"))
         for command, rect in (("previous", layout.previous),
                               ("toggle_play_pause", layout.play), ("next", layout.next)):
             rect = self.posed_rect("media:" + command, rect)

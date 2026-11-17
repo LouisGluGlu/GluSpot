@@ -4,7 +4,7 @@
   <p><strong>桌面上的一座音乐岛。</strong></p>
   <p>歌在岛上停靠，词随鼓点涨落。<br />小到一枚胶囊，大到整片海。</p>
   <p>
-    <a href="https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.50">下载 6.50 · 安装程序 / 便携版</a>
+    <a href="https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.51">下载 6.51 · 安装程序 / 便携版</a>
     &nbsp; · &nbsp;
     <a href="https://github.com/LouisGluGlu/GluSpot/releases">发行记录</a>
   </p>
@@ -73,9 +73,9 @@
 - **安装版**：一路下一步，原目录覆盖升级，配置与账号都在。
 - **便携版**：完整解压后运行 `GluSpot.exe`，配置留在程序旁的 `GluSpot` 文件夹。
 
-[下载 GluSpot 6.50](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.50) · [本版说明](docs/release-6.50.md)
+[下载 GluSpot 6.51](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.51) · [本版说明](docs/release-6.51.md)
 
-当前为 **6.50 未签名测试版**，已知限制见本版说明。
+当前为 **6.51 未签名测试版**，已知限制见本版说明。
 
 ## 开源许可
 
@@ -217,7 +217,7 @@ This README is the canonical product, implementation, release-readiness, and pen
 - 6.413 improves whole-song source coverage and shared per-row reading, repairs invisible search text and packages all accumulated desktop/playback changes. Final verification passed **5518 Python tests / 297.018 seconds**, 12 native suites, 2447 production-render checks at each DPR 1/2, 401 package checks, frozen EXE diagnostics, 14 offline adapter checks, 19 QRC fallback checks and ten isolated installer scenarios. All 8399 portable entries passed CRC/per-file SHA-256; 594 frozen inputs and previous distribution files remained unchanged. [Download the modern x64 Setup and portable ZIP](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.413); see [source, artifact hashes and verification limits](docs/lyric-word-timing-6.413.md). Real account coverage, physical-display smoothness and hardware listening remain unverified.
 
 - Product name: `GluSpot`.
-- Current test-build version: `6.50`. Its Windows file version is 6.500.0.0, so it sorts after 6.417. See [the 6.50 release notes](docs/release-6.50.md).
+- Current test-build version: `6.51`. Its Windows file version is 6.510.0.0, so it sorts after 6.50 (6.500) and 6.418. See [the 6.51 release notes](docs/release-6.51.md).
 - The October 19 lyric release packages the new credit cleanup, reliable interlude dots, QQ QRC and trusted-ID AMLL fallback in the modern Windows x64 Setup and portable ZIP. A packaging review corrected QQ's fallback to the pinned SDK's real `request` interface and verified it with the actual packaged dependency over loopback. Final verification passed **5443 Python tests / 287.814 seconds**, 12 native suites, 274 package checks, frozen EXE acceptance, 14 offline adapter checks and ten isolated installer scenarios; all 8399 ZIP entries passed CRC and per-file SHA-256. All 421 frozen source/build inputs remained unchanged, and previous dated releases are retained. See [artifacts, verification and usage](docs/windows-release-lyrics-2026-10-19.md). Real account coverage, physical-display smoothness and listening remain unverified.
 - The October 19 lyric-pipeline source follow-up expands evidence-based credit cleanup, adds display-only middle-gap dots from reliable real word endings, and obtains QQ QRC plus bounded trusted-ID AMLL TTML fallback without a new dependency. Raw lyrics, translation/romanization provenance, identity/version guards and existing provider/cache boundaries are retained. Final native Windows verification passed **5442 Python tests in 288.230 seconds**, 904 follow-up checks at each DPR 1/2 and 364 production-renderer frames per scale; all 386 frozen source files remained unchanged. Public fixed-ID QQ and AMLL read-only probes succeeded, while the existing QQ search entry missed the sample; account playback, long-session listening and physical-display smoothness remain unverified. Version and existing packages are unchanged. See [staged implementation, evidence and limits](docs/lyric-pipeline-2026-10-19.md).
 - The October 19 window-visibility release restores a proportionate **960 × 540 (16:9)** first player window, with 4:3 fallback for narrow work areas, while preserving manually resized windows and the **330 × 400** minimum. Completed compression clears inherited fullscreen/bar hiding state and restores the native island before aligning it to the cached preview, including formerly minimized windows. The production-credit cleanup/countdown option is removed and fixed on, including legacy disabled settings. Final verification passed **5310 Python tests in 276.895 seconds**, 542 related tests at each DPR 1/2, and six isolated native window lifecycle scenarios with 14 visible, non-minimized checkpoints. The new dated window-visibility Setup and portable ZIP passed 249 package checks, frozen EXE acceptance, 12 native suites, 14 offline runtime checks, ten isolated installer scenarios and all 8399 ZIP entries' CRC/per-file SHA-256 checks. All 397 frozen Python sources remained unchanged through packaging; the previous window-resize release is preserved. See [fixes, artifacts and verification](docs/window-visibility-and-release-2026-10-19.md).
@@ -438,7 +438,7 @@ No live login, credential operation, NetEase restart or PC launch was performed.
 
 ## Windows Test Build
 
-The 6.50 test packages use the PyInstaller `onedir` build. The Setup, portable ZIP and source archive are saved in `release` and published in GitHub Release v6.50. The layout keeps Qt plugins, fonts, icons, data files, and local lyrics beside the executable.
+The 6.51 test packages use the PyInstaller `onedir` build. The Setup, portable ZIP and source archive are saved in `release` and published in GitHub Release v6.51. The layout keeps Qt plugins, fonts, icons, data files, and local lyrics beside the executable.
 
 The modern runtime targets **Windows 10 1809 or later, x64** (or Windows 11). Its existing packages do not support Windows 7/8.1. A separate **Windows 7 SP1 x64 compatibility candidate** uses Python 3.8 / Qt 5 and program playback only, with unavailable SMTC capture/publication and default local output. Its build, OS-update prerequisites and actual acceptance limits are recorded in the [Windows 7 report](docs/windows-7-compatibility-2026-10-17.md). An installer that opens on an older system does not establish that its application can run there.
 
@@ -451,7 +451,7 @@ Build from the project root:
 Expected output:
 
 ```text
-release\GluSpot-6.50\GluSpot.exe
+release\GluSpot-6.51\GluSpot.exe
 ```
 
 The package is an unsigned internal test build. It does not include Steamworks ownership validation and should not be treated as a public release artifact.
@@ -462,13 +462,13 @@ After building the application, create the custom per-user installer with Inno S
 & packaging/windows/build-installer.ps1
 ```
 
-The build produces `release\GluSpot-6.50-Setup-x64.exe`. It offers a dedicated installation directory and a Windows uninstall entry. Higher-version upgrades preserve settings and accounts in the sibling `GluSpot\` data directory; same/lower versions require overwrite confirmation and are rejected in silent mode. Registered installations upgrade in their original directory. The installer stops only a running executable whose resolved path matches that exact target directory; other copies are preserved. Interrupted upgrades restore the previous binaries. Full uninstall clears owned configuration, accounts and caches while preserving unrelated files. See [the current installer storyboard and acceptance evidence](docs/installer-storyboard-and-song-collection-2026-10-16.md).
+The build produces `release\GluSpot-6.51-Setup-x64.exe`. It offers a dedicated installation directory and a Windows uninstall entry. Higher-version upgrades preserve settings and accounts in the sibling `GluSpot\` data directory; same/lower versions require overwrite confirmation and are rejected in silent mode. Registered installations upgrade in their original directory. The installer stops only a running executable whose resolved path matches that exact target directory; other copies are preserved. Interrupted upgrades restore the previous binaries. Full uninstall clears owned configuration, accounts and caches while preserving unrelated files. See [the current installer storyboard and acceptance evidence](docs/installer-storyboard-and-song-collection-2026-10-16.md).
 
 Fresh frozen copies keep their own data beside the executable and show first-use choices even if another copy has existing AppData settings. Source checkouts retain their established data locations. Both playback choices default on and at least one must remain selected. First use is a black expanded island, accepting the installer's final physical bounds through a checked monitor/DPI handoff. Program playback opens the existing source/login page; closing it returns to the waiting island. A verified active MyFinder bar selects Finder Bar; otherwise the initial waiting placement is Top. Existing configured installations keep their saved playback choices.
 
 The legacy Qt 5 variant always enables program playback and disables system capture, including stale saved selections. Switch local output in Windows; unsupported explicit endpoint actions are disabled in its device list. It is separate from the modern release and still requires real Win7 installation, login and playback acceptance.
 
-The `GluSpot-6.50` directory is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
+The `GluSpot-6.51` directory is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
 
 Known Windows test-build caveats:
 

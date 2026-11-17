@@ -144,3 +144,45 @@ test('wheel line and page units become consistent pixels for trackpads and mouse
   assert.equal(normalizeWheelDelta({ deltaMode: 1, deltaY: 3 }), 48);
   assert.equal(normalizeWheelDelta({ deltaMode: 2, deltaY: -1 }, 900), -900);
 });
+
+test('pinned scenes map native scroll to progress and clamp outside the runway', async () => {
+  const { pinProgress } = await import('../src/storyTimeline.js');
+  assert.equal(pinProgress(200, 3000, 900), 0);
+  assert.equal(pinProgress(0, 3000, 900), 0);
+  assert.equal(pinProgress(-1050, 3000, 900), .5);
+  assert.equal(pinProgress(-2100, 3000, 900), 1);
+  assert.equal(pinProgress(-5000, 3000, 900), 1);
+  assert.equal(pinProgress(-10, 900, 900), 0);
+  assert.equal(pinProgress(NaN, 3000, 900), 0);
+});
+
+test('step centres land inside each hold so a click scrolls to a settled state', async () => {
+  const { phaseCenter, SCENE_HOLD, SCENE_TRANSITION } = await import('../src/storyTimeline.js');
+  for (const count of [3, 4]) {
+    for (let index = 0; index < count; index += 1) {
+      const phase = getTimedPhase(phaseCenter(index, count), count, SCENE_HOLD, SCENE_TRANSITION);
+      assert.equal(phase.index, index);
+      assert.equal(phase.transitioning, false);
+      assert.equal(phase.mix, 0);
+    }
+  }
+  assert.equal(phaseCenter(99, 3), phaseCenter(2, 3));
+  assert.equal(phaseCenter(-1, 3), phaseCenter(0, 3));
+});
+
+test('scroll smoothing is monotonic, never overshoots and settles exactly', async () => {
+  const { approach, smoothstep } = await import('../src/storyTimeline.js');
+  let value = 0;
+  for (let frame = 0; frame < 200; frame += 1) {
+    const next = approach(value, 1, 16);
+    assert.ok(next >= value && next <= 1);
+    value = next;
+  }
+  assert.equal(value, 1);
+  assert.equal(approach(.5, .5001, 16), .5001);
+  assert.equal(approach(NaN, .3, 16), .3);
+  assert.ok(approach(1, 0, 16) < 1);
+  assert.equal(smoothstep(.5), .5);
+  assert.equal(smoothstep(-1), 0);
+  assert.equal(smoothstep(2), 1);
+});

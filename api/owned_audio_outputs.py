@@ -226,8 +226,25 @@ class OwnedAudioOutputController:
             added = next((d for d in devices if d.id not in previous_ids), None)
             if added is not None:
                 self._notice(added.name, "播放设备已接入", added.id)
+                if self._should_follow_new_device(added, legacy):
+                    # A headset that connects on its own while a song plays on
+                    # one device takes over, as on a phone.
+                    self._choose((added.id,))
         self._last_inventory = time.monotonic()
         return True
+
+    def _should_follow_new_device(self, device, legacy):
+        """Follow a newly connected local output in single-device playback.
+
+        Bluetooth outputs, or one Windows itself made the default (a USB
+        headset), mean "listen here now". Monitor speakers waking up and
+        AirPlay receivers merely discovered on the network do not.
+        """
+        return (not legacy and device.transport == "windows" and device.available
+                and (device.is_bluetooth or device.is_default)
+                and not self._running and not self._members
+                and device.id != self._single_id
+                and bool(self.bridge.media_token()[0]))
 
     def _notice(self, name, message, identity=""):
         current = self.snapshot()

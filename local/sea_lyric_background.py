@@ -509,8 +509,10 @@ def vignette(color: QColor, ink: str):
 
 # --- plan ----------------------------------------------------------------------
 
-CHANGE_LEAD_S = 8.0
-COVER_S = 6.0
+# The whole change lasts 4.5 s and lands on the climax: a 1.35 s build, a
+# fast even sweep, a short settle (see change_curve).
+CHANGE_LEAD_S = 2.0
+COVER_S = 2.5
 RAMP_S = 24.0
 
 
@@ -537,6 +539,27 @@ class SeaPlan:
         return None if self.change_end is None else self.change_end - COVER_S
 
 
+# How much of the page the new colour covers over the change window, 0..1.
+# The first 30% of the time only builds (about an eighth of the page), then
+# the colour sweeps in fast and evenly, and only the last 5% eases out at the
+# climax. A clear, decisive change instead of a long creep.
+CHANGE_BUILD_TIME = 0.30
+CHANGE_BUILD_COVER = 0.12
+CHANGE_SETTLE_TIME = 0.95
+CHANGE_SETTLE_COVER = 0.97
+
+
+def change_curve(x: float) -> float:
+    x = max(0.0, min(1.0, float(x)))
+    if x < CHANGE_BUILD_TIME:
+        return CHANGE_BUILD_COVER * (x / CHANGE_BUILD_TIME) ** 2
+    if x < CHANGE_SETTLE_TIME:
+        u = (x - CHANGE_BUILD_TIME) / (CHANGE_SETTLE_TIME - CHANGE_BUILD_TIME)
+        return CHANGE_BUILD_COVER + (CHANGE_SETTLE_COVER - CHANGE_BUILD_COVER) * u
+    u = (x - CHANGE_SETTLE_TIME) / (1.0 - CHANGE_SETTLE_TIME)
+    return CHANGE_SETTLE_COVER + (1.0 - CHANGE_SETTLE_COVER) * (1.0 - (1.0 - u) ** 2)
+
+
 def push_schedule(start: float, end: float):
     begin = start - CHANGE_LEAD_S
     span = max(1e-6, end - begin)
@@ -547,7 +570,10 @@ def push_schedule(start: float, end: float):
     while moment < end:
         times.append(moment)
         moment += first * (0.12 / first) ** ((moment - begin) / span)
-    weights = [((t - begin) / span) ** 1.6 + 0.02 for t in times]
+    # Each push carries the coverage the curve gains until the next push,
+    # so the summed pushes trace change_curve (each eases in over 0.18 s).
+    edges = [(t - begin) / span for t in times] + [1.0]
+    weights = [max(0.0, change_curve(b) - change_curve(a)) for a, b in zip(edges, edges[1:])]
     total = sum(weights) or 1.0
     return tuple((t, w / total) for t, w in zip(times, weights))
 
@@ -597,6 +623,31 @@ def coverage_for_height(fraction_from_top: float, aspect: float = 16.0 / 9.0) ->
 WORD_SWITCH_LEVELS = (coverage_for_height(0.62), coverage_for_height(0.28))
 
 
+def change_progress(plan: "SeaPlan", t: float) -> float:
+    """0..1 through the change window (build, sweep, settle), or -1 outside it."""
+    end, start = plan.change_end, plan.change_start
+    if end is None or start is None:
+        return -1.0
+    begin = start - CHANGE_LEAD_S
+    if t < begin or t >= end:
+        return -1.0
+    return (t - begin) / max(1e-6, end - begin)
+
+
+def word_switch_times(change_end: float) -> tuple[float, float]:
+    """When the growing colour passes the lower and the upper lyric lines."""
+    begin = change_end - COVER_S - CHANGE_LEAD_S
+    span = change_end - begin
+    times = []
+    for level in WORD_SWITCH_LEVELS:
+        low, high = 0.0, 1.0
+        for _ in range(40):
+            mid = (low + high) / 2.0
+            low, high = (mid, high) if change_curve(mid) < level else (low, mid)
+        times.append(begin + high * span)
+    return times[0], times[1]
+
+
 def coverage_at(t: float, pushes) -> float:
     covered = 0.0
     for moment, share in pushes:
@@ -633,16 +684,7 @@ def analyse(pcm: np.ndarray, plan: SeaPlan) -> SeaPlan:
     plan.drums = tuple(shown)
     plan.syllables = tuple((a, b, min(1.0, s * _gain(a, change))) for a, b, s in syllables)
     if change is not None:
-        plan.pushes = push_schedule(change - COVER_S, change)
-        switch = []
-        for level in WORD_SWITCH_LEVELS:
-            moment = change
-            for push_time, _share in plan.pushes:
-                if coverage_at(push_time + 0.18, plan.pushes) >= level:
-                    moment = push_time + 0.18
-                    break
-            switch.append(moment)
-        plan.word_switch = (switch[0], switch[1])
+        _schedule_change(plan)
     plan.ready = True
     return plan
 
@@ -697,6 +739,7 @@ class SeaAnalyzer(QObject):
         plan.pushes = tuple((float(a), float(b)) for a, b in data.get("pushes") or ())
         switch = data.get("word_switch")
         plan.word_switch = (float(switch[0]), float(switch[1])) if switch else None
+        _schedule_change(plan)
         plan.audio_seconds = float(data.get("audio_seconds") or 0.0)
         plan.analysed_at = time.monotonic()
         plan.ready = plan.adopted = True
@@ -839,6 +882,15 @@ def word_ink_mix(plan: SeaPlan, t: float) -> float:
     return x * x * (3.0 - 2.0 * x)
 
 
+def _schedule_change(plan: SeaPlan) -> None:
+    """Pushes and word timing follow the current change curve and window,
+    also for plans analysed (or stored) under an older timing."""
+    if plan.change_end is None:
+        return
+    plan.pushes = push_schedule(plan.change_end - COVER_S, plan.change_end)
+    plan.word_switch = word_switch_times(plan.change_end)
+
+
 def render(width: int, height: int, plan: SeaPlan, t: float, playing: bool = True) -> QImage:
     """One frame of the field at playback time ``t``, ``width`` x ``height`` (small)."""
     width, height = max(2, int(width)), max(2, int(height))
@@ -852,8 +904,11 @@ def render(width: int, height: int, plan: SeaPlan, t: float, playing: bool = Tru
     painter.drawImage(0, 0, _vignette_image(width, height, plan.after if after_now else plan.before,
                                             plan.after_ink if after_now else plan.before_ink))
     far = math.hypot(width, height) * 0.5
-    if end is not None and start is not None and start - CHANGE_LEAD_S <= t < end and plan.pushes:
-        covered = coverage_at(t, plan.pushes)
+    progress = change_progress(plan, t)
+    if progress >= 0.0:
+        # The colour grows continuously along the curve: no stepped pushes,
+        # so nothing flickers while it spreads.
+        covered = change_curve(progress)
         centre, radius, feather, full = change_geometry(width, height, covered)
         total = full + feather
         if covered > 0.0005:
@@ -883,20 +938,12 @@ def render(width: int, height: int, plan: SeaPlan, t: float, playing: bool = Tru
             fp.drawImage(0, 0, mask)
             fp.end()
             painter.drawImage(0, 0, fresh)
-        level = 0.0
-        span = max(1e-6, end - (start - CHANGE_LEAD_S))
-        for push_time, _share in plan.pushes:
-            elapsed = t - push_time
-            if elapsed < 0.0:
-                break
-            if elapsed <= 0.54:
-                strength = 0.40 + 0.55 * (push_time - (start - CHANGE_LEAD_S)) / span
-                level = max(level, strength * min(1.0, elapsed / 0.02) * math.exp(-elapsed / 0.18))
+        # A dark, steady band rides the spreading edge, strongest mid-sweep:
+        # the change reads as a wave of shade sweeping the old colour away,
+        # instead of a train of white flashes.
+        level = math.sin(math.pi * min(1.0, progress / 0.97)) ** 2
         if level > 0.01:
-            # Each push is a wash of light around the spreading edge, as wide
-            # and soft as a drum flash: a bell curve across about a
-            # half-diagonal either side, never a thin ring.
-            glow = _mix(plan.after, QColor(255, 255, 255), 0.25)
+            glow = _mix(plan.after, QColor(0, 0, 0), 0.62)
             band = far * 0.50
             ring = QRadialGradient(centre, total)
             for step in range(25):
@@ -913,9 +960,46 @@ def render(width: int, height: int, plan: SeaPlan, t: float, playing: bool = Tru
                                     width / stretch + 2.0, float(height)))
             painter.restore()
     if playing:
+        _paint_landing(painter, width, height, plan, t)
         _paint_lights(painter, width, height, plan, t)
     painter.end()
     return image
+
+
+LANDING_S = 0.75       # the shade the new colour breaks through at the climax
+LANDING_PEAK = 0.42
+
+
+def landing_level(plan: SeaPlan, t: float) -> float:
+    """0..1 bloom right after the change completes: a 60 ms rise, then a fade."""
+    end = plan.change_end
+    if end is None or plan.solid:
+        return 0.0
+    elapsed = t - end
+    if elapsed < 0.0 or elapsed >= LANDING_S:
+        return 0.0
+    rise = min(1.0, elapsed / 0.06)
+    fade = (1.0 - elapsed / LANDING_S) ** 2
+    return rise * fade
+
+
+def _paint_landing(painter: QPainter, width: int, height: int, plan: SeaPlan, t: float) -> None:
+    level = landing_level(plan, t)
+    if level <= 0.005:
+        return
+    # Shade from the edges inward, clear at the bottom centre where the new
+    # colour rose: the colour seems to burst out of a darkening page.
+    shade = _mix(plan.after, QColor(0, 0, 0), 0.85)
+    centre = QPointF(width * 0.5, height * CHANGE_ORIGIN_Y)
+    reach = math.hypot(width * 0.5, height * CHANGE_ORIGIN_Y) * 1.15
+    bloom = QRadialGradient(centre, reach)
+    bloom.setColorAt(0.0, _with_alpha(shade, 0.0))
+    bloom.setColorAt(0.45, _with_alpha(shade, LANDING_PEAK * 0.55 * level))
+    bloom.setColorAt(1.0, _with_alpha(shade, LANDING_PEAK * level))
+    painter.save()
+    painter.setBrush(bloom)
+    painter.drawRect(QRectF(0.0, 0.0, float(width), float(height)))
+    painter.restore()
 
 
 DRUM_MIN = 0.70        # only hits with weight flash
@@ -934,7 +1018,7 @@ def _paint_lights(painter: QPainter, width: int, height: int, plan: SeaPlan, t: 
     """
     end, start = plan.change_end, plan.change_start
     changing = start is not None and end is not None and start - CHANGE_LEAD_S <= t < end
-    light = _mix(plan.after, QColor(255, 255, 255), 0.25) if changing else QColor(255, 255, 255)
+    light = _mix(plan.after, QColor(255, 255, 255), 0.55) if changing else QColor(255, 255, 255)
     level = light_level(plan, t)
     _paint_light_level(painter, width, height, light, level)
 
@@ -1078,7 +1162,7 @@ def island_tint(track_id: str, position: float, duration: float, image: QImage |
         return QColor(plan.before), QColor(plan.after), 0.0
     if position >= window[1]:
         return QColor(plan.before), QColor(plan.after), 1.0
-    return QColor(plan.before), QColor(plan.after), ease_in_out((position - window[0]) / ISLAND_CHANGE_S)
+    return QColor(plan.before), QColor(plan.after), change_curve((position - window[0]) / ISLAND_CHANGE_S)
 
 
 
@@ -1092,7 +1176,7 @@ def is_moving(plan: SeaPlan, t: float, playing: bool) -> bool:
     if not playing:
         return False
     end, start = plan.change_end, plan.change_start
-    if end is not None and start is not None and start - CHANGE_LEAD_S <= t < end + 0.2:
+    if end is not None and start is not None and start - CHANGE_LEAD_S <= t < end + LANDING_S:
         return True
     if plan.word_switch is not None:
         blend_start, blend_end = plan.word_switch
@@ -1119,6 +1203,7 @@ def add_lights(image: QImage, plan: SeaPlan, t: float) -> None:
     painter = QPainter(image)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    _paint_landing(painter, image.width(), image.height(), plan, t)
     _paint_lights(painter, image.width(), image.height(), plan, t)
     painter.end()
 
