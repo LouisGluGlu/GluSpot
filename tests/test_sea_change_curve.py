@@ -15,22 +15,23 @@ class SeaChangeCurveTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_slow_build_then_fast_even_sweep_then_short_settle(self):
-        self.assertAlmostEqual(change_curve(0.30), 0.12, places=3)
-        self.assertAlmostEqual(change_curve(0.95), 0.97, places=3)
+    def test_change_follows_the_websites_cubic_bezier(self):
+        # cubic-bezier(.6, 0, .3, 1): a held breath, one fast sweep, a settle.
+        self.assertEqual(change_curve(0.0), 0.0)
         self.assertEqual(change_curve(1.0), 1.0)
-        early = change_curve(0.15) - change_curve(0.0)
-        middle = change_curve(0.65) - change_curve(0.50)
-        self.assertGreater(middle, 3 * early)          # the sweep is far faster than the build
-        self.assertAlmostEqual(change_curve(0.6) - change_curve(0.5), change_curve(0.8) - change_curve(0.7), places=6)
+        self.assertLess(change_curve(0.2), 0.06)
+        self.assertAlmostEqual(change_curve(0.5), 0.5, delta=0.12)
+        self.assertGreater(change_curve(0.8), 0.94)
+        values = [change_curve(i / 50) for i in range(51)]
+        self.assertEqual(values, sorted(values))
+        self.assertGreater(change_curve(0.55) - change_curve(0.45), 4 * (change_curve(0.1) - change_curve(0.0)))
+        self.assertAlmostEqual(CHANGE_LEAD_S + COVER_S, 2.2)
 
     def test_pushes_trace_the_curve_and_finish_at_the_climax(self):
         end = 120.0
         pushes = push_schedule(end - COVER_S, end)
-        begin = end - COVER_S - CHANGE_LEAD_S
-        for fraction in (0.3, 0.6, 0.9):
-            self.assertAlmostEqual(coverage_at(begin + fraction * (end - begin), pushes),
-                                   change_curve(fraction), delta=0.03)
+        # Pushes are only timing anchors now; the field follows change_curve.
+        self.assertAlmostEqual(sum(share for _t, share in pushes), 1.0, places=6)
         self.assertAlmostEqual(coverage_at(end + 0.2, pushes), 1.0, places=3)
 
     def test_landing_bloom_peaks_right_after_the_change_and_keeps_the_field_moving(self):

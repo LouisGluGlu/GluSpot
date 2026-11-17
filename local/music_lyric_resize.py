@@ -476,7 +476,10 @@ class MusicLyricResizeMixin:
             painter.restore()
             return
         if layout == 'cover_lyrics' and not kwargs.get('navigation_capture', False):
-            self._paint_lyric_cover_shade(painter, target)
+            # The shade sits exactly on the painted card, so it turns with it.
+            painted = kwargs.get('painted_cover')
+            self._paint_lyric_cover_shade(
+                painter, QRectF(painted) if painted is not None and not self._lyric_resize_frozen else target)
         if self._lyric_resize_frozen or self._lyric_resize_crossfade_at is not None:
             self._disable_resize_lyric_hits()
             self._paint_resize_ink(painter, target,

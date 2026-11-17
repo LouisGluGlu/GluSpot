@@ -18,7 +18,7 @@ from PIL import Image, ImageFilter
 from local.artwork_skeleton import paint_artwork_skeleton
 from local.track_cover_transition import (
     ARTWORK_UPGRADE_SECONDS, cover_transition_progress,
-    paint_track_cover_flip, paint_cover_transition_light,
+    paint_track_cover_flip, paint_cover_transition_light, track_cover_flip_transform, track_cover_flip_width,
 )
 from local.spring_motion import FlickScroll, background_follow, rubber_band
 
@@ -2565,6 +2565,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         static_backdrop = (self._album_flow_background.backdrop_variant != "classic"
                            and not self._sea_active()) or (self._sea_active() and not sea_moving)
         backdrop_period = self.SEA_FRAME_SECONDS if sea_moving else self.AMBIENT_FRAME_SECONDS
+        if sea_moving and self._sea_changing():
+            # The 2.2 s colour change repaints every tick, like the
+            # website's composited mask; 20 fps read as stepping.
+            backdrop_period = 0.0
         if (
             self._previous_track_visual is not None
             or self._track_visual is None
@@ -3976,6 +3980,41 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
                 height, segment, font, local, unread,
                 wave_progress=wave, wave_unit_indices=mappings[index], wave_unit_count=count,
             )
+
+    def _paint_aside_dissolve(
+        self, painter, layout, origin, text, font, width, height, offsets, blur_level,
+        window_end, position,
+    ) -> bool:
+        """A finished aside breaks into particles left to right, then the
+        blurred aside settles in behind them. False outside that exit."""
+        from local import aside_dissolve
+        phase = aside_dissolve.dissolve_phase(window_end, position)
+        if phase is None:
+            return False
+        color = self._sung_lyric_color()
+        ratio = self.devicePixelRatioF()
+        key = (text, font.toString(), round(width, 1), round(height, 1),
+               tuple(round(o, 1) for o in offsets), QColor(color).rgba(), ratio)
+        cache = getattr(self, "_aside_sprite_cache", None)
+        if cache is None:
+            cache = self._aside_sprite_cache = OrderedDict()
+        sprite = cache.get(key)
+        if sprite is None:
+            sprite = aside_dissolve.build_sprite(layout, text, font, width, height, color, offsets, ratio)
+            cache[key] = sprite
+            while len(cache) > 6:
+                cache.popitem(last=False)
+        settle = aside_dissolve.blur_settle(phase)
+        if settle > 0.001:
+            painter.save()
+            painter.setOpacity(painter.opacity() * settle)
+            self._draw_sprung_cached_wrapped_layout(
+                painter, layout, origin, text, font, width, height, color, offsets,
+                blur_level=blur_level,
+            )
+            painter.restore()
+        aside_dissolve.paint_particles(painter, sprite, origin, phase)
+        return True
 
     def on_translation_visibility_changed(self, enabled: bool) -> None:
         """Retain the outgoing companion long enough for a visible collapse."""
@@ -8121,8 +8160,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
                 content.left(), original_cover.bottom(), original_cover.width(),
                 max(0.0, rect.bottom() - original_cover.bottom()),
             ))
+        reach = .35 if float(getattr(self, "_broadcast_cover_slot", 0.0) or 0.0) > 0.001 else 0.0
         self._cover_animation_rect = cover_dirty.adjusted(
-            -cover_dirty.width() * .5, -2.0, cover_dirty.width() * .5, cover_dirty.height() * .20,
+            -cover_dirty.width() * .5, -2.0 - cover_dirty.height() * reach,
+            cover_dirty.width() * .5, cover_dirty.height() * max(.20, reach),
         ).intersected(rect).toAlignedRect()
         cover_scale = self._cover_scale_at(cover_now)
         painted_cover = self._scaled_cover_rect(cover, cover_scale)
@@ -8335,17 +8376,48 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         self._record_paint_cost(paint_started, _event)
 
     def _paint_lyric_cover_shade(self, painter, painted_cover):
-        painter.save()
+        # The shade belongs to the card: it turns with the song-change flip
+        # instead of staying a flat square the turning cover shows through,
+        # and it gives way while the broadcast face takes the card.
+        progress, broadcast = self._cover_card_turn(time.monotonic())
+        if broadcast and progress >= 0.999:
+            return
         radius = self._album_art_radius(painted_cover.width())
-        path = self._cover_clip_path(painted_cover, radius)
-        painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
-        shade = QLinearGradient(painted_cover.left(), painted_cover.top(), painted_cover.left(), painted_cover.bottom())
-        shade.setColorAt(0., QColor(0, 0, 0, 0))
-        shade.setColorAt(.42, QColor(0, 0, 0, 12))
-        shade.setColorAt(.72, QColor(0, 0, 0, 135))
-        shade.setColorAt(1., QColor(0, 0, 0, 180))
-        painter.fillRect(painted_cover, shade)
+
+        def face(outgoing):
+            if broadcast and not outgoing:
+                return              # the broadcast side of the card has no shade
+            painter.save()
+            path = self._cover_clip_path(painted_cover, radius)
+            painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+            shade = QLinearGradient(painted_cover.left(), painted_cover.top(), painted_cover.left(), painted_cover.bottom())
+            shade.setColorAt(0., QColor(0, 0, 0, 0))
+            shade.setColorAt(.42, QColor(0, 0, 0, 12))
+            shade.setColorAt(.72, QColor(0, 0, 0, 135))
+            shade.setColorAt(1., QColor(0, 0, 0, 180))
+            painter.fillRect(painted_cover, shade)
+            painter.restore()
+
+        painter.save()
+        paint_track_cover_flip(painter, painted_cover, radius, progress, face, edge_shade=False)
         painter.restore()
+
+    def _cover_card_turn(self, now: float) -> tuple[float, bool]:
+        """(flip progress, by a broadcast) of the cover card right now.
+
+        A broadcast turning the card in or out wins over a song change.
+        """
+        slot = max(0.0, min(1.0, float(getattr(self, "_broadcast_cover_slot", 0.0) or 0.0)))
+        if slot > 0.001:
+            return slot, True
+        return self._track_cover_progress(now), False
+
+    def _cover_lyric_flip_opacity(self, now: float) -> float:
+        """Lyrics on the cover fade as the card turns edge-on and return with it."""
+        progress, broadcast = self._cover_card_turn(now)
+        if broadcast and progress >= 0.999:
+            return 1.0
+        return track_cover_flip_width(progress) ** 1.5
 
     def _lyric_bottom_fade_band(self, rect: QRectF):
         """Soft ink fade through the stable chrome envelope to the window edge."""
@@ -9321,7 +9393,8 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         )
         active_animation_rect = QRectF()
         painter.save()
-        lyric_opacity = 0. if lyrics_hidden_by_layout else (1. if cover_lyrics_layout else 1.0 - cover_fraction)
+        lyric_opacity = 0. if lyrics_hidden_by_layout else (
+            self._cover_lyric_flip_opacity(time.monotonic()) if cover_lyrics_layout else 1.0 - cover_fraction)
         if (not cover_lyrics_layout and not lyrics_hidden_by_layout
                 and rect.width() < 520.0 and not self._content_layout_is_narrow()):
             # The study hides the lyric column once the window is narrow.
@@ -9337,6 +9410,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         ) else 1.0
         if cover_lyrics_layout:
             path = self._cover_clip_path(painted_cover, self._album_art_radius(painted_cover.width()))
+            turning = track_cover_flip_transform(painted_cover, self._cover_card_turn(time.monotonic())[0])
+            if turning is not None:
+                # Words stay upright but end at the turning card's edge.
+                path = turning.map(path)
             painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
             painter.setWorldTransform(lyric_transform, True)
         else:
@@ -10023,6 +10100,13 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
                                     layer_font, row_width, layer_height, self._sung_lyric_color(),
                                     layer_offsets, blur_level=blur_level * translation_style.blur_factor,
                                 )
+                            elif completed and not aside_reading and self._paint_aside_dissolve(
+                                painter, annotation_layout, layer_origin, layer_text, layer_font,
+                                row_width, layer_height, layer_offsets, blur_level,
+                                aside_window.end_seconds if aside_window is not None else None,
+                                current_position,
+                            ):
+                                pass
                             elif completed and not aside_reading:
                                 annotation_blur = blur_level
                                 if aside_window is not None:
@@ -10112,6 +10196,14 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         from local.sea_lyric_background import is_moving
         position, _duration = self._playback_clock()
         return is_moving(plan, position, bool(getattr(self.owner, "media_is_playing", True)))
+
+    def _sea_changing(self) -> bool:
+        plan = getattr(self, "_sea_plan", None)
+        if plan is None or plan.solid:
+            return False
+        from local.sea_lyric_background import change_progress, landing_level
+        position, _duration = self._playback_clock()
+        return change_progress(plan, position) >= 0.0 or landing_level(plan, position) > 0.0
 
     def _saved_field_style(self) -> str:
         getter = getattr(self.owner, "settings_getter", None)
@@ -11401,6 +11493,11 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         radius = self._broadcast_indicator_radius(painted_cover)
         face_amount = self._sync_style_two_face(now)
         slot = self._broadcast_slot_amount(now) if face_amount is None else face_amount
+        last = float(getattr(self, "_broadcast_cover_slot", 0.0) or 0.0)
+        self._broadcast_cover_slot = slot
+        if (last <= 0.001 < slot) or (last >= 0.999 > slot):
+            # The same ripple as a song change rides the turn.
+            self._begin_art_loading_ring(now)
         from local.motion_cover_playback import note_cover_hidden, note_cover_visible
         if not broadcast_slot_visible(slot):
             self._paint_track_cover_image(painter, painted_cover, radius, now, cache_side=cache_side, motion=True)
@@ -11425,14 +11522,19 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
                 self._paint_broadcast_cover_indicator(painter, painted_cover, radius, now, slot)
             return
         if slot < 0.999:
-            painter.save()
-            painter.setOpacity(painter.opacity() * (1.0 - slot))
-            self._paint_track_cover_image(painter, painted_cover, radius, now, cache_side=cache_side, motion=True)
-            painter.restore()
+            # Start and end of a broadcast turn the card over like a song
+            # change: the cover on one side, the broadcast on the other.
+            def face(outgoing):
+                if outgoing:
+                    self._paint_track_cover_image(painter, painted_cover, radius, now,
+                                                  cache_side=cache_side, motion=True)
+                else:
+                    self._paint_broadcast_cover_indicator(painter, painted_cover, radius, now, 1.0)
+            paint_track_cover_flip(painter, painted_cover, radius, slot, face)
             note_cover_visible(self, painted_cover)
         else:
             note_cover_hidden(self)
-        self._paint_broadcast_cover_indicator(painter, painted_cover, radius, now, slot)
+            self._paint_broadcast_cover_indicator(painter, painted_cover, radius, now, slot)
 
     def _paint_broadcast_cover_indicator(self, painter: QPainter, cover: QRectF, radius: float, now: float, slot: float):
         state = self._broadcast_visual_state(now)
@@ -12512,7 +12614,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         painter.drawRoundedRect(fill, bar_h / 2.0, bar_h / 2.0)
         self._paint_sea_change_mark(painter, bar)
         if self._progress_hover or self._progress_dragging:
-            thumb = 12.0
+            # The ball keeps its proportion to the bar at every scale; a fixed
+            # 12 px ball was barely thicker than the fullscreen bar.
+            thumb = max(12.0 * k, bar_h * 2.2)
             center = bar.left() + bar.width() * ratio
             painter.drawEllipse(QRectF(center - thumb / 2.0, bar.center().y() - thumb / 2.0, thumb, thumb))
 
@@ -12525,14 +12629,27 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         if duration <= 0.0:
             return
         x = bar.left() + bar.width() * max(0.0, min(1.0, plan.change_end / duration))
-        # A thin tick a little taller than the bar, in the new colour. It must
-        # not read as a second drag handle.
-        mark_h = bar.height() + 4.0
-        mark = QRectF(x - 1.0, bar.center().y() - mark_h / 2.0, 2.0, mark_h)
+        # A glowing dot in the new colour with a contrasting ring: easy to
+        # spot on any field, still smaller than the drag ball.
+        centre = QPointF(x, bar.center().y())
+        radius = max(3.5, bar.height() * 1.15)
+        colour = QColor(plan.after)
         painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(plan.after))
-        painter.drawRoundedRect(mark, 1.0, 1.0)
+        halo = QRadialGradient(centre, radius * 3.0)
+        glow = QColor(colour)
+        glow.setAlphaF(0.55)
+        halo.setColorAt(0.0, glow)
+        glow.setAlphaF(0.0)
+        halo.setColorAt(1.0, glow)
+        painter.setBrush(halo)
+        painter.drawEllipse(centre, radius * 3.0, radius * 3.0)
+        ring = QColor(self._surface_glass_ink(bar))
+        ring.setAlphaF(0.95)
+        painter.setBrush(ring)
+        painter.drawEllipse(centre, radius + 1.5, radius + 1.5)
+        painter.setBrush(colour)
+        painter.drawEllipse(centre, radius, radius)
         painter.restore()
 
     def _paint_wide_layout_g_controls(self, painter: QPainter, *, paint_ink: bool, metrics=None) -> None:

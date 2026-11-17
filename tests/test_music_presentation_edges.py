@@ -176,9 +176,11 @@ class MusicPresentationEdgeTests(unittest.TestCase):
                 completed.setdefault(text, (origin.y(), painter.opacity(), kwargs.get("blur_level")))
             return native(painter, layout, origin, text, *args, **kwargs)
 
+        # After the aside's 1.1 s particle exit it rests blurred with its row.
         self._render_at(103.25, 22.25)
+        self._render_at(104.4, 23.4)
         with patch.object(self.window, "_draw_sprung_cached_wrapped_layout", side_effect=record_completed):
-            self._render_at(103.55, 22.55)
+            self._render_at(104.7, 23.7)
         self.assertEqual(set(completed), {"echo", "回声"})
         self.assertAlmostEqual(
             completed["回声"][0] - completed["echo"][0],

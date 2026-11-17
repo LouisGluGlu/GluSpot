@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPainterPath, QRadialGradient
+from PySide6.QtGui import QColor, QPainterPath, QRadialGradient, QTransform
 
 from local.album_island_projection import album_cover_projection
 
@@ -17,11 +17,37 @@ def cover_transition_progress(started, now, duration=TRACK_COVER_SECONDS):
     return max(0., min(1., (now - started) / duration)) if started > 0. else 1.
 
 
-def paint_track_cover_flip(painter, rect, radius, progress, paint_face):
+def track_cover_flip_width(progress):
+    """How much of the card faces the viewer, 1 at rest, 0 edge-on."""
+    if progress >= 1. or progress <= 0.:
+        return 1.
+    eased = progress * progress * (3. - 2. * progress)
+    return abs(math.cos(math.pi * (eased if eased < .5 else eased - 1.)))
+
+
+def track_cover_flip_transform(rect, progress):
+    """The flip's mapping of the card, or None at rest or edge-on."""
+    if progress >= 1. or progress <= 0.:
+        return None
+    eased = progress * progress * (3. - 2. * progress)
+    angle = math.pi * (eased if eased < .5 else eased - 1.)
+    width = abs(math.cos(angle))
+    if width < .012:
+        return None
+    taper = .32 * abs(math.sin(angle))
+    perspective = {"left_height": 1. - (taper if angle < 0. else 0.),
+                   "right_height": 1. - (taper if angle >= 0. else 0.)}
+    centre = rect.center()
+    squeeze = QTransform().translate(centre.x(), centre.y()).scale(width, 1.).translate(-centre.x(), -centre.y())
+    return album_cover_projection(rect, perspective) * squeeze
+
+
+def paint_track_cover_flip(painter, rect, radius, progress, paint_face, *, edge_shade=True):
     """Paint one unmirrored face; paint_face receives whether it is outgoing."""
     if progress >= 1.:
         paint_face(False)
         return
+    progress = max(0., progress)
     eased = progress * progress * (3. - 2. * progress)
     angle = math.pi * (eased if eased < .5 else eased - 1.)
     width = abs(math.cos(angle))
@@ -37,9 +63,10 @@ def paint_track_cover_flip(painter, rect, radius, progress, paint_face):
     painter.setWorldTransform(album_cover_projection(rect, perspective), combine=True)
     painter.setRenderHint(painter.RenderHint.SmoothPixmapTransform)
     paint_face(eased < .5)
-    shade = QPainterPath()
-    shade.addRoundedRect(rect, radius, radius)
-    painter.fillPath(shade, QColor(0, 0, 0, round(65 * (1. - width))))
+    if edge_shade:
+        shade = QPainterPath()
+        shade.addRoundedRect(rect, radius, radius)
+        painter.fillPath(shade, QColor(0, 0, 0, round(65 * (1. - width))))
     painter.restore()
 
 

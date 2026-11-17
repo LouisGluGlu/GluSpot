@@ -266,15 +266,26 @@ class MusicBracketLayoutTests(unittest.TestCase):
         self.assertLess(near_quarter, 1.0)
         self.assertGreater(near_quarter, at_c_start)
 
-        sample(4.75, 101.75)  # End of C's first quarter starts its ordinary blur settle.
-        endpoint_blur = next(value for at, text, value, _top in blurred if at == 4.75 and text == "echo")
-        self.assertEqual(endpoint_blur, 0.0)
-        sample(4.84, 101.84)
-        halfway_blur = next(value for at, text, value, _top in blurred if at == 4.84 and text == "echo")
-        self.assertGreater(halfway_blur, endpoint_blur)
-        sample(4.94, 101.94)
-        settled_blur = next(value for at, text, value, _top in blurred if at == 4.94 and text == "echo")
-        self.assertGreater(settled_blur, halfway_blur)
+        # End of C's first quarter: the aside breaks into particles from the
+        # left, and only then does its blurred copy settle in behind them.
+        from local import aside_dissolve
+        exits = []
+        original_particles = aside_dissolve.paint_particles
+
+        def record_particles(painter, sprite, origin, phase):
+            exits.append(phase)
+            return original_particles(painter, sprite, origin, phase)
+
+        with patch.object(aside_dissolve, "paint_particles", side_effect=record_particles):
+            sample(4.75, 101.75)
+            sample(4.84, 101.84)
+        self.assertGreaterEqual(len(exits), 2)
+        self.assertLess(exits[0], exits[-1])
+        self.assertFalse(any(at in (4.75, 4.84) and text == "echo" for at, text, _v, _top in blurred))
+        sample(4.75 + aside_dissolve.DISSOLVE_S + 0.05, 101.75 + aside_dissolve.DISSOLVE_S + 0.05)
+        settled_blur = next(value for at, text, value, _top in blurred
+                            if at > 5.8 and text == "echo")
+        self.assertGreater(settled_blur, 0.0)
         self.assertTrue(any(at == 4.0 and text == "echo" and top == c_start_top for at, text, _p, top in highlighted))
 
     def test_parenthetical_clock_is_shared_by_cover_modes_fullscreen_and_translation_toggle(self):

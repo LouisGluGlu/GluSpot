@@ -31,8 +31,9 @@ class SeaChangeFromBottomTests(unittest.TestCase):
     def test_new_colour_grows_as_a_ball_from_the_bottom(self):
         end = 60.0
         plan = _plan(change_end=end, pushes=sea.push_schedule(end - sea.COVER_S, end))
-        moment = next(t / 10.0 for t in range(400, 600)
-                      if 0.30 <= sea.coverage_at(t / 10.0, plan.pushes) <= 0.45)
+        moment = next(t / 100.0 for t in range(5000, 6000)
+                      if 0.30 <= sea.change_curve(max(0.0, sea.change_progress(plan, t / 100.0))) <= 0.45
+                      and sea.change_progress(plan, t / 100.0) >= 0.0)
         frame = sea.render(320, 180, plan, moment, playing=False)
         bottom = frame.pixelColor(160, 176)
         top_left = frame.pixelColor(4, 4)

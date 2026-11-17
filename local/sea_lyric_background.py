@@ -509,10 +509,10 @@ def vignette(color: QColor, ink: str):
 
 # --- plan ----------------------------------------------------------------------
 
-# The whole change lasts 4.5 s and lands on the climax: a 1.35 s build, a
-# fast even sweep, a short settle (see change_curve).
-CHANGE_LEAD_S = 2.0
-COVER_S = 2.5
+# The whole change lasts 2.2 s and lands on the climax, the same growth the
+# website's sea uses between songs (see change_curve).
+CHANGE_LEAD_S = 0.9
+COVER_S = 1.3
 RAMP_S = 24.0
 
 
@@ -539,25 +539,26 @@ class SeaPlan:
         return None if self.change_end is None else self.change_end - COVER_S
 
 
-# How much of the page the new colour covers over the change window, 0..1.
-# The first 30% of the time only builds (about an eighth of the page), then
-# the colour sweeps in fast and evenly, and only the last 5% eases out at the
-# climax. A clear, decisive change instead of a long creep.
-CHANGE_BUILD_TIME = 0.30
-CHANGE_BUILD_COVER = 0.12
-CHANGE_SETTLE_TIME = 0.95
-CHANGE_SETTLE_COVER = 0.97
+# How much of the page the new colour covers over the change window, 0..1:
+# CSS cubic-bezier(.6, 0, .3, 1), the website's sea transition. A held
+# breath, one fast sweep, a short settle on the climax.
+CHANGE_BEZIER = (0.6, 0.0, 0.3, 1.0)
+
+
+def _bezier(a: float, b: float, u: float) -> float:
+    return 3.0 * a * u * (1.0 - u) ** 2 + 3.0 * b * u * u * (1.0 - u) + u ** 3
 
 
 def change_curve(x: float) -> float:
     x = max(0.0, min(1.0, float(x)))
-    if x < CHANGE_BUILD_TIME:
-        return CHANGE_BUILD_COVER * (x / CHANGE_BUILD_TIME) ** 2
-    if x < CHANGE_SETTLE_TIME:
-        u = (x - CHANGE_BUILD_TIME) / (CHANGE_SETTLE_TIME - CHANGE_BUILD_TIME)
-        return CHANGE_BUILD_COVER + (CHANGE_SETTLE_COVER - CHANGE_BUILD_COVER) * u
-    u = (x - CHANGE_SETTLE_TIME) / (1.0 - CHANGE_SETTLE_TIME)
-    return CHANGE_SETTLE_COVER + (1.0 - CHANGE_SETTLE_COVER) * (1.0 - (1.0 - u) ** 2)
+    if x <= 0.0 or x >= 1.0:
+        return x
+    x1, y1, x2, y2 = CHANGE_BEZIER
+    low, high = 0.0, 1.0
+    for _ in range(30):
+        mid = (low + high) * 0.5
+        low, high = (mid, high) if _bezier(x1, x2, mid) < x else (low, mid)
+    return _bezier(y1, y2, (low + high) * 0.5)
 
 
 def push_schedule(start: float, end: float):
@@ -578,30 +579,30 @@ def push_schedule(start: float, end: float):
     return tuple((t, w / total) for t, w in zip(times, weights))
 
 
-# The new colour grows as a circle centred just below the bottom edge.
-CHANGE_ORIGIN_Y = 1.05          # in heights from the top
-# A wide, soft edge (in half-diagonals), like the drum light: the new colour
-# arrives as spreading light, not as a hard-edged ball.
-CHANGE_FEATHER = 0.60
+# The new colour grows as a circle centred below the bottom edge, as on the
+# website: radial-gradient(circle at 50% 112%, #000 calc(grow - 55%),
+# transparent grow); the page is fully turned exactly on the climax.
+CHANGE_ORIGIN_Y = 1.12          # in heights from the top
+CHANGE_FEATHER = 0.55           # soft edge, in farthest-corner distances
+CHANGE_GROW = 1.55              # outer edge at full cover: the inner end of the edge
+                                # just reaches the far corners on the climax
 
 
 def change_geometry(width: float, height: float, covered: float):
     """(centre, radius, feather, full) of the growing colour ball.
 
-    ``covered`` 0..1 grows the radius linearly until the far top corners
-    are inside the soft edge.
+    ``radius`` is the middle of the soft edge, ``full`` the farthest-corner
+    distance the website's percentages refer to.
     """
     centre = QPointF(width * 0.5, height * CHANGE_ORIGIN_Y)
-    feather = math.hypot(width, height) * 0.5 * CHANGE_FEATHER
-    # ``radius`` is where the soft edge is half covered; the far corners are
-    # fully covered once the inner end of the edge passes them.
-    full = math.hypot(width * 0.5, height * CHANGE_ORIGIN_Y) + feather * 0.5
-    return centre, full * max(0.0, min(1.0, covered)), feather, full
+    full = math.hypot(width * 0.5, height * CHANGE_ORIGIN_Y)
+    feather = full * CHANGE_FEATHER
+    outer = full * CHANGE_GROW * max(0.0, min(1.0, covered))
+    return centre, outer - feather * 0.5, feather, full
 
 
-# The colour starts wide and low, then rounds out: the horizontal reach is
-# stretched by up to this much at the start and by nothing at full cover.
-CHANGE_START_STRETCH = 1.9
+# The website's circle is round from the start.
+CHANGE_START_STRETCH = 1.0
 
 
 def change_stretch(covered: float) -> float:
@@ -612,9 +613,10 @@ def change_stretch(covered: float) -> float:
 def coverage_for_height(fraction_from_top: float, aspect: float = 16.0 / 9.0) -> float:
     """Coverage at which the ball's soft edge has passed a height on screen."""
     width, height = aspect, 1.0
-    _centre, _radius, _feather, full = change_geometry(width, height, 1.0)
+    _centre, _radius, feather, full = change_geometry(width, height, 1.0)
     reach = (CHANGE_ORIGIN_Y - fraction_from_top) * height
-    return max(0.0, min(1.0, reach / full))
+    # The middle of the soft edge has passed that height.
+    return max(0.0, min(1.0, (reach + feather * 0.5) / (full * CHANGE_GROW)))
 
 
 # The words sit around the middle of the page (about 30%-60% from the top):
@@ -869,9 +871,12 @@ def word_ink_mix(plan: SeaPlan, t: float) -> float:
     The blend spans the push window over the lyric area and lasts at least
     1.5 s, so the words fade from one ink to the other instead of flipping.
     """
-    if plan.change_end is None or plan.word_switch is None or plan.before_ink == plan.after_ink:
-        return 1.0 if (plan.change_end is not None and t >= plan.change_end and plan.before_ink == plan.after_ink) else (
-            0.0 if plan.change_end is None or t < plan.change_end else 1.0)
+    if plan.change_end is None:
+        return 0.0
+    if plan.word_switch is None:
+        return 0.0 if t < plan.change_end else 1.0
+    # Same ink before and after still blends over the window: the unread
+    # words carry the field's hue, which must fade with the colour, not snap.
     start, end = plan.word_switch
     end = max(end, start + WORD_BLEND_MIN_S)
     if t <= start:
@@ -910,10 +915,9 @@ def render(width: int, height: int, plan: SeaPlan, t: float, playing: bool = Tru
         # so nothing flickers while it spreads.
         covered = change_curve(progress)
         centre, radius, feather, full = change_geometry(width, height, covered)
-        total = full + feather
+        total = max(1.0, radius + feather * 0.5)
         if covered > 0.0005:
-            # The new colour spreads like light: full inside, then a long
-            # smoothstep fade across the whole feather.
+            # Full inside, then the website's linear fade across the edge.
             fresh = _vignette_image(width, height, plan.after, plan.after_ink)
             mask = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
             mask.fill(Qt.GlobalColor.transparent)
@@ -924,7 +928,7 @@ def render(width: int, height: int, plan: SeaPlan, t: float, playing: bool = Tru
                 at = step / 24.0
                 x = (at * total - (radius - feather * 0.5)) / feather
                 x = max(0.0, min(1.0, x))
-                cover.setColorAt(at, QColor(0, 0, 0, round(255 * (1.0 - x * x * (3.0 - 2.0 * x)))))
+                cover.setColorAt(at, QColor(0, 0, 0, round(255 * (1.0 - x))))
             mp.setBrush(cover)
             stretch = change_stretch(covered)
             mp.translate(centre)
@@ -945,10 +949,11 @@ def render(width: int, height: int, plan: SeaPlan, t: float, playing: bool = Tru
         if level > 0.01:
             glow = _mix(plan.after, QColor(0, 0, 0), 0.62)
             band = far * 0.50
-            ring = QRadialGradient(centre, total)
+            reach = max(1.0, radius + feather * 0.5 + band * 2.0)
+            ring = QRadialGradient(centre, reach)
             for step in range(25):
                 at = step / 24.0
-                offset = (at * total - radius) / band
+                offset = (at * reach - radius) / band
                 ring.setColorAt(at, _with_alpha(glow, 0.55 * level * math.exp(-offset * offset)))
             painter.setBrush(ring)
             stretch = change_stretch(covered)

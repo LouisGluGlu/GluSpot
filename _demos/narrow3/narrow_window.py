@@ -160,6 +160,16 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 column = playlist_column_for_cover(
                     surface, cover, column, scale=self._surface_scale(surface),
                 )
+                # The list ends above this window's own seek bar and keys
+                # while they show. The shared column follows the big
+                # window's control timer, which idles out on its own and
+                # let the list run under the still visible transport.
+                inset = max(8.0, 10.0 * self._surface_scale(surface))
+                layout = NarrowLayout(round(surface.width()), round(surface.height()))
+                shown = surface.top() + self.narrow_progress_track(layout).top() - 18.
+                hidden = surface.bottom() - inset
+                bottom = shown + (hidden - shown) * (1. - self.visibility.progress)
+                column.setBottom(max(column.top() + 1., bottom))
             return content, cover, column
         surface = QRectF(self.rect()) if rect is None else QRectF(rect)
         viewport = NarrowLayout(surface.width(), surface.height()).lyric_viewport
