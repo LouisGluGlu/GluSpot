@@ -8,8 +8,10 @@ The rules are the ones settled in ``_demos/sea_dynamic_bg/海平面背景规则.
 - Colours: the cover's most striking colour comes after the change. Its
   contrast comes before. Hues are snapped clean (every red reads crimson).
   Warm colours take black words and cool colours take white.
-- Change point: where the arrangement gets fuller and stays full (searched
-  in 15-75% of the song), snapped to a drum hit.
+- Change point: the start of the first full chorus (``local.sea_climax``):
+  NetEase's own chorus time when the lyric agrees, else the timed lyric's
+  most repeated section, else the audio's most repeated section, snapped
+  to a strong drum.
 - Change: over 14 s, flashes that speed up from 0.8 s to 0.12 s apart each
   grow the new colour as a ball rising from the bottom edge, spreading up
   and to both sides. At the change point the new colour covers the screen.
@@ -202,52 +204,6 @@ def _syllables(pitch: np.ndarray, loud: np.ndarray) -> tuple[tuple[float, float,
     return tuple(out)
 
 
-def _arrival(pcm: np.ndarray, drums) -> float | None:
-    """Where the arrangement gets fuller and stays full."""
-    step, window = 0.5, 1024
-    hop = int(RATE * step)
-    count = max(0, (len(pcm) - window) // hop)
-    if count < 120:
-        return None
-    index = np.arange(window)[None, :] + hop * np.arange(count)[:, None]
-    frames = pcm[index] * np.hanning(window).astype(np.float32)[None, :]
-    spectrum = np.abs(np.fft.rfft(frames, axis=1)) + 1e-9
-    freqs = np.fft.rfftfreq(window, 1.0 / RATE)
-    loud = 20 * np.log10(np.sqrt((frames ** 2).mean(axis=1)) + 1e-6)
-    low = 20 * np.log10(spectrum[:, freqs < 150.0].mean(axis=1))
-    bands = np.array_split(np.arange(spectrum.shape[1]), 24)
-    band_db = np.stack([20 * np.log10(spectrum[:, b].mean(axis=1)) for b in bands], axis=1)
-    filled = (band_db > np.percentile(band_db, 40)).mean(axis=1)
-    drum_times = np.array([moment for moment, _strength in drums])
-    times = np.arange(count) * step
-    density = np.array([((drum_times >= t - 1.0) & (drum_times < t + 1.0)).sum() / 2.0 for t in times])
-    feats = np.stack([loud, low, density, filled], axis=1)
-    feats = (feats - feats.mean(axis=0)) / (feats.std(axis=0) + 1e-6)
-    full = feats[:, :2].mean(axis=1) * 0.5 + feats[:, 2] * 0.3 + feats[:, 3] * 0.2
-    span, build = int(30 / step), int(15 / step)
-    best, best_score, best_uplift = None, -1e9, 0.0
-    for i in range(int(count * 0.15), int(count * 0.75)):
-        before, after = full[max(0, i - span): i], full[i: i + span]
-        if len(before) < span * 0.5 or len(after) < span * 0.5:
-            continue
-        uplift = float(after.mean() - before.mean())
-        held = float((after > before.mean() + 0.5 * before.std()).mean())
-        jump = float(full[i: i + 8].mean() - full[max(0, i - 8): i].mean())
-        dens = feats[max(0, i - build): i, 2]
-        slope = float(np.polyfit(np.arange(len(dens)), dens, 1)[0] * len(dens)) if len(dens) > 4 else 0.0
-        score = uplift * held + 0.6 * jump + 0.3 * max(0.0, slope)
-        if score > best_score:
-            best, best_score, best_uplift = i * step, score, uplift
-    # Every song changes once. A song without a clear lift still gets its
-    # best-scoring moment rather than no change at all.
-    if best is None:
-        return None
-    near = drum_times[np.abs(drum_times - best) <= 1.0] if drum_times.size else drum_times
-    if near.size:
-        best = float(near[np.argmin(np.abs(near - best))])
-    return float(best)
-
-
 # --- colours -------------------------------------------------------------------
 
 PURE_HUES = (350, 30, 50, 140, 175, 205, 225, 270, 320)
@@ -292,10 +248,16 @@ def _purify(color: QColor) -> QColor:
     return out
 
 
-def _tasteful_ink(color: QColor) -> tuple[QColor, str]:
+def _natural_ink(color: QColor) -> str:
     hue = color.hsvHue()
     warm = hue >= 0 and (hue >= 330 or hue <= 65) and color.hsvSaturationF() > 0.25
-    want = "black" if warm else ("white" if color.lightnessF() < 0.62 else "black")
+    return "black" if warm else ("white" if color.lightnessF() < 0.62 else "black")
+
+
+def _tasteful_ink(color: QColor, want: str | None = None) -> tuple[QColor, str]:
+    """The field colour adjusted for its ink, and the ink. ``want`` forces
+    the ink; the colour is then deepened (white) or lightened (black)."""
+    want = want or _natural_ink(color)
     target = QColor(0, 0, 0) if want == "black" else QColor(255, 255, 255)
     goal = 5.6 if want == "black" else 4.5
     adjusted = QColor(color)
@@ -308,7 +270,7 @@ def _tasteful_ink(color: QColor) -> tuple[QColor, str]:
         elif v < 0.999:
             v += 0.02
         else:
-            s -= 0.02
+            s -= 0.03
         adjusted = QColor()
         adjusted.setHsvF(h, max(0.0, min(1.0, s)), max(0.0, min(1.0, v)))
     return adjusted, want
@@ -460,6 +422,9 @@ def pick_colors(colors, weights, image: QImage | None = None) -> tuple[QColor, s
     colour from the cover gets a small bonus, so a cover's own pairing wins
     when it is good.
     A cover with no colour at all goes from charcoal to paper white.
+    Every song reads in both inks: the feature keeps its own ink and the
+    partner takes the other one, so one side has black words and the other
+    white. Partners that take that ink naturally are preferred.
     """
     pool = [(QColor(c), float(w)) for c, w in zip(colors, weights) if QColor(c).isValid()]
     accent = cover_accent(image)
@@ -473,15 +438,18 @@ def pick_colors(colors, weights, image: QImage | None = None) -> tuple[QColor, s
     candidates = [(_enrich(c), True) for c, w in coloured
                   if w >= MAIN_MIN_SHARE and c is not feature_raw and c.valueF() >= 0.30 and _vivid(c) >= 0.22]
     candidates += [(c, False) for c in _designed_partners(feature)]
+    after, after_ink = _tasteful_ink(feature)
+    other_ink = "white" if after_ink == "black" else "black"
     scored = [(_pair_score(feature, c, real=real), index, c) for index, (c, real) in enumerate(candidates)]
+    scored = [(score + (0.30 if score > 0.0 and _natural_ink(c) == other_ink else 0.0), index, c)
+              for score, index, c in scored]
     scored = [item for item in scored if item[0] > 0.0]
     if scored:
         partner = max(scored, key=lambda item: (item[0], -item[1]))[2]
     else:
         partner = QColor()
         partner.setHsvF(((feature.hsvHue() + 150) % 360) / 360.0, 0.80, 0.62)
-    before, before_ink = _tasteful_ink(partner)
-    after, after_ink = _tasteful_ink(feature)
+    before, before_ink = _tasteful_ink(partner, other_ink)
     return before, before_ink, after, after_ink
 
 
@@ -533,6 +501,12 @@ class SeaPlan:
     attempts: int = 0
     solid: bool = False
     adopted: bool = False        # times borrowed from another recording, no file here
+    change_source: str = ""      # netease / lyrics / audio / energy, see local.sea_climax
+    climax: dict | None = None   # what the change was picked from, to pick again with a late lyric
+    lyrics_seen: bool = False
+    captured: bool = False       # no file here: change from lyric/NetEase, beats from live audio
+    settled: bool = False        # a captured plan has had its chance to find a change
+    created_at: float = 0.0
 
     @property
     def change_start(self) -> float | None:
@@ -672,23 +646,160 @@ def _gain(moment: float, change_end: float | None) -> float:
     return 0.85
 
 
-def analyse(pcm: np.ndarray, plan: SeaPlan) -> SeaPlan:
+@dataclass(frozen=True)
+class ClimaxHints:
+    """What besides the audio says where the chorus is."""
+    lyrics: tuple = ()               # (start seconds, text) timed lines
+    netease: float | None = None     # NetEase's chorus start, seconds
+
+
+def usable_lyrics(lyrics, audio_seconds: float) -> tuple:
+    """The timed lines as (start, text), or () when they cannot be this
+    recording's (a stale lyric from the previous song runs past its end)."""
+    out = []
+    for item in lyrics or ():
+        try:
+            out.append((float(item[0]), str(item[1])))
+        except (TypeError, ValueError, IndexError):
+            continue
+    if len(out) < 4 or (audio_seconds > 0 and max(start for start, _text in out) > audio_seconds + 5.0):
+        return ()
+    return tuple(out)
+
+
+def analyse(pcm: np.ndarray, plan: SeaPlan, hints: ClimaxHints | None = None) -> SeaPlan:
+    from local import sea_climax
+    hints = hints or ClimaxHints()
     onsets = _drums(pcm)                    # every hit, for the arrangement density
     pitch, loud = _melody(pcm)
     syllables = _syllables(pitch, loud)
-    change = _arrival(pcm, onsets)
+    lyrics = usable_lyrics(hints.lyrics, pcm.size / RATE)
+    found = sea_climax.candidates(pcm, onsets, lyrics=lyrics, netease=hints.netease)
+    change, source = sea_climax.choose(found, onsets)
     shown, last = [], -1.0                  # on screen, at most one hit per 0.28 s
     for moment, strength in onsets:
         if strength >= 0.38 and moment - last >= 0.28:
-            shown.append((moment, min(1.0, strength * _gain(moment, change))))
+            shown.append((moment, strength))
             last = moment
-    plan.change_end = change
-    plan.drums = tuple(shown)
-    plan.syllables = tuple((a, b, min(1.0, s * _gain(a, change))) for a, b, s in syllables)
-    if change is not None:
-        _schedule_change(plan)
+    plan.climax = {key: found[key] for key in ("netease", "audio", "full", "duration")}
+    plan.climax.update(onsets=onsets, drums=tuple(shown), syllables=syllables)
+    plan.lyrics_seen = bool(lyrics)
+    _apply_change(plan, change, source)
     plan.ready = True
     return plan
+
+
+def _apply_change(plan: SeaPlan, change: float | None, source: str) -> None:
+    """Place the change and scale the light around it (quieter before)."""
+    raw = plan.climax or {}
+    plan.change_end, plan.change_source = change, source
+    plan.drums = tuple((moment, min(1.0, strength * _gain(moment, change)))
+                       for moment, strength in raw.get("drums", ()))
+    plan.syllables = tuple((a, b, min(1.0, s * _gain(a, change))) for a, b, s in raw.get("syllables", ()))
+    if change is not None:
+        _schedule_change(plan)
+    else:
+        plan.pushes, plan.word_switch = (), None
+
+
+CAPTURED_SETTLE_S = 8.0          # how long a captured song may wait for its lyric before falling back
+
+
+def settle_captured(plan: SeaPlan, lyrics, position: float | None = None, now: float | None = None) -> None:
+    """Pick a captured song's change from its lyric and NetEase's chorus
+    (no audio file to analyse). Moves the change only before it can show."""
+    from local import sea_climax
+    now = time.monotonic() if now is None else now
+    raw = plan.climax or {}
+    lines = usable_lyrics(lyrics, plan.audio_seconds)
+    signature = (len(lines), lines[0][0] if lines else None, raw.get("netease"), raw.get("chorus_done", False))
+    if signature != raw.get("signature"):
+        raw["signature"] = signature
+        duration = plan.audio_seconds or (lines[-1][0] + 20.0 if lines else 0.0)
+        section = sea_climax.lyric_section(lines, duration) if lines else None
+        found = dict(raw, section=section, lyrics=None if section is None else section["pick"],
+                     audio=None, full=np.zeros(0))
+        change, source = sea_climax.choose(found, ())
+        if source == "energy":
+            change, source = None, "none"
+        old = plan.change_end
+        guard = COVER_S + CHANGE_LEAD_S + 2.0
+        movable = old is None or position is None or position < min(old, change if change is not None else old) - guard
+        if movable and change != old:
+            plan.change_end, plan.change_source = change, source
+            if change is not None:
+                _schedule_change(plan)
+            else:
+                plan.pushes, plan.word_switch = (), None
+    chorus_done = raw.get("chorus_done", True)
+    waited = now - plan.created_at >= CAPTURED_SETTLE_S
+    plan.settled = bool(chorus_done and (plan.change_end is not None or waited))
+
+
+class LiveBeats:
+    """Drum hits from the live audio's low band, placed on the song's clock.
+
+    A hit is a rise of the low band well above its recent level; hits are
+    at least 0.28 s apart, like the analysed ones, and quieter before the
+    change.
+    """
+
+    MIN_GAP = 0.28
+    KEEP = 64
+
+    def __init__(self):
+        self.level = 0.0
+        self.last = -1e9
+        self.previous_position = None
+
+    def reset(self):
+        self.level, self.last, self.previous_position = 0.0, -1e9, None
+
+    def feed(self, plan: SeaPlan, low: float, position: float) -> bool:
+        low = max(0.0, float(low or 0.0))
+        if self.previous_position is not None and position < self.previous_position - 1.0:
+            # A seek back: hits ahead of the new position are gone.
+            plan.drums = tuple(hit for hit in plan.drums if hit[0] <= position)
+            self.last = -1e9
+        self.previous_position = position
+        level = self.level
+        self.level = low if level <= 0.0 else level * 0.92 + low * 0.08
+        if level <= 0.0 or low < 0.12 or low < level * 1.45 or position - self.last < self.MIN_GAP:
+            return False
+        self.last = position
+        strength = min(1.0, 0.45 + (low - level) / max(level, 1e-3) * 0.35)
+        hit = (position, min(1.0, strength * _gain(position, plan.change_end)))
+        plan.drums = (plan.drums + (hit,))[-self.KEEP:]
+        return True
+
+
+def refine_with_lyrics(plan: SeaPlan, lyrics, position: float | None = None) -> bool:
+    """Pick the change again once a lyric arrives after the analysis.
+
+    Only before either change (old or new) has begun to show, so the colour
+    never jumps back. True when the change moved.
+    """
+    from local import sea_climax
+    if plan.climax is None or plan.lyrics_seen or not plan.ready or plan.adopted:
+        return False
+    lines = usable_lyrics(lyrics, plan.audio_seconds)
+    if not lines:
+        return False
+    plan.lyrics_seen = True
+    section = sea_climax.lyric_section(lines, plan.climax.get("duration", plan.audio_seconds))
+    if section is None:
+        return False
+    found = dict(plan.climax, section=section, lyrics=section["pick"])
+    change, source = sea_climax.choose(found, plan.climax.get("onsets", ()))
+    old = plan.change_end
+    if change is None or (old is not None and abs(change - old) < 0.75):
+        return False
+    guard = COVER_S + CHANGE_LEAD_S + 2.0
+    if position is not None and position > min(change, old if old is not None else change) - guard:
+        return False
+    _apply_change(plan, change, source)
+    _log.info("sea stage=climax result=moved source=%s change=%.1f", source, change)
+    return True
 
 
 class SeaAnalyzer(QObject):
@@ -699,19 +810,26 @@ class SeaAnalyzer(QObject):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._plans: dict[str, SeaPlan] = {}
+        self._hints: dict[str, tuple] = {}
         self._threads: dict[str, _DecodeThread] = {}
         self._lock = threading.Lock()
 
     def plan(self, path: str | None, colors, weights, image: QImage | None = None,
-             duration: float = 0.0) -> SeaPlan:
+             duration: float = 0.0, hints: tuple | None = None, position: float | None = None) -> SeaPlan:
+        """``hints`` is (track id, timed lyric) for the chorus search; the
+        analysis reads the latest ones when it finishes."""
         before, before_ink, after, after_ink = pick_colors(colors, weights, image)
         if not path:
             return SeaPlan(before, before_ink, after, after_ink)
         key = path
         with self._lock:
             plan = self._plans.get(key)
+            if hints is not None:
+                self._hints[key] = hints
         if plan is not None:
             plan.before, plan.before_ink, plan.after, plan.after_ink = before, before_ink, after, after_ink
+            if hints is not None and hints[1] and not plan.lyrics_seen and key not in self._threads:
+                refine_with_lyrics(plan, hints[1], position)
             # The first song can be analysed while its file is still arriving.
             # A clearly short decode is tried again a few seconds later.
             if (plan.ready and not plan.adopted and duration > 0.0 and plan.audio_seconds < duration - 3.0
@@ -727,8 +845,57 @@ class SeaAnalyzer(QObject):
         with self._lock:
             self._plans[key] = plan
             if len(self._plans) > 12:
-                self._plans.pop(next(iter(self._plans)))
+                oldest = next(iter(self._plans))
+                self._plans.pop(oldest)
+                self._hints.pop(oldest, None)
         self._start(key, plan)
+        return plan
+
+    def captured_plan(self, key: str, colors, weights, image: QImage | None = None, duration: float = 0.0,
+                      hints: tuple | None = None, position: float | None = None) -> SeaPlan:
+        """A song with no audio file here (system capture, an Apple song
+        without a twin): its colour change comes from the lyric and NetEase's
+        chorus, its drum light from the live audio (see ``LiveBeats``).
+
+        ``hints`` is (track id, timed lyric, source app). ``plan.settled``
+        with no ``change_end`` means none could be found: the caller falls
+        back to the solid field.
+        """
+        before, before_ink, after, after_ink = pick_colors(colors, weights, image)
+        start = False
+        with self._lock:
+            plan = self._plans.get(key)
+            if plan is None or not plan.captured:
+                plan = SeaPlan(before, before_ink, after, after_ink, ready=True, captured=True,
+                               created_at=time.monotonic())
+                plan.audio_seconds = float(duration or 0.0)
+                plan.climax = {"netease": None, "audio": None, "duration": plan.audio_seconds,
+                               "onsets": (), "drums": (), "syllables": (), "chorus_done": True}
+                self._plans[key] = plan
+                if len(self._plans) > 12:
+                    oldest = next(iter(self._plans))
+                    self._plans.pop(oldest)
+                    self._hints.pop(oldest, None)
+                start = True
+        plan.before, plan.before_ink, plan.after, plan.after_ink = before, before_ink, after, after_ink
+        if duration and not plan.audio_seconds:
+            plan.audio_seconds = plan.climax["duration"] = float(duration)
+        track_id, lyrics, app = (tuple(hints) + (None, (), ""))[:3] if hints else ("", (), "")
+        if start:
+            from api.motion_cover import netease_song_id
+            ident = netease_song_id(str(track_id or ""), str(app or ""))
+            if ident:
+                plan.climax["chorus_done"] = False
+
+                def lookup(plan=plan, ident=ident):
+                    try:
+                        from api import netease_chorus
+                        plan.climax["netease"] = netease_chorus.chorus_start(ident)
+                    except Exception:
+                        pass
+                    plan.climax["chorus_done"] = True
+                threading.Thread(target=lookup, name="GluSpotSeaChorus", daemon=True).start()
+        settle_captured(plan, lyrics, position)
         return plan
 
     def adopt(self, key: str, data: dict) -> None:
@@ -757,10 +924,14 @@ class SeaAnalyzer(QObject):
 
     def _start(self, key: str, plan: SeaPlan) -> None:
         plan.attempts += 1
-        worker = _AnalyseThread(key, plan)
+        worker = _AnalyseThread(key, plan, lambda key=key: self._latest_hints(key))
         worker.finished.connect(lambda key=key: self._done(key))
         self._threads[key] = worker
         worker.start(QThread.Priority.LowPriority)
+
+    def _latest_hints(self, key: str) -> tuple | None:
+        with self._lock:
+            return self._hints.get(key)
 
     def _done(self, key: str) -> None:
         worker = self._threads.pop(key, None)
@@ -778,9 +949,26 @@ class SeaAnalyzer(QObject):
 
 
 class _AnalyseThread(_DecodeThread):
-    def __init__(self, path: str, plan: SeaPlan) -> None:
+    def __init__(self, path: str, plan: SeaPlan, hints=lambda: None) -> None:
         super().__init__(path)
         self.plan = plan
+        self.hints = hints
+
+    def _climax_hints(self) -> ClimaxHints:
+        """The latest lyric, and NetEase's chorus time for a NetEase song."""
+        try:
+            latest = self.hints()
+        except Exception:
+            latest = None
+        if not latest:
+            return ClimaxHints()
+        track_id, lyrics = latest
+        netease = None
+        from api import netease_chorus
+        ident = netease_chorus.song_id(track_id)
+        if ident and not self.isInterruptionRequested():
+            netease = netease_chorus.chorus_start(ident)
+        return ClimaxHints(tuple(lyrics or ()), netease)
 
     def run(self) -> None:
         began = time.monotonic()
@@ -790,11 +978,11 @@ class _AnalyseThread(_DecodeThread):
         self.plan.analysed_at = time.monotonic()
         if self.pcm is not None and self.pcm.size >= RATE * 30 and not self.isInterruptionRequested():
             try:
-                analyse(self.pcm, self.plan)
+                analyse(self.pcm, self.plan, self._climax_hints())
                 change = self.plan.change_end
-                _log.info("sea stage=analysis result=ok audio_s=%.0f ms=%d change=%s drums=%d syllables=%d",
+                _log.info("sea stage=analysis result=ok audio_s=%.0f ms=%d change=%s source=%s drums=%d syllables=%d",
                           seconds, (time.monotonic() - began) * 1000,
-                          "none" if change is None else f"{change:.1f}",
+                          "none" if change is None else f"{change:.1f}", self.plan.change_source or "none",
                           len(self.plan.drums), len(self.plan.syllables))
             except Exception as error:
                 _log.info("sea stage=analysis result=error kind=%s", type(error).__name__)

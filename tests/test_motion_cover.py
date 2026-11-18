@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -88,9 +89,24 @@ class AesAndMatchTests(unittest.TestCase):
             "hevc.m3u8",
         ))
         variants = parse_hls_variants(playlist, "https://video.example/master.m3u8")
-        chosen = choose_hls_variant(variants, 500)
-        self.assertEqual(chosen.url, "https://video.example/low.m3u8")
-        self.assertLessEqual(chosen.width, 720)
+        # The leanest H.264 rendition at least as wide as the slot; HEVC is skipped.
+        self.assertEqual(choose_hls_variant(variants, 400).url, "https://video.example/low.m3u8")
+        self.assertEqual(choose_hls_variant(variants, 500).url, "https://video.example/high.m3u8")
+        self.assertEqual(choose_hls_variant(variants).width, 1080)
+
+    def test_hls_variant_prefers_sharp_lean_h264_within_the_cap(self):
+        rows = [(486, 773877, "avc1.64001f"), (960, 2910213, "avc1.64001f"), (1080, 6788272, "avc1.640020"),
+                (1080, 3952898, "avc1.640020"), (2160, 6881184, "hvc1.2.20000000.H150"), (1920, 9000000, "avc1.640028")]
+        def playlist(items):
+            return "#EXTM3U\n" + "\n".join(
+                f'#EXT-X-STREAM-INF:BANDWIDTH={bw},RESOLUTION={w}x{w},CODECS="{codec}"\nv{w}-{bw}.m3u8'
+                for w, bw, codec in items)
+
+        chosen = choose_hls_variant(parse_hls_variants(playlist(rows), "https://video.example/master.m3u8"))
+        self.assertEqual((chosen.width, chosen.bandwidth), (1080, 3952898))
+        below = [row for row in rows if row[0] != 1080]
+        small = choose_hls_variant(parse_hls_variants(playlist(below), "https://video.example/master.m3u8"))
+        self.assertEqual(small.width, 960)
 
     def test_apple_token_keeps_only_the_web_player_issuer(self):
         import base64
@@ -144,6 +160,52 @@ class RaceCacheTests(unittest.TestCase):
             self.assertEqual(cached.kind, "none")
             self.assertTrue(cached.cached)
             self.assertIsNone(cache.get("song", now=1_000.0 + MOTION_COVER_TTL_SECONDS + 1))
+
+    def test_a_timeout_is_not_remembered_as_no_motion_cover(self):
+        def stuck(track, cancel, deadline):
+            cancel._event.wait(2.0)
+            return ""
+
+        def miss(track, cancel, deadline):
+            return ""
+
+        result = race_providers((_Provider("netease", miss), _Provider("apple", stuck)), MotionTrack("晴天", "周杰伦"), timeout=0.2)
+        self.assertEqual(result.kind, "none")
+        self.assertFalse(result.final)
+        with tempfile.TemporaryDirectory() as directory:
+            cache = MotionCoverCache(Path(directory))
+            calls = []
+
+            def fetch(method, url, **kwargs):
+                calls.append(url)
+                raise TimeoutError("slow network")
+
+            resolver = MotionCoverResolver(cache, fetch, tokens=AppleTokenStore())
+            track = MotionTrack("晴天", "周杰伦")
+            self.assertEqual(resolver.resolve(track).kind, "none")
+            self.assertIsNone(cache.get(track.cache_key()))      # asked again next time
+        settled = race_providers((_Provider("netease", miss), _Provider("apple", miss)), MotionTrack("晴天", "周杰伦"), timeout=1.0)
+        self.assertTrue(settled.final)
+
+    def test_netease_asks_through_the_signed_in_account(self):
+        asked = []
+
+        def lookup(song_id):
+            asked.append(song_id)
+            return "https://dcover.example/signed.mp4"
+
+        def fetch(method, url, **kwargs):
+            raise AssertionError("no anonymous request when the account answers")
+
+        with tempfile.TemporaryDirectory() as directory:
+            resolver = MotionCoverResolver(MotionCoverCache(Path(directory)), fetch, tokens=AppleTokenStore(),
+                                           netease_lookup=lookup)
+            result = resolver.resolve(MotionTrack("晴天", "周杰伦", track_id="owned:netease:7"))
+        self.assertEqual((result.kind, result.provider, result.url), ("hit", "netease", "https://dcover.example/signed.mp4"))
+        self.assertEqual(asked, ["7"])
+
+    def test_cache_key_does_not_change_when_the_album_arrives(self):
+        self.assertEqual(MotionTrack("晴天", "周杰伦").cache_key(), MotionTrack("晴天", "周杰伦", album="叶惠美").cache_key())
 
     def test_cached_hit_skips_providers_and_video_files_respect_the_cap(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -333,6 +395,58 @@ class PlaybackTests(unittest.TestCase):
             session.note_playback(True)
             self.assertEqual(player.state, "playing")
             self.assertEqual(player.source, source)
+
+    def test_end_of_a_pass_loops_and_moves_to_the_downloaded_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            local = Path(directory) / "clip.mp4"
+            local.write_bytes(b"not-a-real-decoder")
+            player = _Player()
+            player.positions = []
+            player.setPosition = player.positions.append
+            session = MotionCoverSession(enabled=True, player_factory=lambda _callback: player)
+            self.addCleanup(session.shutdown)
+            host = _Host()
+            session.note_cover(host, 120, True, QRectF(0, 0, 120, 120))
+            session._key = "song"
+            session._generation = 3
+            session._on_ready(3, MotionResult("hit", "apple", "https://cdn.example/clip.mp4"))
+            self.assertEqual(player.state, "playing")
+            self.assertEqual(player.source.toString(), "https://cdn.example/clip.mp4")
+            # The backend stops at the end of a streamed pass: the loop goes on.
+            player.state = "stopped"
+            session._on_media_status(type("Status", (), {"name": "EndOfMedia"})())
+            self.assertEqual(player.positions, [0])
+            self.assertEqual(player.state, "playing")
+            # The download finishes mid-pass: it takes over at the next loop, not now.
+            session._on_ready(3, MotionResult("hit", "apple", "https://cdn.example/clip.mp4", str(local)))
+            self.assertEqual(player.source.toString(), "https://cdn.example/clip.mp4")
+            session._on_media_status(type("Status", (), {"name": "EndOfMedia"})())
+            self.assertEqual(player.source.toLocalFile().replace("/", "\\").lower(), str(local).lower())
+            self.assertEqual(player.state, "playing")
+
+    def test_a_lookup_that_timed_out_is_asked_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            answers = [MotionResult("none", "apple", final=False), MotionResult("hit", "apple", "https://cdn.example/a.mp4")]
+            asked = []
+
+            class Resolver:
+                cache = MotionCoverCache(Path(directory))
+
+                def resolve(self, track, cancel=None):
+                    asked.append(track.title)
+                    return answers[min(len(asked), len(answers)) - 1]
+
+            from local import motion_cover_playback as playback
+            session = MotionCoverSession(enabled=True, resolver=Resolver(), player_factory=lambda _callback: _Player())
+            self.addCleanup(session.shutdown)
+            with mock.patch.object(playback, "RETRY_SECONDS", (0.05, 0.05)):
+                session.note_track(MotionTrack("晴天", "周杰伦"))
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline and not session._source:
+                    self.app.processEvents()
+                    time.sleep(0.02)
+            self.assertEqual(len(asked), 2)
+            self.assertEqual(session._source, "https://cdn.example/a.mp4")
 
     def test_pause_stop_crossfade_and_rounded_corner(self):
         with tempfile.TemporaryDirectory() as directory:

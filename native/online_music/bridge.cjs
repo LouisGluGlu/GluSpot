@@ -89,7 +89,7 @@ async function ncmCall(state, method, params = {}) {
       else throw error;
     }
   } else {
-    const allowed = new Set(["login_qr_key","login_qr_create","login_status","user_playlist","playlist_track_all","recommend_songs","personalized","personal_fm","aidj_content_rcmd","lyric_new","lyric","cloudsearch","song_url","likelist","like","playlist_detail","playlist_tracks","playlist_create"]);
+    const allowed = new Set(["login_qr_key","login_qr_create","login_status","user_playlist","playlist_track_all","recommend_songs","personalized","personal_fm","aidj_content_rcmd","lyric_new","lyric","cloudsearch","song_url","likelist","like","playlist_detail","playlist_tracks","playlist_create","song_dynamic_cover"]);
     if (!allowed.has(method)) fail("unsupported");
     const fn = require(path.join(state.root,"module",method + ".js"));
     result = await fn(query,state.request);
@@ -451,6 +451,8 @@ async function dispatch(source,op,p,credential,context) {
     // The pinned standard endpoint uses the existing account authorization,
     // without XEAPI startup-key registration or unblock/matching imports.
     if(op==="stream_url") return await ncmCall(state,"song_url",{id:requireId(p.song_id),br:128000});
+    // The dynamic cover answers 301 without an account; only the video URL is returned.
+    if(op==="dynamic_cover") return await ncmCall(state,"song_dynamic_cover",{id:requireId(p.song_id)});
     if(op==="lyrics") {
       let newer={};
       try {newer=await ncmCall(state,"lyric_new",{id:requireId(p.song_id)});} catch(_) {}

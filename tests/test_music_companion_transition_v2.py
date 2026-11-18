@@ -267,10 +267,10 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         self.assertEqual(self._paint(held, "echo").blur, 0.0)
         self.assertEqual(self._paint(held, "回声").blur, 0.0)
         # It stays attached and clear over C's opening, then joins A's blur.
-        # After the particle exit (1.1 s from 24.75) the aside sits blurred.
+        # After the grain exit (1.4 s from 24.75) the aside sits blurred.
         self._render(105.25, 24.75)
         self._render(105.6, 25.1)
-        completed = self._render(106.4, 25.9)
+        completed = self._render(106.8, 26.3)
         main_paint = self._paint(completed, main)
         aside = self._paint(completed, "echo")
         translated_aside = self._paint(completed, "回声")

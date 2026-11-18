@@ -27,7 +27,7 @@ _log = logging.getLogger("GluSpot.sea")
 MAX_LENGTH_GAP = 2.0
 MISS_RETRY_SECONDS = 24 * 3600.0
 STORE_LIMIT = 400
-_FORMAT = 1
+_FORMAT = 2                      # 2: the change lands on the chorus (local.sea_climax)
 
 
 def store_dir() -> Path:
@@ -148,7 +148,7 @@ def borrow(service, stream_cache, song, *, cancelled=lambda: False, root: Path |
     Returns the stored analysis, or None. A definite no-match is remembered
     for a day so a song without a twin is not searched on every play.
     """
-    from local.sea_lyric_background import RATE, SeaPlan, analyse
+    from local.sea_lyric_background import RATE, ClimaxHints, SeaPlan, analyse
     from PySide6.QtGui import QColor
 
     key = plan_key(song)
@@ -194,7 +194,8 @@ def borrow(service, stream_cache, song, *, cancelled=lambda: False, root: Path |
         return None
     plan = SeaPlan(QColor(), "white", QColor(), "white")
     plan.audio_seconds = pcm.size / RATE
-    analyse(pcm, plan)
+    from api import netease_chorus
+    analyse(pcm, plan, ClimaxHints(netease=netease_chorus.chorus_start(str(match.song_id))))
     data = plan_data(plan)
     save(key, data, root)
     _log.info("sea stage=borrow result=ok audio_s=%.0f gap_s=%.1f change=%s drums=%d", plan.audio_seconds,

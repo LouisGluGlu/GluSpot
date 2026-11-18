@@ -346,16 +346,238 @@ class LibraryLayoutVariantTests(unittest.TestCase):
                 self.assertEqual(requested.at(0), ["Kara"])
                 self.assertFalse(w._search_timer.isActive())
 
+    def test_earlier_sidebar_uses_login_rail(self):
+        from local.login_layout_variants import login_variant_layout
+        for size in SIZES:
+            w = self.prepare("sidebar", size)
+            w._variant_view.toggle_refresh()
+            self.assertFalse(w._variant_view.refresh)
+            view = w._variant_view
+            expected = login_variant_layout("sidebar", *size, (True,) * 4)
+            self.assertEqual(view.rail.topLeft(), expected.rail.topLeft())
+            self.assertTrue(w.source_button.isVisible())
+            view.toggle_refresh()
+
+    def test_refreshed_sidebar_header_rail_footer_and_denser_rows(self):
+        from local.library_layout_variants import REFRESH_HEADER, REFRESH_STRIDE
+        for size in SIZES:
+            w = self.prepare("sidebar", size)
+            view = w._variant_view
+            self.assertTrue(view.refresh)
+            # Only the window's close stays at the top right; the header is 60 px.
+            self.assertFalse(w.source_button.isVisible())
+            self.assertEqual(w.close_button.geometry().right(), w.width() - 19)
+            self.assertEqual(view.rail.top(), REFRESH_HEADER + 4)
+            self.assertEqual(view.pane.top(), view.rail.top())
+            # Account actions sit together in the rail footer, under the rule.
+            for button in (view.rail_source, w.logout_button):
+                self.assertTrue(button.isVisible())
+                self.assertTrue(view.rail.contains(QRectF(button.geometry())))
+                self.assertGreater(button.y(), view.rule.y())
+            sections = tuple(view.buttons.values())
+            self.assertLess(max(b.geometry().bottom() for b in sections), view.rule.y())
+            rows = [row for row in w._rows if not row.card]
+            for a, b in zip(rows, rows[1:]):
+                self.assertEqual(b.y() - a.y(), REFRESH_STRIDE)
+
+    def test_now_playing_bar_takes_the_window_shape_pose(self):
+        from local.library_layout_variants import bar_mode_for
+        self.assertEqual(bar_mode_for(960, 540), "row")       # wide and short: one line
+        self.assertEqual(bar_mode_for(1280, 820), "tall")     # wide and tall: the expanded island
+        self.assertEqual(bar_mode_for(433, 550), "pill")      # narrow and short: the free island
+        self.assertEqual(bar_mode_for(433, 900), "tall")
+        for size, mode in (((960, 540), "row"), ((433, 550), "pill"), ((1280, 820), "tall")):
+            w = self.prepare("sidebar", size)
+            island = w.now_playing_island
+            self.assertEqual(island.bar_mode, mode)
+            self.assertEqual(island.height(), island.bar_height(mode))
+            self.assertLessEqual(island.geometry().bottom(), w.height() - 14)
+            island.grab()
+            if mode == "pill":
+                self.assertEqual(island.music_button_rects, {})
+                self.assertLessEqual(island.width(), island.PILL_WIDTH)
+            else:
+                self.assertEqual(len(island.music_button_rects), 3)
+                self.assertTrue(all(island.rect().contains(r.toAlignedRect())
+                                    for r in island.music_button_rects.values()))
+            if mode == "row":
+                # Title column, lyric in the middle, transport on the right.
+                controls = min(r.left() for r in island.music_button_rects.values())
+                self.assertLess(island.music_cover_rect.right(), controls)
+
+    def test_wheel_past_the_end_of_a_section_turns_to_the_next(self):
+        from local.library_layout_variants import PULL_TO_NEXT
+        w = self.prepare("sidebar", (433, 550))
+        view = w._variant_view
+        view.select_section("for_you")
+        self.app.processEvents()
+        self.assertTrue(view.pull_active())
+        self.assertTrue(view.next_hint.isVisible())
+        self.assertIn("推荐歌单", view.next_hint.text())
+        view._pull.pull = 0
+        view.step_section(1)
+        self.assertEqual(view.section, "recommended")
+        self.assertTrue(view.buttons["recommended"].isChecked())
+        view.step_section(-1)
+        self.assertEqual(view.section, "for_you")
+        view.step_section(-1)                       # nothing before the first section
+        self.assertEqual(view.section, "for_you")
+        self.assertGreater(PULL_TO_NEXT, 120)       # more than one wheel notch
+
+    def test_selection_plate_slides_to_the_chosen_section(self):
+        w = self.prepare("sidebar")
+        view = w._variant_view
+        view.select_section("for_you")
+        view._plate_motion.stop()
+        view._sync_plate(False)
+        start = QRectF(view.plate)
+        view.select_section("personal")
+        self.assertEqual(view._plate_motion.state(), view._plate_motion.State.Running)
+        view._move_plate(.5)
+        self.assertGreater(view.plate.y(), start.y())
+        self.assertLess(view.plate.y(), view.buttons["personal"].y())
+        view._move_plate(1.)
+        self.assertEqual(view.plate, QRectF(view.buttons["personal"].geometry()))
+
+    def test_refreshed_background_follows_the_playback_theme(self):
+        w = self.prepare("sidebar")
+        settings = {"v2_music_ambience_style": "sea_level"}
+        w.set_background_context(settings.get)
+        w._background_palette = w._background_palette or SimpleNamespace(
+            ambient_colors=(QColor("#2b4f9a"), QColor("#c84a3a")), ambient_weights=(.6, .4),
+            primary=QColor("#2b4f9a"), secondary=QColor("#c84a3a"))
+        w._background_key = None
+        self.assertEqual(w._song_field_style(), "sea_level")
+        w._update_background()
+        frame = w._background_frame
+        self.assertLessEqual(max(frame.width(), frame.height()), 256)
+        corner, centre = frame.pixelColor(1, 1), frame.pixelColor(frame.width() // 2, frame.height() // 2)
+        self.assertNotEqual(corner.rgb(), centre.rgb())      # a vignette, not a flat fill
+        settings["v2_music_ambience_style"] = "solid_album"
+        w._background_key = None
+        w._update_background()
+        frame = w._background_frame
+        self.assertEqual(frame.pixelColor(1, 1).rgb(), frame.pixelColor(frame.width() - 2, frame.height() - 2).rgb())
+        settings["v2_music_ambience_style"] = "system"
+        self.assertEqual(w._song_field_style(), "")
+
+    def test_playlist_page_back_key_sits_in_its_toolbar_row(self):
+        w = self.prepare("sidebar", (433, 550))
+        view = w._variant_view
+        playlist = next(item for item in self.catalog if item.kind == "playlist")
+        view.select_section("recommended")
+        w.open_playlist_page(playlist)
+        self.app.processEvents()
+        page = w.playlist_page
+        self.assertEqual(page.crumb, "推荐歌单")
+        self.assertTrue(QRectF(page.geometry()).intersects(view.pane))
+        self.assertLessEqual(page.back_button.geometry().bottom(), page.TOOLBAR)
+        self.assertGreaterEqual(page.scroll.geometry().top(), page.TOOLBAR)
+        self.assertEqual(page.canvas.cover_rect().top(), page.canvas.header_top())
+        self.assertLess(page.canvas.header_top(), 20)
+        view.toggle_refresh()
+        self.assertEqual(page.crumb, "")
+        self.assertEqual(page.back_button.text(), "‹ 返回")
+        view.toggle_refresh()
+        w.close_playlist_page()
+
+    def test_bar_pose_holds_near_a_threshold_while_resizing(self):
+        from local.library_layout_variants import BAR_SLACK, bar_mode_for
+        self.assertEqual(bar_mode_for(640 - BAR_SLACK + 4, 540, "row"), "row")
+        self.assertEqual(bar_mode_for(640 - BAR_SLACK - 4, 540, "row"), "pill")
+        self.assertEqual(bar_mode_for(960, 700 - BAR_SLACK + 4, "tall"), "tall")
+        self.assertEqual(bar_mode_for(960, 640, "tall"), "row")
+        w = self.prepare("sidebar", (960, 540))
+        view = w._variant_view
+        self.assertTrue(view._rail_is_wide(960))
+        # Height alone never folds the rail.
+        w.resize(960, 400)
+        self.app.processEvents()
+        self.assertEqual(view.rail.width(), 156)
+
+    def test_open_playlist_page_hides_the_section_heading(self):
+        w = self.prepare("sidebar", (433, 550))
+        view = w._variant_view
+        view.select_section("personal")
+        playlist = next(item for item in self.catalog if item.kind == "playlist")
+        painted = []
+        import local.library_layout_variants as variants
+        original = variants._type
+
+        def record(painter, rect, text, *args, **kwargs):
+            painted.append(text)
+            return original(painter, rect, text, *args, **kwargs)
+
+        with patch.object(variants, "_type", side_effect=record):
+            w.grab()
+            self.assertIn("个人歌单", painted)
+            painted.clear()
+            w.open_playlist_page(playlist)
+            self.app.processEvents()
+            w.grab()
+        self.assertNotIn("个人歌单", painted)
+        w.close_playlist_page()
+
+    def test_library_colour_follows_the_sea_colour_change(self):
+        w = self.prepare("sidebar")
+        w.set_background_context({"v2_music_ambience_style": "sea_level"}.get)
+        w._background_palette = w._background_palette or SimpleNamespace(
+            ambient_colors=(QColor("#2b4f9a"), QColor("#e0a020")), ambient_weights=(.6, .4),
+            primary=QColor("#2b4f9a"), secondary=QColor("#e0a020"))
+        frames = {}
+        for mix in (0.0, 0.5, 1.0):
+            with patch.object(MusicLibraryWindow, "_sea_change_mix", return_value=mix):
+                w._background_key = None
+                w._update_background()
+                frames[mix] = w._background_frame.pixelColor(128, 80).rgb()
+                state_key = w._background_key
+                self.assertFalse(w._update_background())      # same state: nothing re-rendered
+                self.assertEqual(w._background_key, state_key)
+        self.assertEqual(len(set(frames.values())), 3)          # before, between, after differ
+        # A resize keeps the same small field (no re-render while dragging).
+        with patch.object(MusicLibraryWindow, "_sea_change_mix", return_value=1.0):
+            w._background_key = None
+            w._update_background()
+            before = w._background_frame.cacheKey()
+            w.resize(700, 500)
+            self.app.processEvents()
+            self.assertEqual(w._background_frame.cacheKey(), before)
+
+    def test_row_bar_keeps_three_keys_and_dims_an_unavailable_previous(self):
+        w = self.prepare("sidebar", (960, 540))
+        island = w.now_playing_island
+        self.assertEqual(island.bar_mode, "row")
+        with patch.object(type(island), "_supported_music_transport_commands",
+                          lambda self, commands: [c for c in commands if c != "music:previous"]):
+            island.grab()
+        self.assertNotIn("music:previous", island.music_button_rects)
+        self.assertEqual(len(island.music_button_rects), 2)
+        # The cover sits the same distance from the top, bottom and left edges.
+        cover = island.music_cover_rect
+        self.assertAlmostEqual(cover.top() - 1, island.height() - 1 - cover.bottom(), delta=1)
+        self.assertAlmostEqual(cover.left() - 1, cover.top() - 1, delta=1)
+
+    def test_hovered_and_selected_rows_never_share_a_colour(self):
+        from local.row_states import hover_colors, selected_color
+        for dark in (True, False):
+            wash, frame = hover_colors(dark)
+            self.assertNotEqual(wash.rgba(), selected_color(dark).rgba())
+            self.assertGreater(frame.alpha(), 0)            # hover is an outline; selected has none
+
     def test_sidebar_uses_login_rail_and_entire_mini_bar_opens_playback(self):
         from local.login_layout_variants import login_variant_layout
         for size in SIZES:
             w = self.prepare("sidebar", size)
             view = w._variant_view
-            expected = login_variant_layout("sidebar", *size, (True,) * 4)
-            self.assertEqual(view.rail.topLeft(), expected.rail.topLeft())
-            self.assertEqual(view.rail.width(), expected.rail.width())
+            from local.library_layout_variants import RAIL_NARROW, RAIL_WIDE
+            self.assertEqual(view.rail.x(), 16)
+            self.assertIn(view.rail.width(), (RAIL_WIDE, RAIL_NARROW))
             self.assertLess(view.rail.bottom(), view.player.top())
-            self.assertEqual((view.player.left(), view.player.right()), (16, w.width() - 16))
+            island = w.now_playing_island
+            if island.bar_mode == "pill":
+                self.assertAlmostEqual(view.player.center().x(), w.width() / 2, delta=1)
+            else:
+                self.assertEqual((view.player.left(), view.player.right()), (16, w.width() - 16))
             self.assertLess(view.rail_source.geometry().bottom(), view.player.top())
             self.assertTrue(view.rail.contains(QRectF(view.rail_source.geometry())))
             buttons = tuple(view.buttons.values())
@@ -369,7 +591,8 @@ class LibraryLayoutVariantTests(unittest.TestCase):
                 QTest.mouseClick(island, Qt.MouseButton.LeftButton, pos=rect.center().toPoint())
                 self.assertEqual(commands.at(commands.count() - 1), [key.split(":", 1)[1]])
                 self.assertTrue(island.rect().contains(rect.toAlignedRect()))
-            self.assertEqual(commands.count(), 3)
+            # The free island (pill) has no transport; the whole pill opens playback.
+            self.assertEqual(commands.count(), 0 if island.bar_mode == "pill" else 3)
             self.assertEqual(opened.count(), 0)
             QTest.mouseClick(island, Qt.MouseButton.LeftButton, pos=island.music_cover_rect.center().toPoint())
             self.assertEqual(opened.count(), 1)
@@ -382,10 +605,11 @@ class LibraryLayoutVariantTests(unittest.TestCase):
         w = self.prepare("sidebar")
         view = w._variant_view
         self.assertTrue(view.status_timer.isActive())
-        with patch.object(w.source_button, "update") as update:
+        # The refreshed header has no platform key; the rail's one pulses.
+        with patch.object(view.rail_source, "update") as update:
             view.advance_status_pulse(view.status_started_at + 1.)
-            update.assert_called_once_with(w.source_button.status_rect())
-        self.assertEqual(w.source_button.status_opacity, 1.)
+            update.assert_called_once_with(view.rail_source.status_rect())
+        self.assertEqual(view.rail_source.status_opacity, 1.)
         w.set_account(AccountSnapshot("netease", state="expired"))
         self.assertFalse(view.status_timer.isActive())
         w.set_account(self.account)

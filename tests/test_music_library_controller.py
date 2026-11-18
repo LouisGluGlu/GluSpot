@@ -524,15 +524,30 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.controller.queue_next(row)
         self.assertIn("请求失败", self.window._error)
 
-    def test_search_song_selection_keeps_current_search_song_queue_and_selected_index(self):
+    def test_search_song_selection_adds_only_that_song_to_the_current_queue(self):
+        self.open()
+        current, after = OnlineSong("netease", "current", "current"), OnlineSong("netease", "after", "after")
+        self.player.play_queue((current, after))
+        second = OnlineSong("netease", "song-2", "second")
+        self.service.search_pages["netease", "query", "songs", 0] = CatalogPage((self.song, second), 2, False)
+        self.search("query")
+        run_search(self.tasks)
+        self.window._rows[1].cover.click()
+        # The chosen song plays now, right after the one that was playing; the
+        # other search results stay out and the old queue carries on after it.
+        self.assertEqual(self.player.queue, (current, second, after))
+        self.assertEqual(self.player.index, 1)
+        self.assertEqual(self.player.track.track_id, "owned:netease:song-2")
+        self.assertNotIn(self.song, self.player.queue)
+
+    def test_search_song_with_nothing_playing_becomes_the_queue_alone(self):
         self.open()
         second = OnlineSong("netease", "song-2", "second")
         self.service.search_pages["netease", "query", "songs", 0] = CatalogPage((self.song, second), 2, False)
         self.search("query")
         run_search(self.tasks)
         self.window._rows[1].cover.click()
-        self.assertEqual(self.player.queue, (self.song, second))
-        self.assertEqual(self.player.index, 1)
+        self.assertEqual(self.player.queue, (second,))
         self.assertEqual(self.player.track.track_id, "owned:netease:song-2")
 
     def test_last_closed_surface_controls_default_click_and_expand_toggle_is_persisted(self):

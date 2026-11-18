@@ -103,11 +103,15 @@ class _Canvas(QWidget):
         self._pressed = None
 
     # --- geometry ---------------------------------------------------------
+    def header_top(self) -> int:
+        # With the toolbar row the back key no longer floats over the header.
+        return 6 if self.page.crumb else HEADER_TOP
+
     def header_height(self) -> int:
-        return HEADER_TOP + HEADER_COVER + 24
+        return self.header_top() + HEADER_COVER + 24
 
     def cover_rect(self) -> QRectF:
-        return QRectF(20, HEADER_TOP, HEADER_COVER, HEADER_COVER)
+        return QRectF(20, self.header_top(), HEADER_COVER, HEADER_COVER)
 
     def play_all_rect(self) -> QRectF:
         cover = self.cover_rect()
@@ -287,10 +291,9 @@ class _Canvas(QWidget):
         row = self.row_rect(index)
         current = page.is_current(item)
         if index == self._hover_row or current:
-            p.setPen(Qt.PenStyle.NoPen)
-            alpha = 26 if index == self._hover_row else 14
-            p.setBrush(QColor(255, 255, 255, alpha) if dark else QColor(0, 0, 0, alpha))
-            p.drawRoundedRect(row.adjusted(0, 2, 0, -2), 12, 12)
+            from local.row_states import paint_row_state
+            paint_row_state(p, row.adjusted(0, 2, 0, -2), 12, dark=dark,
+                            hovered=index == self._hover_row, selected=current)
         p.setFont(_entry_font(12))
         p.setPen(muted)
         p.drawText(QRectF(row.x(), row.y(), 34, row.height()), Qt.AlignmentFlag.AlignCenter, str(index + 1))
@@ -359,6 +362,7 @@ class PlaylistPage(QWidget):
         self._artwork_lookup = artwork_lookup
         self._current_lookup = current_lookup
         self.collection = None
+        self.crumb = ""            # the section this page came from; "" = no toolbar row
         self.rows: tuple = ()
         self.loading = False
         self.error = ""
@@ -494,15 +498,47 @@ class PlaylistPage(QWidget):
         self.canvas.update()
 
     # --- layout/paint -----------------------------------------------------
+    TOOLBAR = 50
+
+    def set_crumb(self, crumb: str) -> None:
+        """A toolbar row with a round back key and ``crumb``, or the old floating key."""
+        crumb = str(crumb or "")
+        if crumb != self.crumb:
+            self.crumb = crumb
+            self._layout()
+            self.update()
+
     def _layout(self) -> None:
-        self.scroll.setGeometry(self.rect())
+        ink, _muted, dark = _ink(self)
+        if self.crumb:
+            self.scroll.setGeometry(self.rect().adjusted(0, self.TOOLBAR, 0, 0))
+            self.back_button.setText("‹")
+            self.back_button.setFont(_entry_font(20))
+            self.back_button.setProperty("glassRadius", 17.)
+            self.back_button.setGeometry(14, 9, 34, 34)
+        else:
+            self.scroll.setGeometry(self.rect())
+            self.back_button.setText("‹ 返回")
+            self.back_button.setFont(_entry_font(13))
+            self.back_button.setProperty("glassRadius", 14.)
+            self.back_button.setGeometry(12, 8, 86, 34)
         width = max(1, self.scroll.viewport().width())
         self.canvas.resize(width, self.canvas.content_height())
-        self.back_button.setGeometry(12, 8, 86, 34)
-        ink, _muted, dark = _ink(self)
         self.back_button.setGlassLight(not dark)
         self.back_button.setStyleSheet(f"color:{ink.name()};background:transparent;border:none;")
         self.back_button.raise_()
+
+    def paintEvent(self, event):
+        if not self.crumb:
+            return
+        ink, muted, _dark = _ink(self)
+        with QPainter(self) as p:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            font = _entry_font(13)
+            p.setFont(font)
+            p.setPen(muted)
+            p.drawText(QRectF(58, 9, self.width() - 72, 34), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       p.fontMetrics().elidedText(self.crumb, Qt.TextElideMode.ElideRight, max(1, self.width() - 72)))
 
     def resizeEvent(self, event):
         self._layout()

@@ -272,9 +272,9 @@ class MusicBracketLayoutTests(unittest.TestCase):
         exits = []
         original_particles = aside_dissolve.paint_particles
 
-        def record_particles(painter, sprite, origin, phase):
+        def record_particles(painter, sprite, origin, phase, shift=0.0):
             exits.append(phase)
-            return original_particles(painter, sprite, origin, phase)
+            return original_particles(painter, sprite, origin, phase, shift)
 
         with patch.object(aside_dissolve, "paint_particles", side_effect=record_particles):
             sample(4.75, 101.75)

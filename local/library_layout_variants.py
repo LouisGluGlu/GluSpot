@@ -7,11 +7,12 @@ same controller contracts in every presentation.
 from __future__ import annotations
 
 import math
+import os
 import time
 
-from PySide6.QtCore import QRect, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QAbstractButton, QWidget
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QAbstractButton, QGraphicsOpacityEffect, QLabel, QWidget
 
 from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop, widget_glass_level
 from local.artwork_skeleton import paint_artwork_skeleton
@@ -22,6 +23,142 @@ from local.playback_entry_window import MusicSourceButton, _entry_font
 from local.login_layout_variants import login_variant_layout
 
 LIBRARY_VARIANTS = frozenset({"classic", "sidebar", "listen", "compact"})
+
+# The 6.51 refresh of the sidebar library: a short header with only the
+# window's close at the top right, account actions (platform, sign out) in
+# the rail's footer, a raised content plane, denser rows with a hover plate.
+# GLUSPOT_LIBRARY_REFRESH=0 starts on the earlier look; Ctrl+Shift+L flips it.
+REFRESH_HEADER = 60
+REFRESH_ROW, REFRESH_STRIDE, REFRESH_COVER = 60, 64, 48
+RAIL_WIDE, RAIL_NARROW, RAIL_KEY = 156, 56, 38
+SECTION_ORDER = ("for_you", "recommended", "personal")
+PULL_TO_NEXT = 360          # wheel units past the end of a list that turn to the next section
+PLATE_MS, FADE_MS = 260, 240
+
+
+BAR_SLACK = 24             # px a size must clear past a threshold before the bar changes pose
+
+
+def bar_mode_for(width: int, height: int, previous: str | None = None) -> str:
+    """The now-playing bar's pose for the window's shape: wide and tall keeps
+    the expanded island, wide and short one row, narrow the free island.
+    Near a threshold the previous pose holds, so a resize does not flicker."""
+    def pose(w, h):
+        if w >= 640:
+            return "tall" if h >= 700 else "row"
+        return "tall" if h >= 760 else "pill"
+    chosen = pose(width, height)
+    if previous and previous != chosen and previous in {
+            pose(width + dx, height + dy) for dx in (-BAR_SLACK, 0, BAR_SLACK) for dy in (-BAR_SLACK, 0, BAR_SLACK)}:
+        return previous
+    return chosen
+
+
+def _fine_glyph(p, rect, key, color):
+    """Thin line icons for the rail: sparkle, grid, note list, magnifier."""
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(color, max(1.4, rect.width() * .075), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+               Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    r = QRectF(rect)
+    c, u = r.center(), r.width() / 24.
+    if key == "for_you":
+        star = QPainterPath()
+        for i, (dx, dy) in enumerate(((0, -9), (2.2, -2.2), (9, 0), (2.2, 2.2), (0, 9), (-2.2, 2.2), (-9, 0), (-2.2, -2.2))):
+            point = QPointF(c.x() + dx * u - 1.5 * u, c.y() + dy * u + 1.5 * u)
+            star.moveTo(point) if i == 0 else star.lineTo(point)
+        star.closeSubpath()
+        p.drawPath(star)
+        small = QPainterPath()
+        sc = QPointF(c.x() + 7 * u, c.y() - 7 * u)
+        for i, (dx, dy) in enumerate(((0, -3), (.8, -.8), (3, 0), (.8, .8), (0, 3), (-.8, .8), (-3, 0), (-.8, -.8))):
+            point = QPointF(sc.x() + dx * u, sc.y() + dy * u)
+            small.moveTo(point) if i == 0 else small.lineTo(point)
+        small.closeSubpath()
+        p.drawPath(small)
+    elif key == "recommended":
+        side, gap = 7.5 * u, 2.5 * u
+        for dx in (-1, 1):
+            for dy in (-1, 1):
+                x = c.x() + (gap / 2 if dx > 0 else -gap / 2 - side)
+                y = c.y() + (gap / 2 if dy > 0 else -gap / 2 - side)
+                p.drawRoundedRect(QRectF(x, y, side, side), 2.2 * u, 2.2 * u)
+    elif key == "personal":
+        for i, length in enumerate((10, 10, 6)):
+            y = c.y() - 6 * u + i * 5 * u
+            p.drawLine(QPointF(c.x() - 9 * u, y), QPointF(c.x() - 9 * u + length * u, y))
+        stem_x = c.x() + 5 * u
+        p.drawLine(QPointF(stem_x, c.y() + 6 * u), QPointF(stem_x, c.y() - 8 * u))
+        p.drawLine(QPointF(stem_x, c.y() - 8 * u), QPointF(stem_x + 4.5 * u, c.y() - 6 * u))
+        p.drawEllipse(QPointF(stem_x - 2.4 * u, c.y() + 6.5 * u), 2.6 * u, 2.2 * u)
+    else:
+        p.drawEllipse(QPointF(c.x() - 1.5 * u, c.y() - 1.5 * u), 6.5 * u, 6.5 * u)
+        p.drawLine(QPointF(c.x() + 3.4 * u, c.y() + 3.4 * u), QPointF(c.x() + 8.5 * u, c.y() + 8.5 * u))
+    p.restore()
+
+
+def _type(painter, rect, text, size, color, weight=QFont.Weight.Normal, align=Qt.AlignmentFlag.AlignVCenter):
+    font = _entry_font(size)
+    font.setWeight(weight)
+    painter.setFont(font)
+    painter.setPen(QColor(color))
+    painter.drawText(QRectF(rect), align, painter.fontMetrics().elidedText(
+        text, Qt.TextElideMode.ElideRight, max(1, round(rect.width()))))
+
+
+class _SectionPull(QObject):
+    """Wheel past the end of a section's list turns to the next one (and past
+    the top, back to the previous one)."""
+
+    def __init__(self, view):
+        super().__init__(view.owner)
+        self.view = view
+        self.pull = 0
+        self.reset = QTimer(self)
+        self.reset.setSingleShot(True)
+        self.reset.setInterval(700)
+        self.reset.timeout.connect(self._clear)
+
+    def _clear(self):
+        self.pull = 0
+
+    def eventFilter(self, watched, event):
+        if event.type() != QEvent.Type.Wheel or not self.view.pull_active():
+            return False
+        bar = self.view.owner.scroll.verticalScrollBar()
+        delta = event.angleDelta().y()
+        if delta < 0 and bar.value() >= bar.maximum():
+            self.pull = max(0, self.pull) - delta
+        elif delta > 0 and bar.value() <= bar.minimum():
+            self.pull = min(0, self.pull) - delta
+        else:
+            self.pull = 0
+            return False
+        self.reset.start()
+        if self.pull >= PULL_TO_NEXT:
+            self.pull = 0
+            self.view.step_section(1)
+        elif self.pull <= -PULL_TO_NEXT:
+            self.pull = 0
+            self.view.step_section(-1)
+        return True
+
+
+def refresh_default() -> bool:
+    return os.environ.get("GLUSPOT_LIBRARY_REFRESH", "1").strip().lower() not in {"0", "off", "false", "no"}
+
+
+def refresh_tones(dark: bool) -> dict:
+    """Planes of the refreshed library: page < rail < content, each a step apart."""
+    if dark:
+        return {"page": QColor(0, 0, 0), "sidebar": QColor(26, 26, 30), "content": QColor(17, 17, 21),
+                "edge": QColor(255, 255, 255, 18), "hover": QColor(255, 255, 255, 16),
+                "rule": QColor(255, 255, 255, 26), "muted": QColor(160, 166, 178)}
+    return {"page": QColor(255, 255, 255), "sidebar": QColor(236, 236, 241), "content": QColor(247, 247, 250),
+            "edge": QColor(0, 0, 0, 16), "hover": QColor(0, 0, 0, 12),
+            "rule": QColor(0, 0, 0, 22), "muted": QColor(96, 100, 110)}
 SECTIONS = {"for_you": "为你精选", "recommended": "推荐歌单", "personal": "个人歌单", "search": "搜索"}
 
 
@@ -87,6 +224,10 @@ class _SectionButton(QAbstractButton):
         self.clicked.connect(lambda: view.select_section(key))
 
     def paintEvent(self, event):
+        view = self.view
+        if view.refresh and view.owner.library_variant == "sidebar":
+            self._paint_refreshed()
+            return
         with QPainter(self) as p:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             face = QRectF(self.rect()).adjusted(1, 1, -1, -1)
@@ -101,6 +242,25 @@ class _SectionButton(QAbstractButton):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor("#d8e9f0"))
                 p.drawEllipse(QRectF(self.width() / 2 - 2, self.height() - 7, 4, 4))
+
+    def _paint_refreshed(self):
+        from local.row_states import paint_row_state
+        from local.ui_theme import active_tokens
+        dark = active_tokens(self).dark
+        ink = QColor(244, 245, 247) if dark else QColor(20, 21, 26)
+        quiet = QColor(ink)
+        quiet.setAlphaF(.62)
+        with QPainter(self) as p:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            if not self.isChecked() and (self.underMouse() or self.hasFocus()):
+                paint_row_state(p, QRectF(self.rect()).adjusted(1, 1, -1, -1), 11, dark=dark, hovered=True)
+            color = ink if self.isChecked() else quiet
+            side = 20
+            icon = QRectF((self.width() - side) / 2 if self.icons_only else 11, (self.height() - side) / 2, side, side)
+            _fine_glyph(p, icon, self.key, color)
+            if not self.icons_only:
+                _type(p, QRectF(40, 0, self.width() - 44, self.height()), SECTIONS[self.key], 13, color,
+                      QFont.Weight.DemiBold if self.isChecked() else QFont.Weight.Normal)
 
 
 class _RowIconButton(QAbstractButton):
@@ -159,9 +319,9 @@ class _VariantRow(QWidget):
         self.cover.image = owner._artwork.get(collection.key, self.cover.image)
         self.cover.setAccessibleName(f"播放{collection.title}")
         is_song = collection.song is not None
-        # A song row plays with the search results as the new list; a list
+        # A song row plays now and joins the current queue; a list
         # row opens its page.
-        self.cover.setToolTip("播放（用搜索结果替换播放列表）" if is_song else collection.title)
+        self.cover.setToolTip("立即播放这首，之后回到原播放列表" if is_song else collection.title)
         self.cover.clicked.connect(self.activate)
         self.queue_button = _RowIconButton("next", "下一首播放", self)
         self.queue_button.setAccessibleName(f"将{collection.title}加入下一首播放")
@@ -172,9 +332,27 @@ class _VariantRow(QWidget):
         self.insert_button.clicked.connect(self._insert)
         self.insert_button.setVisible(is_song)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setEnabled(not owner._opening)
         if owner.search.text().strip():
             self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def _refreshed(self):
+        view = getattr(self.owner, "_variant_view", None)
+        return bool(view is not None and view.refresh and self.owner.library_variant == "sidebar")
+
+    def _is_playing(self):
+        song, track = self.collection.song, getattr(self.owner, "_now_playing", None)
+        return bool(song is not None and track is not None
+                    and getattr(track, "track_id", "") == f"owned:{song.source_id}:{song.song_id}")
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
 
     def keyPressEvent(self, event):
         if self.owner._move_search_key(self, event):
@@ -193,8 +371,11 @@ class _VariantRow(QWidget):
         self.owner.songInsertRequested.emit(self.collection, QRect(self.cover.mapToGlobal(rect.topLeft()), rect.size()))
 
     def _layout(self):
-        side = self.width() if self.card else 54
-        self.cover.setGeometry(0, 0 if self.card else 5, side, side)
+        if not self.card and self._refreshed():
+            self.cover.setGeometry(6, (self.height() - REFRESH_COVER) // 2, REFRESH_COVER, REFRESH_COVER)
+        else:
+            side = self.width() if self.card else 54
+            self.cover.setGeometry(0, 0 if self.card else 5, side, side)
         self.queue_button.setGeometry(self.width() - 40, (self.height() - 36) // 2, 36, 36)
         self.insert_button.setGeometry(self.width() - 80, (self.height() - 36) // 2, 36, 36)
 
@@ -212,6 +393,16 @@ class _VariantRow(QWidget):
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             x = 5 if self.card else 68
             y = self.width() + 2 if self.card else 8
+            refreshed = self._refreshed()
+            if refreshed:
+                from local.row_states import paint_row_state
+                from local.ui_theme import active_tokens
+                dark = active_tokens(self).dark
+                tones = refresh_tones(dark)
+                if not self.card:
+                    x, y = 6 + REFRESH_COVER + 14, (self.height() - 42) // 2
+                    paint_row_state(p, QRectF(self.rect()), 12, dark=dark,
+                                    hovered=self.underMouse() and self.isEnabled(), selected=self._is_playing())
             width = self.width() - x - (88 if self.collection.song else 8)
             query = getattr(self.owner, "_highlight_query", "")
             subtitle = self.collection.song.artist if self.collection.song else {
@@ -233,6 +424,11 @@ class _VariantRow(QWidget):
                     p.setBrush(Qt.BrushStyle.NoBrush)
                     p.setPen(QPen(QColor(255, 231, 163, 180), 1.2))
                     p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 12, 12)
+            elif refreshed:
+                ink = QColor(244, 245, 247) if dark else QColor(20, 21, 26)
+                _type(p, QRectF(x, y, width, 22), self.collection.title, 14, ink,
+                      QFont.Weight.Bold if self._is_playing() else QFont.Weight.DemiBold)
+                _type(p, QRectF(x, y + 22, width, 20), subtitle, 11, tones["muted"])
             else:
                 _text(p, QRectF(x, y, width, 23), self.collection.title, 13, bold=self.card)
                 _text(p, QRectF(x, y + 23, width, 19), subtitle, 10, "#adb8c8")
@@ -251,6 +447,29 @@ class _PlayerTarget(QAbstractButton):
 class LibraryVariantPresentation:
     def __init__(self, owner):
         self.owner = owner
+        self.refresh = refresh_default()
+        self.plate = QRectF()
+        self._plate_from = self._plate_to = QRectF()
+        self._plate_motion = QVariantAnimation(owner)
+        self._plate_motion.setDuration(PLATE_MS)
+        self._plate_motion.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._plate_motion.setStartValue(0.)
+        self._plate_motion.setEndValue(1.)
+        self._plate_motion.valueChanged.connect(self._move_plate)
+        self._pull = _SectionPull(self)
+        owner.scroll.viewport().installEventFilter(self._pull)
+        self._fade = QGraphicsOpacityEffect(owner.scroll)
+        self._fade.setOpacity(1.)
+        self._fade.setEnabled(False)
+        owner.scroll.setGraphicsEffect(self._fade)
+        self._fade_motion = QVariantAnimation(owner)
+        self._fade_motion.setDuration(FADE_MS)
+        self._fade_motion.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade_motion.valueChanged.connect(lambda value: self._fade.setOpacity(float(value)))
+        self._fade_motion.finished.connect(lambda: self._fade.setEnabled(False))
+        self.next_hint = QLabel(owner.content)
+        self.next_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.next_hint.hide()
         self.section = "for_you"
         self.last_catalog_section = "for_you"
         self.buttons = {key: _SectionButton(key, self) for key in SECTIONS}
@@ -275,8 +494,69 @@ class LibraryVariantPresentation:
         self.status_timer.timeout.connect(self.advance_status_pulse)
         self.headings = []
         self.search_rect = QRect()
-        self.rail = self.pane = self.player = self.cluster = QRectF()
+        self.rail = self.pane = self.player = self.cluster = self.rule = QRectF()
         self.set_visible(False)
+
+    # --- the sliding selection plate ---------------------------------------
+    def _plate_target(self):
+        for key, button in self.buttons.items():
+            if button.isChecked() and button.isVisible():
+                return QRectF(button.geometry())
+        return QRectF()
+
+    def _sync_plate(self, animate):
+        target = self._plate_target()
+        if target == self._plate_to and (self._plate_motion.state() == QVariantAnimation.State.Running or self.plate == target):
+            return
+        if not animate or self.plate.isEmpty() or target.isEmpty():
+            self._plate_motion.stop()
+            self.plate = self._plate_from = self._plate_to = target
+            self.owner.update(self.rail.toAlignedRect().adjusted(-4, -4, 4, 4))
+            return
+        self._plate_from, self._plate_to = QRectF(self.plate), target
+        self._plate_motion.stop()
+        self._plate_motion.start()
+
+    def _move_plate(self, value):
+        t = float(value)
+        a, b = self._plate_from, self._plate_to
+        self.plate = QRectF(a.x() + (b.x() - a.x()) * t, a.y() + (b.y() - a.y()) * t,
+                            a.width() + (b.width() - a.width()) * t, a.height() + (b.height() - a.height()) * t)
+        self.owner.update(self.rail.toAlignedRect().adjusted(-4, -4, 4, 4))
+
+    # --- turning to the next section past the end of a list ----------------
+    def pull_active(self):
+        o = self.owner
+        return (self.refresh and o.library_variant == "sidebar" and not o.search.text().strip()
+                and self.section in SECTION_ORDER and not getattr(o, "playlist_page_open", False))
+
+    def step_section(self, step):
+        if self.section not in SECTION_ORDER:
+            return
+        index = SECTION_ORDER.index(self.section) + step
+        if not 0 <= index < len(SECTION_ORDER):
+            return
+        o = self.owner
+        self.select_section(SECTION_ORDER[index])
+        bar = o.scroll.verticalScrollBar()
+        bar.setValue(bar.maximum() if step < 0 else 0)
+        self._fade.setEnabled(True)
+        self._fade_motion.stop()
+        self._fade_motion.setStartValue(0.)
+        self._fade_motion.setEndValue(1.)
+        self._fade_motion.start()
+
+    def toggle_refresh(self):
+        """Ctrl+Shift+L: the refreshed library or the earlier one, for a side-by-side look."""
+        self.refresh = not self.refresh
+        o = self.owner
+        self.plate = QRectF()
+        o._background_key = None
+        if o._update_background():
+            o.update()
+        o._rebuild_rows(preserve_scroll=True)
+        o.set_notice("新版音乐库" if self.refresh else "旧版音乐库")
+        o.update()
 
     def set_visible(self, visible):
         for button in (self.owner.source_button, self.owner.logout_button, self.owner.close_button):
@@ -291,6 +571,9 @@ class LibraryVariantPresentation:
     def select_section(self, key):
         self.section = key
         o = self.owner
+        for name, button in self.buttons.items():
+            button.setChecked(name == key)
+        self._sync_plate(True)
         # A playlist page covers the list; choosing a section leaves it.
         close_page = getattr(o, "close_playlist_page", None)
         if callable(close_page):
@@ -414,10 +697,22 @@ class LibraryVariantPresentation:
         self._wide_cards = wide
         return wide
 
+    def _rail_is_wide(self, width):
+        previous = getattr(self, "_rail_wide", None)
+        wide = width >= 720
+        if previous is True and 688 <= width < 720:
+            wide = True
+        elif previous is False and 720 <= width < 752:
+            wide = False
+        self._rail_wide = wide
+        return wide
+
     def _stable_grid(self, width):
         """Fit as many cards as the width allows, and don't flip at the boundary."""
         width = max(1, int(width))
         gap, min_side, max_side, slack = 24, 132, 176, 24
+        if getattr(self, "refresh", False) and self.owner.library_variant == "sidebar":
+            min_side, max_side = 148, 212
         def side_for(columns):
             return (width - gap * max(0, columns - 1)) / max(1, columns)
         columns = 1
@@ -436,10 +731,18 @@ class LibraryVariantPresentation:
         w, h = o.width(), o.height()
         wide = self._cards_are_wide()
         query = bool(o.search.text().strip())
-        self.cluster = QRectF(w - 164, 16, 148, 48)
-        for button, x in ((o.source_button, w - 162), (o.logout_button, w - 114), (o.close_button, w - 66)):
-            button.setGeometry(x, 18, 44, 44)
-            button.show()
+        refreshed = self.refresh and variant == "sidebar"
+        if refreshed:
+            self.cluster = QRectF(w - 64, 8, 48, 48)
+            o.close_button.setGeometry(w - 62, 10, 44, 44)
+            o.close_button.show()
+            o.source_button.hide()
+            o.logout_button.show()
+        else:
+            self.cluster = QRectF(w - 164, 16, 148, 48)
+            for button, x in ((o.source_button, w - 162), (o.logout_button, w - 114), (o.close_button, w - 66)):
+                button.setGeometry(x, 18, 44, 44)
+                button.show()
         o.source_button.login_style = "sidebar-icons"
         account = o._account
         if not o.source_button.source.login_supported:
@@ -474,7 +777,61 @@ class LibraryVariantPresentation:
             button.setVisible(variant in {"sidebar", "compact"})
             button.setChecked(key == ("search" if query else self.section))
             button.icons_only = not wide
-        if variant == "sidebar":
+        if refreshed:
+            # The rail's width follows the window's width only (with the
+            # cards' dead band), never its height: one less jump on resize.
+            rail_wide = self._rail_is_wide(w)
+            # Header 60 px; a slim rail; the content plane takes the rest.
+            # Account actions sit in the rail's footer, under a rule. The
+            # now-playing bar takes the window shape's pose.
+            island = o.now_playing_island
+            mode = bar_mode_for(w, h, island.bar_mode)
+            island.set_bar_mode(mode)
+            bar_h = island.bar_height(mode)
+            bar_top = h - bar_h - 14
+            rail_w = RAIL_WIDE if rail_wide else RAIL_NARROW
+            self.rail = QRectF(16, REFRESH_HEADER + 4, rail_w, max(1, bar_top - 10 - (REFRESH_HEADER + 4)))
+            left = round(self.rail.right()) + 12
+            self.pane = QRectF(left, self.rail.y(), w - left - 16, self.rail.height())
+            if mode == "pill":
+                pill_w = min(w - 32, island.PILL_WIDTH)
+                self.player = QRectF(round((w - pill_w) / 2), bar_top, pill_w, bar_h)
+            else:
+                self.player = QRectF(16, bar_top, w - 32, bar_h)
+            slots = 6 if not rail_wide else 5
+            key_h = min(RAIL_KEY, max(26, int((self.rail.height() - 28) / slots)))
+            gap = min(4, max(0, int((self.rail.height() - 28 - key_h * slots) / slots)))
+            inset = 7
+            for index, button in enumerate(self.buttons.values()):
+                button.setGeometry(round(self.rail.x()) + inset, round(self.rail.y()) + 8 + index * (key_h + gap),
+                                   rail_w - 2 * inset, key_h)
+            footer = round(self.rail.bottom()) - key_h - 8
+            for button in self.buttons.values():
+                button.icons_only = not rail_wide
+            self.source_name_rect = QRectF()
+            if rail_wide:
+                # [platform key] platform name [sign out], one footer row.
+                key = min(32, key_h)
+                self.rail_source.login_style = "sidebar-icons"
+                self.rail_source.setGeometry(round(self.rail.x()) + 6, footer, key_h, key_h)
+                o.logout_button.setGeometry(round(self.rail.right()) - 6 - key, footer + (key_h - key) // 2, key, key)
+                self.source_name_rect = QRectF(self.rail.x() + 6 + key_h + 6, footer,
+                                               rail_w - 12 - key_h - key - 12, key_h)
+                self.rule = QRectF(self.rail.x() + 12, footer - 8, self.rail.width() - 24, 1)
+            else:
+                self.rail_source.setGeometry(round(self.rail.x()) + 6, footer, rail_w - 12, key_h)
+                upper = footer - key_h - 4
+                o.logout_button.setGeometry(round(self.rail.x()) + (rail_w - key_h) // 2, upper, key_h, key_h)
+                self.rule = QRectF(self.rail.x() + 10, upper - 8, self.rail.width() - 20, 1)
+            o.logout_button.raise_()
+            searching = query or self.section == "search"
+            self.search_rect = QRect(left + 14, round(self.pane.y()) + 54, round(self.pane.width()) - 28, 40)
+            top = round(self.pane.y()) + (104 if searching else 58)
+            o.search.setVisible(searching)
+            scroll_rect = QRect(left + 8, top, round(self.pane.width()) - 12, max(1, round(self.pane.bottom()) - top - 6))
+        elif variant == "sidebar":
+            self.rule = QRectF()
+            o.now_playing_island.set_bar_mode("tall")
             login = login_variant_layout("sidebar", w, h, (True,) * 4)
             bar_top = h - o.now_playing_island.HEIGHT - 16
             self.rail = QRectF(login.rail)
@@ -498,6 +855,7 @@ class LibraryVariantPresentation:
             o.search.setVisible(searching)
             scroll_rect = QRect(left, top, round(self.pane.width()), max(1, round(self.pane.bottom()) - top))
         elif variant == "listen":
+            self.rule = QRectF()
             self.rail = QRectF()
             self.search_rect = QRect(24, 78, w - 48, 44)
             o.search.show()
@@ -507,6 +865,7 @@ class LibraryVariantPresentation:
             self.play_button.setGeometry(round(self.player.x()) + (184 if wide else 132),
                                          round(self.player.y()) + (104 if wide else 80), 116, 38)
         else:
+            self.rule = QRectF()
             self.rail = QRectF(16, 80, w - 32, 48)
             slot = (w - 40) / 4
             for index, button in enumerate(self.buttons.values()):
@@ -539,10 +898,31 @@ class LibraryVariantPresentation:
                 row.card = wide
                 if wide:
                     row.setGeometry(index % columns * (side + 24), top + index // columns * (side + 64), side, side + 48)
+                elif refreshed:
+                    row.setGeometry(0, top + index * REFRESH_STRIDE, cw, REFRESH_ROW)
                 else:
                     row.setGeometry(0, top + index * 76, cw, 68)
                 row._layout()
-            top += math.ceil(len(o._rows) / columns) * (side + 64) if wide else len(o._rows) * 76
+            stride = REFRESH_STRIDE if refreshed else 76
+            top += math.ceil(len(o._rows) / columns) * (side + 64) if wide else len(o._rows) * stride
+            following = (SECTION_ORDER[SECTION_ORDER.index(self.section) + 1]
+                         if refreshed and self.section in SECTION_ORDER[:-1] and o._rows else "")
+            if following:
+                from local.ui_theme import active_tokens
+                self.next_hint.setText(f"继续下滑 · {SECTIONS[following]}")
+                self.next_hint.setFont(_entry_font(11))
+                self.next_hint.setStyleSheet(
+                    f"color:{refresh_tones(active_tokens(o).dark)['muted'].name()};background:transparent;")
+                self.next_hint.setGeometry(0, top + 6, cw, 30)
+                self.next_hint.show()
+                top += 40
+            else:
+                self.next_hint.hide()
+        elif refreshed:
+            for row in o._rows:
+                row.setGeometry(0, top, cw, REFRESH_ROW)
+                row._layout()
+                top += REFRESH_STRIDE
         else:
             for row in o._rows:
                 row.setGeometry(4, top, cw - 8, 66)
@@ -575,11 +955,17 @@ class LibraryVariantPresentation:
         o.recovery_action.setText("重新搜索" if query else "切换平台")
         for button in (o.empty_action, o.recovery_action):
             button.setGlassLight(True)
+            # A light plate takes dark ink, or the label disappears into it.
+            button.setStyleSheet("color:#15161a;background:transparent;border:none;")
             button.setGeometry(scroll_rect.x() + (scroll_rect.width() - 148) // 2,
                                scroll_rect.y() + max(70, (scroll_rect.height() - 20) // 2), 148, 40)
             button.raise_()
         o._sync_artwork_skeleton()
         self.sync_status_pulse()
+        if refreshed:
+            self._sync_plate(False)
+        else:
+            self.next_hint.hide()
 
     def _progress(self, p, rect, *, times=True):
         track = self.owner._now_playing
@@ -641,21 +1027,63 @@ class LibraryVariantPresentation:
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(color)
             p.drawRoundedRect(rect, radius, radius)
-        plane(QRectF(o.rect()), "page", 24)
-        plane(self.rail, "sidebar", 20)
-        plane(self.pane, "content", 18)
-        plane(self.cluster, "header", 17)
-        _glass(p, o, self.cluster, "utilities", 17)
-        _text(p, QRectF(24, 17, o.width() - 196, 32), "音乐库", 24, bold=True)
+        refreshed = self.refresh and variant == "sidebar"
         name = o._account.nickname if o._account and o._account.logged_in else "未登录"
         if o._notice:
             name = o._notice
-        _text(p, QRectF(25, 50, o.width() - 196, 20), name, 11, "#b5c1cf")
-        if not self.rail.isEmpty():
-            _glass(p, o, self.rail, "rail", 20)
+        if refreshed:
+            # The song's own background (drawn by the window) shows through:
+            # the rail is a faint glass strip, the content a full glass plane.
+            dark = active_tokens(o).dark
+            fresh = refresh_tones(dark)
+            ink = QColor(244, 245, 247) if dark else QColor(20, 21, 26)
+            p.setPen(Qt.PenStyle.NoPen)
+            _glass(p, o, self.cluster, "utilities", 24)
+            _type(p, QRectF(24, 9, o.width() - 120, 28), "音乐库", 20, ink, QFont.Weight.Bold)
+            _type(p, QRectF(25, 36, o.width() - 120, 18), name, 11, fresh["muted"])
+            if not self.rail.isEmpty():
+                _glass(p, o, self.rail, "rail", 18, opacity=.55)
+            if not self.pane.isEmpty():
+                _glass(p, o, self.pane, "content", 20)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(fresh["edge"], 1))
+                p.drawRoundedRect(self.pane.adjusted(.5, .5, -.5, -.5), 20, 20)
+                p.setPen(Qt.PenStyle.NoPen)
+            if not self.plate.isEmpty():
+                from local.row_states import paint_row_state
+                _glass(p, o, self.plate, "selection", 11, active=True, opacity=.9)
+                paint_row_state(p, self.plate, 11, dark=dark, selected=True)
+            if not self.rule.isEmpty():
+                p.setBrush(fresh["rule"])
+                p.drawRect(self.rule)
+            name_rect = getattr(self, "source_name_rect", QRectF())
+            if not name_rect.isEmpty():
+                _type(p, name_rect, o.source_button.source.name, 12, fresh["muted"])
+        else:
+            plane(QRectF(o.rect()), "page", 24)
+            plane(self.rail, "sidebar", 20)
+            plane(self.pane, "content", 18)
+            plane(self.cluster, "header", 17)
+            _glass(p, o, self.cluster, "utilities", 17)
+            _text(p, QRectF(24, 17, o.width() - 196, 32), "音乐库", 24, bold=True)
+            _text(p, QRectF(25, 50, o.width() - 196, 20), name, 11, "#b5c1cf")
+            if not self.rail.isEmpty():
+                _glass(p, o, self.rail, "rail", 20)
         if variant != "sidebar":
             _glass(p, o, self.pane, "content", 22, opacity=.48)
-        if variant == "sidebar":
+        if refreshed:
+            page_open = getattr(o, "playlist_page_open", False)
+            heading = "" if page_open else ("搜索" if o.search.isVisible() else SECTIONS[self.section])
+            count = len(o._rows)
+            title_rect = QRectF(self.pane.x() + 20, self.pane.y() + 12, self.pane.width() - 40, 34)
+            if heading:
+                _type(p, title_rect, heading, 22, ink, QFont.Weight.Bold)
+            if heading and count and not o._catalog_skeleton.isVisible():
+                font = _entry_font(22)
+                font.setWeight(QFont.Weight.Bold)
+                offset = QFontMetricsF(font).horizontalAdvance(heading) + 10
+                _type(p, title_rect.adjusted(offset, 4, 0, 0), f"{count} 项", 12, fresh["muted"])
+        elif variant == "sidebar":
             _text(p, QRectF(self.pane.x(), self.pane.y(), self.pane.width(), 32),
                   "搜索" if o.search.isVisible() else SECTIONS[self.section], 21, bold=True)
         elif variant == "compact":

@@ -1,26 +1,31 @@
-"""The bracketed aside's exit: it breaks into particles, left to right.
+"""The bracketed aside's exit: it breaks into fine grains that become its blur.
 
-When the next sentence is halfway through, a finished aside used to blur in
-place over 0.18 s. Now its glyphs come apart from left to right into small
-particles that float up and fade, and the blurred aside settles in behind
-them. Only the window and fullscreen paint it; the island has no asides.
+When the next sentence is halfway through, a finished aside comes apart from
+left to right into fine grains. Each grain lifts a little and settles back
+while the blurred aside condenses under it, column by column, so the crisp
+words turn into their blur instead of vanishing. The grains drift right as
+they go, so the blur they settle into rests one character to the right of
+where the crisp aside stood: the grains arrive there while still visible,
+then hold and fade into the blur. Only the window and fullscreen paint it; the island
+has no asides.
 """
 from __future__ import annotations
 
 import math
 import random
+import re
 import zlib
 from dataclasses import dataclass
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QTextLayout
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QTextLayout
 
-DISSOLVE_S = 1.1          # the whole exit, from the first particle to the settled blur
-SWEEP = 0.50              # share of the exit the left-to-right front takes to cross
-FLIGHT = 0.42             # share of the exit one particle floats before it is gone
-BLUR_FROM = 0.45          # the blurred aside starts to settle in here
-MAX_PARTICLES = 900
+DISSOLVE_S = 1.4          # from the first grain to the settled blur
+SWEEP = 0.45              # share of the exit the left-to-right front takes to cross
+FLIGHT = 0.55             # share of the exit one column takes from crisp to blur
+MAX_PARTICLES = 3500
+ALPHA_STEPS = 8           # grains are drawn in this many opacity batches
 PAD = 2.0
 
 
@@ -34,35 +39,76 @@ def dissolve_phase(window_end: float | None, position: float) -> float | None:
     return elapsed / DISSOLVE_S
 
 
-def blur_settle(phase: float) -> float:
-    """Opacity of the blurred aside behind the particles."""
-    x = max(0.0, min(1.0, (phase - BLUR_FROM) / (1.0 - BLUR_FROM)))
+_WORD = re.compile(r"[^\W_]+(?:['\u2019-][^\W_]+)*")
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff]")
+
+
+ARRIVE = 0.45             # share of a column's change by which its grains reach the landing
+
+
+def word_shift(text: str, font: QFont) -> float:
+    """How far right the settled blur rests: the aside's first character
+    (one letter of its first word, or one Chinese, Japanese or Korean
+    character)."""
+    metrics = QFontMetricsF(font)
+    for match in _WORD.finditer(text or ""):
+        word = match.group(0)
+        cjk = _CJK.search(word)
+        return metrics.horizontalAdvance(cjk.group(0) if cjk is not None else word[0])
+    return 0.0
+
+
+def travel(local: float) -> float:
+    """0..1 of the drift for a column ``local`` through its change. Done by
+    ``ARRIVE``, while the grains are still bright and before the blur
+    condenses, so the blur forms exactly where they stopped."""
+    return _smooth(local / ARRIVE)
+
+
+def _smooth(x: float) -> float:
+    x = max(0.0, min(1.0, x))
     return x * x * (3.0 - 2.0 * x)
 
 
-def particle_pose(fx: float, r1: float, r2: float, r3: float, phase: float, scale: float = 1.0):
-    """(dx, dy, size factor, alpha) of one particle ``fx`` across the aside."""
-    start = fx * SWEEP + r3 * 0.08
-    local = max(0.0, min(1.0, (phase - start) / FLIGHT))
+def column_local(fx: float, phase: float) -> float:
+    """0..1 through one column's change; 0 while it is still crisp."""
+    return max(0.0, min(1.0, (phase - fx * SWEEP) / FLIGHT))
+
+
+def blur_settle(phase: float, fx: float = 1.0) -> float:
+    """Opacity of the blurred aside at column ``fx`` (the last column by default)."""
+    return _smooth((column_local(fx, phase) - 0.25) / 0.6)
+
+
+def particle_pose(fx: float, r1: float, r2: float, phase: float, scale: float = 1.0, shift: float = 0.0):
+    """(dx, dy, size factor, alpha) of one grain ``fx`` across the aside.
+
+    A grain lifts a few pixels and drifts ``shift`` to the right, then
+    settles while it fades into the blur below it.
+    """
+    local = column_local(fx, phase)
     if local <= 0.0:
         return 0.0, 0.0, 1.0, 1.0
-    eased = 1.0 - (1.0 - local) ** 2
-    dx = (4.0 + 14.0 * r1) * eased * scale
-    dy = -(8.0 + 22.0 * r2) * eased * scale + math.sin(local * math.pi * 2.0 + r1 * 6.0) * 1.5 * scale * local
-    return dx, dy, 1.0 - 0.45 * local, (1.0 - local) ** 1.6
+    lift = math.sin(math.pi * local)
+    dx = shift * travel(local) + ((r1 - 0.5) * 6.0 + 2.0) * scale * lift
+    dy = -(2.0 + 6.0 * r2) * scale * lift
+    return dx, dy, 1.0 - 0.25 * lift, 1.0 - _smooth((local - 0.35) / 0.65)
 
 
 @dataclass(frozen=True)
 class AsideSprite:
     image: QImage
     origin_shift: float                     # the sprite's top-left is origin - PAD
-    cells: tuple                            # (source rect in logical px, fx, r1, r2, r3)
+    cells: tuple                            # (x, y, side, coverage, fx, r1, r2) in logical px
+    color: QColor
+    span: float
     scale: float
+    arrays: dict
 
 
 def build_sprite(layout: QTextLayout, text: str, font: QFont, width: float, height: float,
                  color: QColor, line_offsets, ratio: float) -> AsideSprite:
-    """The aside's crisp glyphs, and the cells that carry ink."""
+    """The aside's crisp glyphs, and the fine grains that carry their ink."""
     image = QImage(max(1, math.ceil((width + 2 * PAD) * ratio)), max(1, math.ceil((height + 2 * PAD) * ratio)),
                    QImage.Format.Format_ARGB32_Premultiplied)
     image.setDevicePixelRatio(ratio)
@@ -77,15 +123,18 @@ def build_sprite(layout: QTextLayout, text: str, font: QFont, width: float, heig
     painter.end()
     pixel = font.pixelSize() if font.pixelSize() > 0 else font.pointSizeF() * 1.33
     scale = max(0.6, pixel / 24.0)
-    cell = max(2.5, pixel / 7.0)
+    cell = max(1.0 / ratio, pixel / 16.0)
     alpha = _alpha(image)
+    span = width + 2 * PAD
     rng = random.Random(zlib.crc32(text.encode("utf-8")))
-    for _ in range(4):
-        cells = _ink_cells(alpha, ratio, cell, width + 2 * PAD, rng)
+    for _ in range(5):
+        cells = _ink_cells(alpha, ratio, cell, span, rng)
         if len(cells) <= MAX_PARTICLES:
             break
-        cell *= 1.35
-    return AsideSprite(image, PAD, tuple(cells), scale)
+        cell *= 1.3
+    names = ("x", "y", "side", "coverage", "fx", "r1", "r2")
+    arrays = {name: np.array([cell[i] for cell in cells], dtype=float) for i, name in enumerate(names)}
+    return AsideSprite(image, PAD, tuple(cells), QColor(color), span, scale, arrays)
 
 
 def _alpha(image: QImage) -> np.ndarray:
@@ -98,34 +147,91 @@ def _alpha(image: QImage) -> np.ndarray:
 def _ink_cells(alpha: np.ndarray, ratio: float, cell: float, span: float, rng: random.Random):
     step = max(1, round(cell * ratio))
     height, width = alpha.shape
+    rows, cols = height // step, width // step
+    if rows == 0 or cols == 0:
+        return []
+    blocks = alpha[: rows * step, : cols * step].reshape(rows, step, cols, step).mean(axis=(1, 3)) / 255.0
+    side = step / ratio
     cells = []
-    for top in range(0, height, step):
-        for left in range(0, width, step):
-            if alpha[top:top + step, left:left + step].max(initial=0) < 24:
-                continue
-            x, y = left / ratio, top / ratio
-            cells.append((QRectF(x, y, step / ratio, step / ratio), (x + 0.5 * step / ratio) / max(1.0, span),
-                          rng.random(), rng.random(), rng.random()))
+    for row, col in zip(*np.nonzero(blocks > 0.08)):
+        x, y = col * side, row * side
+        cells.append((x, y, side, float(blocks[row, col]), (x + 0.5 * side) / max(1.0, span),
+                      rng.random(), rng.random()))
     return cells
 
 
-def paint_particles(painter: QPainter, sprite: AsideSprite, origin: QPointF, phase: float) -> None:
-    """Draw the aside as particles; untouched cells stay in place."""
-    base = painter.opacity()
+def paint_particles(painter: QPainter, sprite: AsideSprite, origin: QPointF, phase: float,
+                    shift: float = 0.0) -> None:
+    """The crisp part right of the front, and the grains left of it, drifting
+    ``shift`` to the right."""
     left, top = origin.x() - sprite.origin_shift, origin.y() - sprite.origin_shift
+    front = left + max(0.0, phase / SWEEP) * sprite.span
     painter.save()
-    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-    for source, fx, r1, r2, r3 in sprite.cells:
-        dx, dy, size, alpha = particle_pose(fx, r1, r2, r3, phase, sprite.scale)
-        if alpha <= 0.01:
-            continue
-        w, h = source.width() * size, source.height() * size
-        cx = left + source.center().x() + dx
-        cy = top + source.center().y() + dy
-        painter.setOpacity(base * alpha)
-        painter.drawImage(QRectF(cx - w / 2.0, cy - h / 2.0, w, h), sprite.image,
-                          QRectF(source.x() * sprite.image.devicePixelRatio(),
-                                 source.y() * sprite.image.devicePixelRatio(),
-                                 source.width() * sprite.image.devicePixelRatio(),
-                                 source.height() * sprite.image.devicePixelRatio()))
+    # Columns the front has not reached are still the crisp aside.
+    if front < left + sprite.span:
+        painter.save()
+        painter.setClipRect(QRectF(front, top - 4.0, left + sprite.span - front + 4.0,
+                                   sprite.image.height() / sprite.image.devicePixelRatio() + 8.0),
+                            Qt.ClipOperation.IntersectClip)
+        painter.drawImage(QPointF(left, top), sprite.image)
+        painter.restore()
+    cells = sprite.arrays
+    started = cells["fx"] * SWEEP < phase
+    if started.any():
+        fx = cells["fx"][started]
+        local = np.clip((phase - fx * SWEEP) / FLIGHT, 0.0, 1.0)
+        lift = np.sin(np.pi * local)
+        fade = np.clip((local - 0.35) / 0.65, 0.0, 1.0)
+        alpha = (1.0 - fade * fade * (3.0 - 2.0 * fade)) * cells["coverage"][started]
+        side = cells["side"][started]
+        size = side * (1.0 - 0.25 * lift)
+        ease = np.clip(local / ARRIVE, 0.0, 1.0)
+        drift = shift * ease * ease * (3.0 - 2.0 * ease)
+        x = (left + cells["x"][started] + (side - size) * 0.5 + drift
+             + ((cells["r1"][started] - 0.5) * 6.0 + 2.0) * sprite.scale * lift)
+        y = top + cells["y"][started] + (side - size) * 0.5 - (2.0 + 6.0 * cells["r2"][started]) * sprite.scale * lift
+        level = np.minimum(ALPHA_STEPS - 1, (alpha * ALPHA_STEPS).astype(int))
+        keep = alpha > 0.03
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(sprite.color)
+        base = painter.opacity()
+        for index in range(ALPHA_STEPS):
+            chosen = keep & (level == index)
+            if not chosen.any():
+                continue
+            painter.setOpacity(base * (index + 0.5) / ALPHA_STEPS)
+            painter.drawRects([QRectF(*r) for r in zip(x[chosen].tolist(), y[chosen].tolist(),
+                                                         size[chosen].tolist(), size[chosen].tolist())])
     painter.restore()
+
+
+def paint_blur_columns(painter: QPainter, sprite: AsideSprite, origin: QPointF, phase: float,
+                       ratio: float, margin: float, draw_blur, shift: float = 0.0) -> None:
+    """The blurred aside, ``shift`` right of the crisp one, condensing column
+    by column behind the grains.
+
+    ``draw_blur(layer)`` paints the blurred aside at ``origin`` in the
+    layer's (logical) coordinates; the layer moves it ``shift`` right.
+    """
+    if blur_settle(phase, 0.0) <= 0.001:
+        return
+    left = origin.x() + shift - sprite.origin_shift - margin
+    top = origin.y() - sprite.origin_shift - margin
+    width = sprite.span + 2 * margin
+    height = sprite.image.height() / sprite.image.devicePixelRatio() + 2 * margin
+    layer = QImage(max(1, math.ceil(width * ratio)), max(1, math.ceil(height * ratio)),
+                   QImage.Format.Format_ARGB32_Premultiplied)
+    layer.setDevicePixelRatio(ratio)
+    layer.fill(Qt.GlobalColor.transparent)
+    lp = QPainter(layer)
+    lp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    lp.translate(-left + shift, -top)
+    draw_blur(lp)
+    lp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+    mask = QLinearGradient(origin.x() - sprite.origin_shift, 0.0, origin.x() - sprite.origin_shift + sprite.span, 0.0)
+    for step in range(13):
+        fx = step / 12.0
+        mask.setColorAt(fx, QColor(0, 0, 0, round(255 * blur_settle(phase, fx))))
+    lp.fillRect(QRectF(left - shift, top, width, height), mask)
+    lp.end()
+    painter.drawImage(QPointF(left, top), layer)

@@ -1,0 +1,25 @@
+{
+  "about": "Start of the first full chorus (after the opening verse), in seconds, for the sea-level colour change. Marked from the timed lyric's first chorus line; 'confirmed' turns true once the listener has checked it by ear.",
+  "confirmed": false,
+  "songs": [
+    {"id": "2617944302", "title": "Die With A Smile", "chorus": 45.0, "line": "If the world was ending"},
+    {"id": "1352929822", "title": "Marvin Gaye", "chorus": 54.3, "line": "Let's Marvin Gaye and get it on (after verse 1; the song opens with it)"},
+    {"id": "496869422", "title": "打上花火", "chorus": 59.3, "line": "パッと光って咲いた"},
+    {"id": "536622304", "title": "Lemon", "chorus": 58.7, "line": "あの日の悲しみさえ"},
+    {"id": "208927", "title": "思念", "chorus": 68.5, "line": "让风筝自由干脆剪断了线"},
+    {"id": "1824927085", "title": "Leave The Door Open", "chorus": 50.1, "line": "I'ma leave the door open"},
+    {"id": "1984537508", "title": "this is what sadness feels like", "chorus": 55.3, "line": "So I'm just gon' put on a sad song"},
+    {"id": "2125652576", "title": "lavender", "chorus": 71.3, "line": "You got me singing like lavender (after verse 1; the song opens with it)"},
+    {"id": "1818006931", "title": "Love Me Harder", "chorus": 41.4, "line": "'Cause if you want to keep me"},
+    {"id": "1874585362", "title": "Until I Found You", "chorus": 37.5, "line": "I would never fall in love again until I found her"},
+    {"id": "1808053189", "title": "迟迟", "chorus": 78.3, "line": "耳朵先撒了谎"},
+    {"id": "3382908505", "title": "玻璃", "chorus": 79.5, "line": "我终于鼓起勇气 (after verse 1; the song opens with it)"},
+    {"id": "2613371441", "title": "Remedy", "chorus": 66.0, "line": "Every little thing that you are (second time)"},
+    {"id": "2689018742", "title": "twilight zone", "chorus": 64.3, "line": "(And) It's not like I'm still not over you"},
+    {"id": "1490999477", "title": "safety net", "chorus": 50.8, "line": "Tripping, falling with no safety net"},
+    {"id": "470759508", "title": "Breadcrumbs", "chorus": 64.1, "line": "Mum and Dad"},
+    {"id": "1378850193", "title": "Exhale", "chorus": 31.6, "line": "Can I exhale for a minute?"},
+    {"id": "2106374687", "title": "秘密 II", "chorus": 75.5, "line": "我和他的故事"},
+    {"id": "2670891058", "title": "Open Hearts", "chorus": 61.1, "line": "Where do I start"}
+  ]
+}

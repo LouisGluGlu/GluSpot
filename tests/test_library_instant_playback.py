@@ -96,7 +96,8 @@ class InstantPlaybackTests(unittest.TestCase):
             "song:netease:picked", "song", chosen.title, "", song=chosen)
         self.window.set_collections((song,))
         self.controller.play_collection(song, "default", QRect())
-        self.assertEqual(self.player.calls[-1], ("queue", (chosen,)))
+        # A search song joins the current queue (played now) instead of replacing it.
+        self.assertEqual(self.player.calls[-1], ("insert", ("picked",), 0))
         self.assertEqual(self.player.track.track_id, "owned:netease:picked")
 
     def test_replaced_queue_invalidates_same_collection_identity(self):

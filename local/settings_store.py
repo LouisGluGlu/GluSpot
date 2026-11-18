@@ -360,6 +360,9 @@ DEFAULT_SETTINGS = {
     "netease.transport": "off",
     "netease.cef.enabled": False,
     "netease.adapter": "auto",
+    # When precise progress is on, a NetEase opened without its debug port is
+    # reopened once with it, so precise lyrics start by themselves.
+    "netease.auto_precise": True,
     "v2_enable_dual_line_lyrics": False,
     "v2_dual_line_font_size": 12,
     "v2_dual_line_secondary_weight": 72,
@@ -546,6 +549,8 @@ class SettingsManager(QObject):
                 self._settings["netease.transport"] = canonical
             if not isinstance(self._settings.get("netease.cef.enabled"), bool):
                 self._settings["netease.cef.enabled"] = False
+            if not isinstance(self._settings.get("netease.auto_precise", True), bool):
+                self._settings["netease.auto_precise"] = True
                 migrated = True
             adapter = self._settings.get("netease.adapter", "auto")
             if not isinstance(adapter, str) or not adapter.strip() or len(adapter.strip()) > 64:

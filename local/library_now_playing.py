@@ -18,9 +18,18 @@ from local.music_lyric_preparation_store import LyricPresentationStore
 
 
 class LibraryNowPlayingIsland(IslandStackVisual):
+    """The library's now-playing bar in one of three poses, chosen by the
+    window's shape: "tall" (the expanded island: title row over the lyric
+    band), "row" (one line: cover, title and artist, the lyric, controls)
+    and "pill" (the floating island's free compact pose)."""
+
     openRequested = Signal()
     commandRequested = Signal(str)
     HEIGHT = 132
+    ROW_HEIGHT = 64
+    PILL_HEIGHT = 52
+    PILL_WIDTH = 440
+    BAR_MODES = ("tall", "row", "pill")
     _PRESENTATION_SETTINGS = (
         "lyric_font_size", "lyric_offset_seconds", "lyric_word_spacing",
         "wave_font_weight", "enable_dual_line_lyrics", "dual_line_font_size",
@@ -45,6 +54,7 @@ class LibraryNowPlayingIsland(IslandStackVisual):
         self.expanded = True
         self.location_mode = "free"
         self.music_expanded_layout_style = "standard"
+        self.bar_mode = "tall"
         self._source_island = None
         self._has_track = False
         self._pressed_command = None
@@ -111,6 +121,109 @@ class LibraryNowPlayingIsland(IslandStackVisual):
         self.set_music_ambience_style(style, notify=False)
         self.update()
 
+    def set_bar_mode(self, mode: str) -> None:
+        mode = mode if mode in self.BAR_MODES else "tall"
+        if mode != self.bar_mode:
+            self.bar_mode = mode
+            self.music_button_rects = {}
+            self.update()
+
+    def bar_height(self, mode: str | None = None) -> int:
+        mode = mode or self.bar_mode
+        return {"row": self.ROW_HEIGHT, "pill": self.PILL_HEIGHT}.get(mode, self.HEIGHT)
+
+    def _paint_music_expanded(self, painter, rect):
+        if self.bar_mode != "row":
+            return super()._paint_music_expanded(painter, rect)
+        try:
+            dj = self._personal_dj_island_presenting() or self._personal_dj_island_outro_progress() < 1.0
+        except Exception:
+            dj = False
+        if dj:
+            return super()._paint_music_expanded(painter, rect)
+        self._paint_music_row(painter, rect)
+
+    # A one-line bar has no lyric band: the light wave would run through the
+    # title and the bottom glow blurs its corners.
+    ROW_SKIPPED_STEPS = frozenset({"light_wave", "bottom_ambience"})
+    ROW_RADIUS = 18.0
+    ROW_MARGIN = 10.0
+
+    def _execute_music_surface_paint_step(self, step, *args, **kwargs):
+        if self.bar_mode == "row" and step in self.ROW_SKIPPED_STEPS:
+            return None
+        return super()._execute_music_surface_paint_step(step, *args, **kwargs)
+
+    def _music_shell_radius(self, rect, expanded):
+        if self.bar_mode == "row" and expanded:
+            return min(self._u(self.ROW_RADIUS), rect.height() / 2.0)
+        return super()._music_shell_radius(rect, expanded)
+
+    def _paint_music_row(self, painter, rect):
+        """One line: the cover inset equally from top, bottom and left; title
+        over artist; the current lyric line centred between them and the
+        transport; previous, play and next in fixed places (a key that does
+        not apply right now, such as previous on personal FM, is dimmed)."""
+        from PySide6.QtGui import QFont, QFontMetricsF
+        u = self._u
+        margin = u(self.ROW_MARGIN)
+        side = max(1., rect.height() - 2 * margin)
+        cover = QRectF(rect.left() + margin, rect.top() + margin, side, side)
+        self.music_cover_rect = QRectF(cover)
+        self._paint_interactive_music_cover(painter, cover, u(10))
+        order = ["music:previous", "music:toggle_play_pause", "music:next"]
+        supported = set(self._supported_music_transport_commands(list(order)))
+        size, step = u(34), u(42)
+        controls_x = rect.right() - margin - (size + 2 * step)
+        self.music_button_rects = {}
+        for index, command in enumerate(order):
+            button = QRectF(controls_x + index * step, rect.center().y() - size / 2, size, size)
+            if command in supported:
+                self.music_button_rects[command] = QRectF(button)
+                self._paint_music_control_button(painter, button, command,
+                                                 32 if command == "music:toggle_play_pause" else 22, radius=u(12))
+            else:
+                # Drawn dim in its place, but not a target: the painter
+                # registers every key it draws, so take it back out.
+                painter.save()
+                painter.setOpacity(painter.opacity() * .32)
+                self._paint_music_control_button(painter, button, command, 22, radius=u(12))
+                painter.restore()
+                self.music_button_rects.pop(command, None)
+        left = cover.right() + u(12)
+        room = max(1., controls_x - u(16) - left)
+        info_w = max(min(u(96), room), min(u(200), room * .30))
+        self._paint_island_metadata_line(painter, QRectF(left, rect.center().y() - u(19), info_w, u(22)),
+                                         self.track_title, 13, self._music_meta_text_color(240), True, "title")
+        self._paint_island_metadata_line(painter, QRectF(left, rect.center().y() + u(3), info_w, u(18)),
+                                         self.artist, 9, self._music_meta_text_color(135), False, "artist")
+        lane = QRectF(left + info_w + u(14), rect.top(), controls_x - u(14) - (left + info_w + u(14)), rect.height())
+        if lane.width() < u(60):
+            return
+        try:
+            lines = self._current_lyric_display_lines()
+        except Exception:
+            lines = []
+        text = str(lines[0] if lines else "").strip()
+        if not text:
+            return
+        # One line, centred both ways: shrink to fit down to 12 px, then elide.
+        font = QFont(painter.font())
+        font.setWeight(QFont.Weight.DemiBold)
+        size_px = 17.0
+        while True:
+            font.setPixelSize(round(u(size_px)))
+            width = QFontMetricsF(font).horizontalAdvance(text)
+            if width <= lane.width() or size_px <= 12.0:
+                break
+            size_px -= 1.0
+        painter.save()
+        painter.setFont(font)
+        painter.setPen(self._music_lyric_text_color(240))
+        shown = QFontMetricsF(font).elidedText(text, Qt.TextElideMode.ElideRight, lane.width())
+        painter.drawText(lane, Qt.AlignmentFlag.AlignCenter, shown)
+        painter.restore()
+
     def set_track(self, track):
         self._has_track = track is not None
         data = IslandVisualData(track, (), ()) if track is not None else empty_visual_data("未在播放", "")
@@ -173,7 +286,10 @@ class LibraryNowPlayingIsland(IslandStackVisual):
             with QPainter(self) as painter:
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                 painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-                self._paint_music(painter, QRectF(self.rect()).adjusted(1, 1, -1, -1), expanded=True)
+                pill = self.bar_mode == "pill"
+                if pill:
+                    self.music_button_rects = {}
+                self._paint_music(painter, QRectF(self.rect()).adjusted(1, 1, -1, -1), expanded=not pill)
         finally:
             self._island_lyric_frame_at = None
             self._island_lyric_frame_phase = None

@@ -401,7 +401,17 @@ class LocalIslandApp:
         self.app.aboutToQuit.connect(self.personal_dj_voices.tasks.close)
         self.settings.setting_changed.connect(self._playback_mode_changed)
         from local.motion_cover_playback import MotionCoverSession, install_motion_cover
-        self.motion_cover = MotionCoverSession(enabled=bool(self.settings.get("v2_motion_cover_enabled", True)))
+        def _netease_dynamic_cover(song_id, service=self.online_music):
+            from api.online_music import OnlineMusicError
+            try:
+                return service.dynamic_cover("netease", song_id)
+            except OnlineMusicError as error:
+                if error.code in {"auth_required", "unsupported", "unavailable"}:
+                    return ""          # no account: a clear miss, Apple still answers
+                raise
+
+        self.motion_cover = MotionCoverSession(enabled=bool(self.settings.get("v2_motion_cover_enabled", True)),
+                                               netease_lookup=_netease_dynamic_cover)
         install_motion_cover(self.motion_cover)
         self.app.aboutToQuit.connect(self.motion_cover.shutdown)
         self.window._observe_motion_cover()

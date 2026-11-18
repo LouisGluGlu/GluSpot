@@ -903,3 +903,15 @@ def _capture_interruption_log():
             logger.removeHandler(handler)
 
     return _Context()
+
+
+class CompanionSelfSessionTests(__import__("unittest").TestCase):
+    def test_apple_companion_page_is_the_library_itself_only_while_it_plays_for_it(self):
+        owner = PlaybackSourceProvider
+        playing_apple = SimpleNamespace(owned=SimpleNamespace(_apple_companion_current=lambda: True))
+        playing_stream = SimpleNamespace(owned=SimpleNamespace(_apple_companion_current=lambda: False))
+        self.assertTrue(owner._interruption_is_self(playing_apple, "msedgewebview2.exe"))
+        self.assertTrue(owner._interruption_is_self(playing_apple, r"C:\Program Files\x\msedgewebview2.exe"))
+        self.assertFalse(owner._interruption_is_self(playing_stream, "msedgewebview2.exe"))
+        self.assertFalse(owner._interruption_is_self(playing_apple, "cloudmusic.exe"))
+        self.assertTrue(owner._interruption_is_self(playing_stream, "GluSpot"))

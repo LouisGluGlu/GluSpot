@@ -452,6 +452,19 @@ class PlaybackSourceProvider:
                 # own SMTC identity count as an earlier external start.
                 self._interruption_preserved_session = getattr(pin, "session", None)
 
+    def _interruption_is_self(self, app_id) -> bool:
+        """GluSpot's own sessions: its SMTC identity, and the Apple Music
+        companion page (a WebView2 session) while it is the library's player."""
+        from api.capture.interruption import is_self_app
+        if is_self_app(app_id):
+            return True
+        name = str(app_id or "").replace("\\", "/").rsplit("/", 1)[-1].casefold()
+        current = getattr(self.owned, "_apple_companion_current", None)
+        try:
+            return name == "msedgewebview2.exe" and callable(current) and bool(current())
+        except Exception:
+            return False
+
     def _owned_interruption_started(self, event):
         if not self._interruption_enabled or event["serial"] != self.owned._interruption_serial:
             return
@@ -472,7 +485,7 @@ class PlaybackSourceProvider:
             item for item in snapshots
             if item.playing and item.observed_at <= event["at"]
             and self._interruption_policy.allows(item.kind)
-            and not is_self_app(getattr(item, "app_id", ""))
+            and not self._interruption_is_self(getattr(item, "app_id", ""))
             and not (preserved is not None and (
                 item.session is preserved or same_session(item.session, preserved)))
         )
@@ -543,6 +556,8 @@ class PlaybackSourceProvider:
             if key != getattr(self, "_interruption_cdp_key", None):
                 self._interruption_cdp_key = key
                 self._interruption_task(self._observe_cdp_pause(cdp, self._interruption_generation, key))
+        if observation is not None and self._interruption_is_self(observation.app_id):
+            return          # the library's own companion page starting is not an external start
         if observation is None or not edge or not self._interruption_owned_playing or self._interruption_suspended:
             if edge and observation is not None:
                 skip = "suspended" if self._interruption_suspended else "owned-not-playing"
@@ -1805,6 +1820,57 @@ class WindowsMediaProvider:
         if loop is None or not loop.is_running():
             return False
         return asyncio.run_coroutine_threadsafe(self._close_netease_cdp(), loop)
+
+    NETEASE_START_POLL_S = 3.0      # how often the player's processes are looked at
+    NETEASE_START_SETTLE_S = 4.0    # let a just-opened player finish starting first
+
+    def _netease_auto_precise_allowed(self) -> bool:
+        """Precise progress is on, relaunch was consented to, and the
+        "start precise lyrics automatically" switch is on."""
+        getter = getattr(self, "settings_getter", None)
+        return (callable(getter) and getter("netease.auto_precise", True) is True
+                and self._netease_cef_enabled() and self._netease_explicit_relaunch_allowed())
+
+    async def _watch_netease_starts(self, processes=None, sleep=asyncio.sleep):
+        """NetEase opened without its debug port: reopen it once with it.
+
+        Only the moment the player goes from not running to running counts
+        (a player already open when GluSpot starts, or its helper processes
+        coming and going, never do). A player that already has the port,
+        such as one GluSpot itself just reopened, is only attached to.
+        """
+        if processes is None:
+            from api.capture.netease import _windows_processes as processes
+        running = None
+        while True:
+            await sleep(self.NETEASE_START_POLL_S)
+            if not self._netease_auto_precise_allowed():
+                running = None
+                continue
+            try:
+                now_running = bool(await asyncio.to_thread(processes))
+            except Exception:
+                continue
+            opened = running is False and now_running
+            running = now_running
+            if not opened:
+                continue
+            await sleep(self.NETEASE_START_SETTLE_S)
+            if not self._netease_auto_precise_allowed():
+                continue
+            cdp = getattr(self, "_netease_cdp_session", None)
+            if cdp is not None and not getattr(cdp, "_closed", False):
+                continue
+            async with self._netease_lifecycle_lock():
+                self._netease_retry_at = 0.0
+                attached = await self._ensure_netease_cdp_locked()
+            if attached is not None:
+                continue
+            logger.info("NetEase opened without precise progress; reopening it once with the debug port")
+            try:
+                await self._repair_netease_capture()
+            finally:
+                running = True
 
     def _netease_explicit_relaunch_allowed(self) -> bool:
         """Only a confirmed settings repair may restart a player that is already open."""
@@ -4110,6 +4176,8 @@ class WindowsMediaProvider:
         asyncio.set_event_loop(self._loop)
         if self._netease_cef_enabled():
             self._loop.create_task(self._ensure_netease_cdp())
+        if sys.platform == "win32":
+            self._netease_start_watch = self._loop.create_task(self._watch_netease_starts())
         self._loop.run_forever()
 
     def _run(self, coro):

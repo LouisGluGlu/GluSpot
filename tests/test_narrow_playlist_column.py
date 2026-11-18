@@ -56,6 +56,25 @@ class NarrowPlaylistColumnTests(unittest.TestCase):
         hidden = window._content_column_geometry()[2]
         self.assertGreater(hidden.bottom(), window.height() - 20.0)
 
+    def test_queue_glass_samples_the_whole_scene_not_the_button_capture(self):
+        from unittest.mock import patch
+        window = self.window
+        window.visibility.progress = 1.0
+        scenes = []
+        original = window._panel_glass_scene
+
+        def scene():
+            image = original()
+            scenes.append(image)
+            return image
+
+        image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        with patch.object(window, "_panel_glass_scene", side_effect=scene):
+            window.render(image)
+        self.assertTrue(scenes)
+        chrome = getattr(window, "_chrome_backdrop", None)
+        self.assertTrue(all(chrome is None or s is not chrome for s in scenes))
+
 
 if __name__ == "__main__":
     unittest.main()

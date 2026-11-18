@@ -22,6 +22,8 @@ from api.motion_cover import (
 )
 
 FADE_SECONDS = 0.28
+MAX_SIDE = 1080                  # decoded frames are kept at most this many pixels a side
+RETRY_SECONDS = (12.0, 45.0)     # a lookup that timed out or failed is asked again, twice
 _session = None
 
 
@@ -128,10 +130,12 @@ class MotionCoverSession(QObject):
     """One decoder shared by the island, the window, and the library player."""
 
     def __init__(self, *, enabled: bool = True, resolver: MotionCoverResolver | None = None,
-                 player_factory=None, parent=None):
+                 player_factory=None, parent=None, netease_lookup=None):
         super().__init__(parent)
         cache_dir = default_motion_cache_dir()
-        self._resolver = resolver or MotionCoverResolver(MotionCoverCache(cache_dir))
+        self._resolver = resolver or MotionCoverResolver(MotionCoverCache(cache_dir), netease_lookup=netease_lookup)
+        self._pending_file = ""
+        self._retries = 0
         self._player_factory = player_factory
         self._enabled = bool(enabled)
         self._generation = 0
@@ -212,14 +216,27 @@ class MotionCoverSession(QObject):
         self._fade_at = 0.0
         self._source = ""
         self._loaded_source = ""
+        self._pending_file = ""
         self._failed = False
+        self._retries = 0
         self._stop_decoder(immediate=True)
+        self._lookup(track)
+
+    def _lookup(self, track: MotionTrack) -> None:
         generation = self._generation
         cancel = self._cancel
         threading.Thread(
             target=self._resolve, args=(track, generation, cancel),
             name="GluSpotMotionCover", daemon=True,
         ).start()
+
+    def _retry(self, generation: int) -> None:
+        """Ask again for the same song after a lookup that timed out or failed."""
+        track = self._track
+        if (generation != self._generation or not self._enabled or self._source or track is None
+                or track.cache_key() != self._key):
+            return
+        self._lookup(track)
 
     def note_playback(self, playing: bool) -> None:
         """Pause the decoder with the song and continue from the same frame."""
@@ -238,7 +255,7 @@ class MotionCoverSession(QObject):
                 ratio = float(widget.devicePixelRatioF())
             except (RuntimeError, TypeError, ValueError):
                 ratio = 1.0
-            pixels = max(1, min(720, int(round(float(logical_side) * max(1.0, ratio)))))
+            pixels = max(1, min(MAX_SIDE, int(round(float(logical_side) * max(1.0, ratio)))))
             self._hidden_since = 0.0
         current = self._rects.get(identifier)
         if self._sides.get(identifier) == pixels and isinstance(rect, QRectF) and current == rect:
@@ -290,14 +307,20 @@ class MotionCoverSession(QObject):
         if generation != self._generation or not self._enabled or not isinstance(result, MotionResult):
             return
         if result.kind != "hit":
+            if not result.final and self._retries < len(RETRY_SECONDS):
+                delay = RETRY_SECONDS[self._retries]
+                self._retries += 1
+                QTimer.singleShot(int(delay * 1000), lambda generation=generation: self._retry(generation))
             return
         source = result.local_path if result.local_path and os.path.isfile(result.local_path) else result.url
         if not source:
             return
         if self._source == source:
             return
-        # A file that finishes after streaming has started must not restart the loop.
+        # A file that finishes after streaming has started must not restart the
+        # loop now: it takes over at the end of the current pass.
         if self._loaded_source and result.local_path:
+            self._pending_file = result.local_path
             return
         self._source = source
         self._failed = False
@@ -320,9 +343,36 @@ class MotionCoverSession(QObject):
         player.setLoops(QMediaPlayer.Loops.Infinite)
         sink.videoFrameChanged.connect(self._on_video_frame)
         player.errorOccurred.connect(self._on_player_error)
+        player.mediaStatusChanged.connect(self._on_media_status)
         self._player = player
         self._sink = sink
         return True
+
+    def _on_media_status(self, status) -> None:
+        """Loop by hand when the backend stops at the end (it does with some
+        streamed MP4s despite infinite loops), and move a stream over to its
+        downloaded file at the loop point."""
+        name = getattr(status, "name", str(status))
+        if name != "EndOfMedia" or not self._playing:
+            return
+        self.restart_loop()
+
+    def restart_loop(self) -> None:
+        player = self._player
+        if player is None:
+            return
+        pending = self._pending_file
+        if pending and os.path.isfile(pending) and pending != self._loaded_source:
+            self._pending_file = ""
+            self._source = pending
+            self._loaded_source = pending
+            player.setSource(QUrl.fromLocalFile(pending))
+        else:
+            set_position = getattr(player, "setPosition", None)
+            if callable(set_position):
+                set_position(0)
+        if self._playing:
+            player.play()
 
     def _on_video_frame(self, frame) -> None:
         if not self._playing or frame is None or not frame.isValid():
@@ -341,7 +391,7 @@ class MotionCoverSession(QObject):
             return
         side = self._target_side()
         if side > 0 and max(image.width(), image.height()) > side:
-            image = image.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+            image = image.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self._image = image
         self._notify()
 

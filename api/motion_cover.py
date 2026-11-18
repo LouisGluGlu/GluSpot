@@ -29,10 +29,12 @@ from urllib.request import Request, urlopen
 from api.artwork_sources import artwork_artist_key, artwork_duration_matches, artwork_text_key
 
 MOTION_COVER_TTL_SECONDS = 12 * 60 * 60
-MOTION_COVER_PROVIDER_TIMEOUT = 3.0
-MOTION_COVER_CACHE_BYTES = 64 * 1024 * 1024
-MOTION_COVER_FILE_BYTES = 16 * 1024 * 1024
-MOTION_SOURCE_MAX_SIDE = 720
+# Apple needs its web token, a search, the album and two playlists: a few
+# seconds on a good day, more on a slow one. A first hit still ends the race.
+MOTION_COVER_PROVIDER_TIMEOUT = 10.0
+MOTION_COVER_CACHE_BYTES = 192 * 1024 * 1024
+MOTION_COVER_FILE_BYTES = 40 * 1024 * 1024
+MOTION_SOURCE_MAX_SIDE = 1080           # sharp in the fullscreen cover on a HiDPI screen
 _EAPI_KEY = b"e82ckenh8dichen8"
 _EAPI_PATH = "/api/songplay/dynamic-cover"
 _EAPI_URL = "https://interface.music.163.com/eapi/songplay/dynamic-cover"
@@ -292,9 +294,11 @@ class MotionTrack:
         return netease_song_id(self.track_id, self.source_app)
 
     def cache_key(self) -> str:
+        # No album: it can arrive after the title, and the painter and the
+        # lookup must agree on one key for the same song.
         song = self.song_id()
         material = f"netease:{song}" if song else "\n".join((
-            artwork_text_key(self.title), artwork_text_key(self.artist), artwork_text_key(self.album),
+            artwork_text_key(self.title), artwork_text_key(self.artist),
         ))
         return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
@@ -444,14 +448,19 @@ def parse_hls_variants(text: str, base_url: str) -> tuple[HlsVariant, ...]:
     return tuple(variants)
 
 
-def choose_hls_variant(variants: tuple[HlsVariant, ...], target_width: int = 480) -> HlsVariant | None:
+def choose_hls_variant(variants: tuple[HlsVariant, ...], target_width: int = MOTION_SOURCE_MAX_SIDE) -> HlsVariant | None:
+    """The leanest H.264 rendition at least ``target_width`` wide (capped at
+    ``MOTION_SOURCE_MAX_SIDE``), else the widest one below it."""
     if not variants:
         return None
-    target = max(64, min(MOTION_SOURCE_MAX_SIDE, int(target_width or 480)))
+    target = max(64, min(MOTION_SOURCE_MAX_SIDE, int(target_width or MOTION_SOURCE_MAX_SIDE)))
     compatible = [item for item in variants if "avc1" in item.codecs.casefold()] or list(variants)
     bounded = [item for item in compatible if 0 < item.width <= MOTION_SOURCE_MAX_SIDE]
     pool = bounded or compatible
-    return min(pool, key=lambda item: (abs((item.width or target) - target), item.bandwidth, item.width))
+    wide = [item for item in pool if item.width >= target]
+    if wide:
+        return min(wide, key=lambda item: (item.width, item.bandwidth))
+    return max(pool, key=lambda item: (item.width, -item.bandwidth))
 
 
 def direct_media_url(text: str, base_url: str) -> str:
@@ -543,6 +552,7 @@ class MotionResult:
     url: str = ""
     local_path: str = ""
     cached: bool = False
+    final: bool = True           # False: a provider timed out or failed, so "none" is not an answer
 
 
 @dataclass(frozen=True)
@@ -556,6 +566,7 @@ def race_providers(providers: tuple[_Provider, ...], track: MotionTrack, *, time
     """Run providers together. The first valid video wins and cancels the rest."""
     token = cancel or CancelToken()
     winner: dict[str, str] = {}
+    unsure: list[str] = []        # providers that ran out of time or failed
     lock = threading.Lock()
     done = threading.Event()
     pending = {"count": len(providers)}
@@ -603,6 +614,9 @@ def race_providers(providers: tuple[_Provider, ...], track: MotionTrack, *, time
                 token.cancel()
                 done.set()
         log_motion(provider.name, status, latency, error)
+        if status in {"timeout", "error"} or (status == "cancelled" and not claimed and "url" not in winner):
+            with lock:
+                unsure.append(provider.name)
         finish()
 
     threads = [threading.Thread(target=run, args=(provider,), name=f"GluSpotMotion{provider.name}", daemon=True)
@@ -619,9 +633,10 @@ def race_providers(providers: tuple[_Provider, ...], track: MotionTrack, *, time
     with lock:
         url = winner.get("url", "")
         provider = winner.get("provider", "")
+        settled = not unsure and pending["count"] <= 0
     if is_video_url(url):
         return MotionResult("hit", provider or "motion", url)
-    return MotionResult("none", provider or "motion")
+    return MotionResult("none", provider or "motion", final=settled)
 
 
 def default_motion_cache_dir() -> Path:
@@ -860,7 +875,11 @@ def _json_request(fetch, method: str, url: str, cancel: CancelToken, deadline: f
     return payload
 
 
-def query_netease(track: MotionTrack, cancel: CancelToken, deadline: float, fetch, clock=time.monotonic) -> str:
+def query_netease(track: MotionTrack, cancel: CancelToken, deadline: float, fetch, clock=time.monotonic,
+                  lookup=None) -> str:
+    """NetEase's dynamic cover. ``lookup(song_id)`` asks through the signed-in
+    account (the endpoint answers 301 without one); without it the request
+    goes out anonymously."""
     song_id = track.song_id()
     headers = {
         "User-Agent": _USER_AGENT,
@@ -883,6 +902,10 @@ def query_netease(track: MotionTrack, cancel: CancelToken, deadline: float, fetc
         song_id = select_netease_song_id(parsed, track)
     if not song_id:
         return ""
+    if lookup is not None:
+        if cancel.is_set() or clock() >= deadline:
+            raise TimeoutError("motion cover budget expired")
+        return str(lookup(song_id) or "")
     form = eapi_form(song_id)
     payload = _json_request(
         fetch, "POST", _EAPI_URL, cancel, deadline, clock=clock,
@@ -983,11 +1006,13 @@ def query_apple(track: MotionTrack, cancel: CancelToken, deadline: float, fetch,
 
 
 class MotionCoverResolver:
-    def __init__(self, cache: MotionCoverCache, fetch=None, *, tokens: AppleTokenStore | None = None, clock=time.monotonic):
+    def __init__(self, cache: MotionCoverCache, fetch=None, *, tokens: AppleTokenStore | None = None, clock=time.monotonic,
+                 netease_lookup=None):
         self.cache = cache
         self.fetch = fetch or urllib_fetch
         self.tokens = tokens or AppleTokenStore()
         self._clock = clock
+        self.netease_lookup = netease_lookup
 
     def resolve(self, track: MotionTrack, cancel: CancelToken | None = None) -> MotionResult:
         started = self._clock()
@@ -1000,8 +1025,12 @@ class MotionCoverResolver:
                        int(max(0.0, self._clock() - started) * 1000), cached=True)
             return cached
         result = race_providers((
-            _Provider("netease", lambda item, token, deadline: query_netease(item, token, deadline, self.fetch, self._clock)),
+            _Provider("netease", lambda item, token, deadline: query_netease(item, token, deadline, self.fetch, self._clock,
+                                                                             self.netease_lookup)),
             _Provider("apple", lambda item, token, deadline: query_apple(item, token, deadline, self.fetch, self.tokens, self._clock)),
         ), track, cancel=cancel, clock=self._clock)
-        self.cache.put(track.cache_key(), result)
+        # A timeout or a failure is not "this song has no motion cover": only
+        # a hit or every provider's clear miss is remembered.
+        if result.kind == "hit" or result.final:
+            self.cache.put(track.cache_key(), result)
         return result

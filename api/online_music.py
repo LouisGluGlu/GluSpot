@@ -1416,6 +1416,13 @@ class OnlineMusicService:
         url = self._http_url(urls)
         return StreamInfo(source_id, str(song_id), url, bool(url), bool(value.get("trial") or value.get("freeTrialInfo")), "standard", "" if url else "平台未授权可播放地址")
 
+    def dynamic_cover(self, source_id: str, song_id: str) -> str:
+        """The song's dynamic cover video URL from the signed-in account, or ""."""
+        if source_id != "netease":
+            raise OnlineMusicError("unsupported", source_id, "此来源没有动态封面")
+        from api.motion_cover import dynamic_cover_url
+        return dynamic_cover_url(self._catalog(source_id, "dynamic_cover", {"song_id": str(song_id)}))
+
     def lyrics(self, source_id: str, song_id: str) -> LyricPayload:
         if source_id not in {"netease", "qq"}:
             raise OnlineMusicError("unsupported", source_id, "此来源暂不支持逐字歌词获取")

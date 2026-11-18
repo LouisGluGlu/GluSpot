@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Qt
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QSizePolicy, QVBoxLayout, QWidget
 
 from api.capture.netease import NetEaseLocator
+from local.ios_widgets import IosSwitch
 from local.liquid_glass import GlassPushButton
 
 
@@ -91,6 +92,13 @@ class NetEaseCaptureSettings(QWidget):
         for button in (self.enable_button, self.repair_button, self.disable_button):
             buttons.addWidget(button)
         layout.addLayout(buttons)
+        auto = self.get_setting('netease.auto_precise', True) is True
+        self.auto_switch = IosSwitch('网易云启动时自动开启精确歌词', auto)
+        self.auto_switch.setChecked(auto)
+        self.auto_switch.setToolTip('发现网易云刚打开且没有开精确进度时，自动带调试端口重新打开它一次；'
+                                    '每次打开只做一次。关闭后需要手动点“修复 / 重启网易云”。')
+        self.auto_switch.toggled.connect(self._set_auto)
+        layout.addWidget(self.auto_switch)
         hint = QLabel('启用会同时打开系统抓取，把网易云的精确进度、歌词和封面送进 GluSpot；程序内播放时仍以程序内为准。关闭后正常退出网易云即可关闭调试端口。')
         hint.setObjectName('Muted')
         hint.setWordWrap(True)
@@ -131,10 +139,10 @@ class NetEaseCaptureSettings(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
 
-    def enable(self):
+    def enable(self, confirmed=False):
         if self._future is not None or self.installation is None:
             return
-        if not self.confirm():
+        if not confirmed and not self.confirm():
             return
         # The provider is selected through the existing system-capture source.
         # Enabling precise NetEase progress must opt that source in as part of
@@ -149,6 +157,22 @@ class NetEaseCaptureSettings(QWidget):
         self.set_setting('netease.transport', 'relaunch')
         self.set_setting('netease.cef.enabled', True)
         self._invoke('repair_netease_capture', 'restart')
+
+    def _set_auto(self, checked):
+        checked = bool(checked)
+        if checked and not self._enabled():
+            # Turning on automatic precise lyrics turns precise progress on,
+            # with the same consent as the enable button.
+            if self.installation is None or not self.confirm():
+                self.auto_switch.blockSignals(True)
+                self.auto_switch.setChecked(False)
+                self.auto_switch.blockSignals(False)
+                self.set_setting('netease.auto_precise', False)
+                return
+            self.set_setting('netease.auto_precise', True)
+            self.enable(confirmed=True)
+            return
+        self.set_setting('netease.auto_precise', checked)
 
     def repair(self):
         if self._future is None and self._enabled():

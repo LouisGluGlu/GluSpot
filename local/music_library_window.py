@@ -786,6 +786,10 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
         self.find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.find_shortcut.activated.connect(self._focus_empty_search)
+        # Ctrl+Shift+L: the refreshed library or the earlier one, side by side on real data.
+        self.refresh_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
+        self.refresh_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.refresh_shortcut.activated.connect(lambda: self._variant_view.toggle_refresh())
         self.empty_action = GlassPushButton("搜索歌曲", self)
         self.empty_action.setFont(_entry_font(14))
         self.empty_action.setProperty("glassRadius", 12.0)
@@ -872,6 +876,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._accumulate_album_rotation()
         self._now_playing = track
         self.now_playing_island.set_track(track)
+        self._sync_song_field_timer()
         art = getattr(track,'album_art_bytes',b'')
         if art != self._now_playing_art:
             self._now_playing_art = art
@@ -1799,7 +1804,16 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         page = getattr(self, "playlist_page", None)
         if page is None or not page.isVisible():
             return
-        page.setGeometry(self.scroll.geometry())
+        view = self._variant_view
+        if self.library_variant == "sidebar" and view.refresh and not view.pane.isEmpty():
+            # The page takes the whole content plane; its own toolbar row
+            # holds the back key, in line with the section it came from.
+            from local.library_layout_variants import SECTIONS
+            page.set_crumb(SECTIONS.get(view.section, "音乐库"))
+            page.setGeometry(view.pane.adjusted(6, 4, -4, -6).toAlignedRect())
+        else:
+            page.set_crumb("")
+            page.setGeometry(self.scroll.geometry())
         page.raise_()
 
     @property
@@ -2059,6 +2073,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def on_background_setting_changed(self, key="", value=None):
         self.now_playing_island.sync_settings()
+        self._sync_song_field_timer()
         self._sync_library_chrome()
         if key and key not in {"v2_music_flow_intensity", "v2_animation_fps", "v2_theme_mode",
                                "v2_music_ambience_style", "v2_music_glass_level",
@@ -2198,9 +2213,20 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         seconds = self._background_seconds if active else 0.
         from local.ui_theme import active_tokens
         tokens = active_tokens(self)
+        song_field = self._song_field_style() if active else ""
         key = (self.width(), self.height(), None,
                tuple(color.rgba() for color in colors), weights, intensity, seconds, self.backdrop_variant,
-               tokens.dark, round(tokens.shade, 3))
+               tokens.dark, round(tokens.shade, 3), song_field)
+        if song_field:
+            # Colours only: a resize scales the same small field at paint.
+            field_key = ("song-field", song_field, tuple(color.rgba() for color in colors), weights,
+                         tokens.dark, self._song_field_state())
+            if field_key == self._background_key:
+                return False
+            self._background_frame = self._song_field_frame(song_field, colors, weights, tokens.dark)
+            self._background_key = field_key
+            self._background_source_key = None
+            return True
         if key == self._background_key:
             return False
         if (active is None or (not self._navigation_cover_frozen
@@ -2229,6 +2255,102 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
                 painter.fillRect(self._background_frame.rect(), QColor(12, 14, 20, veil))
         self._background_source_key = source_key
         return True
+
+    def _song_field_style(self) -> str:
+        """The playback window's background style when the refreshed library
+        follows it ("sea_level" or "solid_album"), else "" (the album flow)."""
+        view = getattr(self, "_variant_view", None)
+        if view is None or not view.refresh or self.library_variant != "sidebar":
+            return ""
+        # Without the app's settings (no playback theme to follow) the album flow stays.
+        style = str(self._background_setting("v2_music_ambience_style", "") or "").strip().lower()
+        return style if style in {"sea_level", "solid_album"} else ""
+
+    FIELD_STEPS = 24            # the colour change is followed in this many steps
+
+    def _sea_change_mix(self) -> float | None:
+        """0 before the song's sea colour change, 1 after it, the change's own
+        curve in between; None when the song has no analysed change."""
+        track = self._now_playing
+        if track is None:
+            return None
+        try:
+            from local import sea_lyric_background as sea
+            source = sea.current_audio_source()
+            if not source or source[0] != str(getattr(track, "track_id", "") or ""):
+                return None
+            analyzer = sea.shared_analyzer()
+            with analyzer._lock:
+                plan = analyzer._plans.get(source[1])
+            if plan is None or not plan.ready or plan.change_end is None:
+                return None
+            position = float(getattr(track, "position_seconds", 0.0) or 0.0)
+            sampled = getattr(track, "position_sampled_at", None)
+            if getattr(track, "is_playing", False) and isinstance(sampled, (int, float)) and sampled > 0:
+                position += max(0.0, time.monotonic() - float(sampled))
+            progress = sea.change_progress(plan, position)
+            if progress < 0.0:
+                return 1.0 if position >= plan.change_end else 0.0
+            return sea.change_curve(progress)
+        except Exception:
+            return None
+
+    def _song_field_state(self):
+        mix = self._sea_change_mix() if self._song_field_style() == "sea_level" else None
+        return None if mix is None else round(mix * self.FIELD_STEPS)
+
+    def _tick_song_field(self):
+        """While a sea-level song plays, follow its colour change."""
+        if not self.isVisible() or not self._song_field_style() or self._now_playing is None:
+            self._song_field_timer.stop()
+            return
+        if self._update_background():
+            self.update()
+
+    def _sync_song_field_timer(self):
+        timer = getattr(self, "_song_field_timer", None)
+        if timer is None:
+            timer = self._song_field_timer = QTimer(self)
+            timer.setInterval(90)
+            timer.timeout.connect(self._tick_song_field)
+        if self.isVisible() and self._song_field_style() == "sea_level" and self._now_playing is not None:
+            if not timer.isActive():
+                timer.start()
+        else:
+            timer.stop()
+
+    def _song_field_frame(self, style, colors, weights, dark) -> QImage:
+        """The song's field as the playback window paints it, under a reading
+        veil. On sea level it follows the song's colour change: the before
+        colour until the chorus, the after colour from it, mixed in between."""
+        from local import sea_lyric_background as sea
+        cover = getattr(self, "_header_album_image", None)
+        image = cover if isinstance(cover, QImage) and not cover.isNull() else None
+        before, before_ink, after, ink = sea.pick_colors(tuple(colors), tuple(weights or (1.,) * len(colors)), image)
+        state = self._song_field_state() if style == "sea_level" else None
+        if state is not None:
+            mix = state / self.FIELD_STEPS
+            if mix <= 0.0:
+                after, ink = before, before_ink
+            elif mix < 1.0:
+                after = QColor(round(before.red() + (after.red() - before.red()) * mix),
+                               round(before.green() + (after.green() - before.green()) * mix),
+                               round(before.blue() + (after.blue() - before.blue()) * mix))
+                ink = ink if mix >= 0.5 else before_ink
+        # Bounded like the album flow and independent of the window size;
+        # paint scales it, so a resize never re-renders it.
+        small_w, small_h = 256, 160
+        if style == "sea_level":
+            frame = QImage(sea._vignette_image(small_w, small_h, after, ink))
+        else:
+            frame = QImage(small_w, small_h, QImage.Format.Format_ARGB32_Premultiplied)
+            frame.fill(after)
+        frame = frame.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        with QPainter(frame) as painter:
+            # A soft veil keeps type readable on any song's colour; the glass
+            # planes above it do the blurring.
+            painter.fillRect(frame.rect(), QColor(8, 9, 12, 96) if dark else QColor(255, 255, 255, 110))
+        return frame
 
     def _push_page(self, bar, step, coast=False):
         flick = self._page_flick
@@ -2402,6 +2524,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._variant_view.sync_status_pulse()
+        self._sync_song_field_timer()
         self._background_closing = False
         self._prepare_background_palette()
         self._sync_background_animation()

@@ -1144,7 +1144,8 @@ class IslandStackVisual(QWidget):
             or timing_changed
             or getattr(self, "album_art", QImage()).cacheKey() != previous_album_art_key
         )
-        if track_changed or initial or self.media_is_playing != previous_is_playing:
+        if (track_changed or initial or self.media_is_playing != previous_is_playing
+                or self.track_title != previous_title or self.artist != previous_artist):
             self._observe_motion_cover()
         return changed
 

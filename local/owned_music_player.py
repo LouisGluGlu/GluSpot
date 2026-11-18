@@ -359,7 +359,15 @@ class OwnedMusicPlayer(QObject):
         return True
 
     def interruption_playing(self):
-        """Actual decoder playback, including genuine associated narration."""
+        """Actual decoder playback, including genuine associated narration.
+
+        An Apple Music song sounds in its companion page, not the decoder:
+        that page playing counts as in-app playback too, or NetEase and the
+        library could never interrupt each other while Apple plays.
+        """
+        if self._apple_companion_current():
+            return bool(not self._closed and self.track is not None and self.track.is_playing
+                        and self.status in {"playing", "trial"})
         return bool(not self._closed and self.track is not None
             and (self._stream_epoch == self._epoch or self._catalog_stream_is_current())
             and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
@@ -409,10 +417,13 @@ class OwnedMusicPlayer(QObject):
 
     def _publish_interruption_start(self):
         candidate = self._interruption_candidate
+        # The companion page has no decoder stream; its own play state counts.
+        companion = self._apple_companion_current()
         if (not self._interruption_tracking or candidate is None
                 or not self.interruption_playing() or self._catalog_pending_epoch
-                or self._stream_epoch != self._epoch or self._epoch < candidate['epoch']
-                or self._stream_recovery is not None or self._output_preparing):
+                or self._epoch < candidate['epoch']
+                or (not companion and (self._stream_epoch != self._epoch
+                                       or self._stream_recovery is not None or self._output_preparing))):
             return
         self._interruption_candidate = None
         started = dict(serial=candidate['serial'], at=time.monotonic(),
@@ -449,6 +460,14 @@ class OwnedMusicPlayer(QObject):
         self._fm_resume = self._playlist_resume = False
         if self._stream_recovery is not None:
             self._stream_recovery.resume = False
+        if self._apple_companion_current() and self.track.is_playing:
+            # Pause the companion page the way its own pause key does.
+            self.track = replace(self.track, is_playing=False)
+            self._companion_observed = self.track.position_seconds
+            self._companion_sampled_at = time.monotonic()
+            epoch = self._epoch
+            self.tasks.submit(("companion_pause", epoch), lambda: self.service.companion_transport("apple_music", "pause")
+                if not self._closed and epoch == self._epoch else None)
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         if not valid():
@@ -2649,6 +2668,9 @@ class OwnedMusicPlayer(QObject):
             position_seconds=position, position_observed_seconds=position, position_sampled_at=self._companion_sampled_at)
         self._set_status("trial" if preview else "playing")
         self._companion_timer.start()
+        if self.track.is_playing:
+            # The page is sounding: an in-app start for interruption.
+            self._publish_interruption_start()
         self._queue_apple_lyrics(song)
         self._prefetch_next_apple_lyrics()
         self._start_apple_sea(song)
@@ -2736,6 +2758,9 @@ class OwnedMusicPlayer(QObject):
         epoch = self._epoch
         self.tasks.submit(("companion_pause", epoch), lambda: self.service.companion_transport("apple_music", action, params)
             if not self._closed and epoch == self._epoch else None)
+        if action != "pause":
+            # Resuming Apple in the library is an in-app start: other players yield.
+            self._publish_interruption_start()
         self.changed.emit()
         return True
 

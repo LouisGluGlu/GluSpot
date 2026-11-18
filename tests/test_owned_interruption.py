@@ -319,3 +319,58 @@ class OwnedInterruptionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AppleCompanionInterruptionTests(unittest.TestCase):
+    """Apple Music sounds in its companion page, not the decoder: its playing
+    still counts as in-app playback for mutual interruption with NetEase."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.addCleanup(gc.collect)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.tasks = Tasks()
+        self.transport = []
+        service = SimpleNamespace(stream_url=lambda *_a: None,
+                                  companion_transport=lambda *args: self.transport.append(args) or {})
+        self.player = OwnedMusicPlayer(service, LocalLyricsStore(root=Path(self.temp.name)),
+            player=ThreadRecordingPlayer(), audio=object(), dj_player=ThreadRecordingPlayer(), dj_audio=object(),
+            tasks=self.tasks, artwork_tasks=Tasks(), prefetch_tasks=Tasks(), stream_cache=None)
+        self.addCleanup(self.player.close)
+        self.starts = []
+        self.player.playbackStarted.connect(self.starts.append)
+        self.player.set_interruption_tracking_enabled(True)
+        self.song = OnlineSong('apple_music', 'a1', 'Apple song', duration_seconds=180)
+
+    def page_plays(self):
+        self.assertTrue(self.player.play_queue((self.song,)))
+        token = next(t for t, _ in reversed(self.tasks.jobs) if t[0] == 'companion')
+        self.tasks.completed.emit(token, {'playing': True, 'position': 0, 'duration': 180}, None)
+
+    def test_companion_play_is_in_app_playback_and_publishes_one_start(self):
+        self.page_plays()
+        self.assertTrue(self.player._apple_companion_current())
+        self.assertTrue(self.player.interruption_playing())
+        self.assertEqual(len(self.starts), 1)
+
+    def test_netease_start_pauses_the_companion_page(self):
+        self.page_plays()
+        self.assertTrue(self.player.pause_for_interruption())
+        self.assertFalse(self.player.track.is_playing)
+        self.assertFalse(self.player.interruption_playing())
+        # The pause goes to the page through the task lane.
+        token, job = next((t, j) for t, j in reversed(self.tasks.jobs) if t[0] == 'companion_pause')
+        job()
+        self.assertIn(('apple_music', 'pause'), self.transport)
+
+    def test_resuming_the_page_is_a_new_in_app_start(self):
+        self.page_plays()
+        self.assertTrue(self.player.send_playback_command('toggle_play_pause'))   # pause
+        self.assertFalse(self.player.interruption_playing())
+        self.assertTrue(self.player.send_playback_command('toggle_play_pause'))   # resume
+        self.assertTrue(self.player.interruption_playing())
+        self.assertEqual(len(self.starts), 2)

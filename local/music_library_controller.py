@@ -1309,12 +1309,12 @@ class MusicLibraryController(QObject):
             if row.kind == "playlist":
                 return self.player.play_playlist(self._source, row.playlist_id)
             if row.kind == "song" and row.song is not None and row.song.source_id == self._source:
-                songs = tuple(r.song for r in self._search_results if r.kind == "song" and r.song is not None)
-                if row.song not in songs:
-                    songs = (row.song,)
-                return self.player.play_queue(songs, index=songs.index(row.song))
+                # A search result joins the current queue: only this song,
+                # played now, and the queue carries on after it.
+                return self.player.insert_and_play((row.song,), 0)
             return False
-        self._open_playback(row, mode, global_cover_rect, start, identity)
+        # An inserted song keeps the queue's origin; only a replacement changes it.
+        self._open_playback(row, mode, global_cover_rect, start, None if row.kind == "song" else identity)
 
     def _open_playback(self, row, mode, global_cover_rect, start, identity, *, layout=None):
         """Grab the cover, start playback and open the playback surface on it.

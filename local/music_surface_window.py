@@ -3985,8 +3985,8 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         self, painter, layout, origin, text, font, width, height, offsets, blur_level,
         window_end, position,
     ) -> bool:
-        """A finished aside breaks into particles left to right, then the
-        blurred aside settles in behind them. False outside that exit."""
+        """A finished aside breaks into fine grains left to right that
+        settle into its blur. False outside that exit."""
         from local import aside_dissolve
         phase = aside_dissolve.dissolve_phase(window_end, position)
         if phase is None:
@@ -4004,16 +4004,20 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
             cache[key] = sprite
             while len(cache) > 6:
                 cache.popitem(last=False)
-        settle = aside_dissolve.blur_settle(phase)
-        if settle > 0.001:
-            painter.save()
-            painter.setOpacity(painter.opacity() * settle)
-            self._draw_sprung_cached_wrapped_layout(
-                painter, layout, origin, text, font, width, height, color, offsets,
+        # The blur condenses under the grains column by column, so the crisp
+        # words turn into their blur rather than flying away.
+        # The grains drift right, so the blur rests one word to the right.
+        pixel = font.pixelSize() if font.pixelSize() > 0 else font.pointSizeF() * 1.33
+        shift = aside_dissolve.word_shift(text, font)
+        aside_dissolve.paint_blur_columns(
+            painter, sprite, origin, phase, ratio, max(8.0, pixel * 1.2),
+            lambda layer: self._draw_sprung_cached_wrapped_layout(
+                layer, layout, origin, text, font, width, height, color, offsets,
                 blur_level=blur_level,
-            )
-            painter.restore()
-        aside_dissolve.paint_particles(painter, sprite, origin, phase)
+            ),
+            shift,
+        )
+        aside_dissolve.paint_particles(painter, sprite, origin, phase, shift)
         return True
 
     def on_translation_visibility_changed(self, enabled: bool) -> None:
@@ -10109,11 +10113,17 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
                                 pass
                             elif completed and not aside_reading:
                                 annotation_blur = blur_level
+                                rest_origin = layer_origin
                                 if aside_window is not None:
                                     blur_phase = max(0., min(1., (current_position - aside_window.end_seconds) / .18))
                                     annotation_blur *= blur_phase * blur_phase * (3. - 2. * blur_phase)
+                                    if current_position >= aside_window.end_seconds:
+                                        # Where the grains left it: one word to the right.
+                                        from local.aside_dissolve import word_shift
+                                        rest_origin = QPointF(layer_origin.x() + word_shift(layer_text, layer_font),
+                                                              layer_origin.y())
                                 self._draw_sprung_cached_wrapped_layout(
-                                    painter, annotation_layout, layer_origin, layer_text,
+                                    painter, annotation_layout, rest_origin, layer_text,
                                     layer_font, row_width, layer_height,
                                     self._sung_lyric_color(),
                                     layer_offsets, blur_level=annotation_blur,
@@ -10249,7 +10259,21 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         source = sea.current_audio_source()
         path = source[1] if source and source[0] == identity and source[1] else None
         weights = tuple(weights) if weights else tuple(1.0 for _ in colors)
-        if self._sea_solid():
+        captured = None
+        if not path and not self._sea_solid():
+            # No file to analyse (system capture, an Apple song without a
+            # twin): the change comes from the lyric and NetEase's chorus,
+            # the drum light from the live audio. With neither, solid field.
+            cover = getattr(self.owner, "album_art", None)
+            position, duration = self._playback_clock()
+            title = str(getattr(self.owner, "track_title", "") or "")
+            key = "captured:" + (identity or title + "|" + str(getattr(self.owner, "artist", "") or ""))
+            captured = analyzer.captured_plan(
+                key, tuple(colors), weights, cover if isinstance(cover, QImage) else None, duration,
+                hints=(identity, getattr(self.owner, "timed_lyrics", ()) or (),
+                       str(getattr(self.owner, "media_source_app", "") or "")),
+                position=position)
+        if self._sea_solid() or (captured is not None and captured.settled and captured.change_end is None):
             # Instrumental tracks and the solid style: one flat colour, no light.
             cover = getattr(self.owner, "album_art", None)
             image = cover if isinstance(cover, QImage) else None
@@ -10265,9 +10289,17 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
             return sea.render_solid(max(2, round(width * scale)), max(2, round(height * scale)), self._sea_plan)
         cover = getattr(self.owner, "album_art", None)
         position, duration = self._playback_clock()
-        self._sea_plan = analyzer.plan(path, tuple(colors), weights,
-                                       cover if isinstance(cover, QImage) else None, duration)
         playing_now = bool(getattr(self.owner, "media_is_playing", True))
+        if captured is not None:
+            self._sea_plan = captured
+            if playing_now:
+                self._feed_live_beats(captured, position)
+        else:
+            # The track id and its timed lyric tell the analysis where the chorus is.
+            hints = (source[0], getattr(self.owner, "timed_lyrics", ()) or ()) if path else None
+            self._sea_plan = analyzer.plan(path, tuple(colors), weights,
+                                           cover if isinstance(cover, QImage) else None, duration,
+                                           hints=hints, position=position)
         still = not sea.is_moving(self._sea_plan, position, playing_now)
         key = (width, height, sea.still_key(self._sea_plan, position))
         if still and key == getattr(self, "_sea_still_key", None) and not self._background_cache.isNull():
@@ -10288,6 +10320,21 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
             sea.add_lights(frame, self._sea_plan, position)
         self._sea_still_key = key if still else None
         return frame
+
+    def _feed_live_beats(self, plan, position):
+        """Drum light for a captured song, from the live audio's low band."""
+        from local.sea_lyric_background import LiveBeats
+        beats = getattr(self, "_sea_live_beats", None)
+        if beats is None or getattr(self, "_sea_live_plan", None) is not plan:
+            beats = self._sea_live_beats = LiveBeats()
+            self._sea_live_plan = plan
+        provider = getattr(self.owner, "data_provider", None)
+        try:
+            frame = getattr(provider, "get_audio_frame", lambda: None)()
+        except Exception:
+            frame = None
+        if frame is not None:
+            beats.feed(plan, getattr(frame, "low", 0.0) or 0.0, position)
 
     def _sea_glass_field(self):
         """The unlit sea field for glass to sample, or None."""
@@ -10693,6 +10740,24 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         scene = self._surface_glass_backdrop()
         paint_scene_glass(
             painter, target, patches, scene, QRectF(self.rect()),
+            dark=not self._surface_glass_light(),
+            amount=self._control_plate_opacity(),
+            radius=radius,
+        )
+
+    def _paint_large_plate(self, painter: QPainter, target: QRectF, radius: float) -> None:
+        """The theme plate for a page-sized panel (the play queue).
+
+        It samples the whole scene, like a submenu. The button backdrop holds
+        pixels only around the buttons; a queue sampling it turned dark grey
+        with pixelated blocks wherever a button's patch happened to fall.
+        """
+        from local.liquid_glass_controls import SceneGlassPatches, paint_scene_glass
+        patches = getattr(self, "_large_glass_patches", None)
+        if patches is None:
+            patches = self._large_glass_patches = SceneGlassPatches(limit=3)
+        paint_scene_glass(
+            painter, target, patches, self._panel_glass_scene(), QRectF(self.rect()),
             dark=not self._surface_glass_light(),
             amount=self._control_plate_opacity(),
             radius=radius,
@@ -12629,25 +12694,25 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         if duration <= 0.0:
             return
         x = bar.left() + bar.width() * max(0.0, min(1.0, plan.change_end / duration))
-        # A glowing dot in the new colour with a contrasting ring: easy to
-        # spot on any field, still smaller than the drag ball.
+        # A small dot in the new colour, a faint glow and a thin translucent
+        # rim: findable on any field without competing with the drag ball.
         centre = QPointF(x, bar.center().y())
-        radius = max(3.5, bar.height() * 1.15)
+        radius = max(2.5, bar.height() * 0.75)
         colour = QColor(plan.after)
         painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
-        halo = QRadialGradient(centre, radius * 3.0)
+        halo = QRadialGradient(centre, radius * 2.2)
         glow = QColor(colour)
-        glow.setAlphaF(0.55)
+        glow.setAlphaF(0.22)
         halo.setColorAt(0.0, glow)
         glow.setAlphaF(0.0)
         halo.setColorAt(1.0, glow)
         painter.setBrush(halo)
-        painter.drawEllipse(centre, radius * 3.0, radius * 3.0)
+        painter.drawEllipse(centre, radius * 2.2, radius * 2.2)
         ring = QColor(self._surface_glass_ink(bar))
-        ring.setAlphaF(0.95)
+        ring.setAlphaF(0.40)
         painter.setBrush(ring)
-        painter.drawEllipse(centre, radius + 1.5, radius + 1.5)
+        painter.drawEllipse(centre, radius + 0.8, radius + 0.8)
         painter.setBrush(colour)
         painter.drawEllipse(centre, radius, radius)
         painter.restore()
@@ -13223,12 +13288,23 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
                 activity(QPointF(self.mapFromGlobal(QCursor.pos())), now)
         self.update()
 
+    def _update_queue_hover(self, point) -> None:
+        """The playback list's row under the pointer gets the light hover frame."""
+        index = None
+        if (point is not None and self._effective_content_layout() == "playlist"
+                and self._queue_view_rect.contains(point)):
+            index = next((i for i, r in self._queue_hit_rects.items() if r.contains(point)), None)
+        if index != getattr(self, "_queue_hover_index", None):
+            self._queue_hover_index = index
+            self.update(self._queue_view_rect.adjusted(-8, -8, 8, 8).toAlignedRect())
+
     def mouseMoveEvent(self, event):
         self._glass_feedback.move(event.position())
         if self._compact_committing:
             event.accept()
             return
         self._note_pointer_moved()
+        self._update_queue_hover(event.position() if not event.buttons() else None)
         self._update_metadata_hover(
             event.position() if not event.buttons() else None, time.monotonic(),
         )
@@ -13624,6 +13700,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicAppleLyricsMixin, MusicLyr
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        self._update_queue_hover(None)
         self._set_resize_chrome_hold(False)
         self._update_metadata_hover(None, time.monotonic())
         self._restore_idle_cursor()

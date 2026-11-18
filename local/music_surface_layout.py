@@ -1053,7 +1053,7 @@ class MusicContentLayoutMixin:
         scale = self._surface_scale()
         ink = self._surface_glass_ink(rect)
         panel_radius = max(14.0, min(22.0, min(rect.width(), rect.height()) * 0.06))
-        plate = getattr(self, "_paint_flat_glass", None)
+        plate = getattr(self, "_paint_large_plate", None) or getattr(self, "_paint_flat_glass", None)
         if callable(plate):
             # One glass layer under the whole list: its edge is the list's edge.
             plate(painter, rect, panel_radius)
@@ -1143,6 +1143,12 @@ class MusicContentLayoutMixin:
             row = QRectF(rect.left(), top + position * row_height - self._queue_scroll + overscroll, rect.width(), row_height - 5 * scale)
             row_ink = QColor(GLASS_SELECTED_INK) if self._queue_selection_position >= 0. and selected.contains(row.center()) else ink
             self._queue_hit_rects[position] = row.intersected(viewport)
+            if position == getattr(self, "_queue_hover_index", None) and row_ink is ink:
+                from local.row_states import paint_row_state
+                hover = QRectF(rect.left(), row.top(), rect.width(), row_height).adjusted(
+                    6. * scale, 6. * scale, -6. * scale, -6. * scale)
+                paint_row_state(painter, hover, queue_selection_radius(hover.height()),
+                                dark=ink.lightness() >= 128, hovered=True)
             if row.intersects(viewport) and len(visible_indices) < 24:
                 visible_indices.append(position)
             art_side = 43. * scale
