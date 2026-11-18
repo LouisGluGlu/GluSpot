@@ -166,6 +166,14 @@ class MacTrafficButton(QPushButton):
         background = self._color.darker(112) if self.isDown() else QColor(self._color)
         painter.setBrush(background)
         painter.drawEllipse(rect)
+        if self.property("appleStyle"):
+            # Fine darker rim of the same hue, as on the platform dots.
+            edge = background.darker(135)
+            edge.setAlpha(150)
+            painter.setPen(QPen(edge, .7))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(rect.adjusted(.35, .35, -.35, -.35))
+            painter.setPen(Qt.PenStyle.NoPen)
         reveal = self._reveal if self._reveal is not None else float(self._hovered or self.hasFocus())
         if reveal > 0.:
             side = rect.width() * .53
@@ -195,6 +203,7 @@ class MacTrafficCapsule(QFrame):
         self.setFixedSize(116, 40)
         self._progress = 0.
         self._hovered = False
+        self._apple_style = False
         self.buttons = []
         self._animation = QVariantAnimation(self)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -205,8 +214,40 @@ class MacTrafficCapsule(QFrame):
         width, height = 86. + 30. * self._progress, 32. + 6. * self._progress
         return QRectF((self.width() - width) / 2., (self.height() - height) / 2., width, height)
 
+    # Apple style (settings window's new layout): bare 12 px dots 8 px apart,
+    # no backplate. Hovering the group grows them to 16 px around their own
+    # centres (the first dot's centre never moves) and reveals the symbols.
+    APPLE_SIDE = 12
+    APPLE_HOVER_SIDE = 16
+    APPLE_GAP = 8
+    # Reserved footprint is the hovered size, so nothing around them moves;
+    # at rest the dots sit this far inside it.
+    APPLE_REST_OFFSET = (APPLE_HOVER_SIDE - APPLE_SIDE) // 2
+
+    def set_apple_style(self, enabled: bool):
+        self._apple_style = bool(enabled)
+        if self._apple_style:
+            self.setFixedSize(3 * self.APPLE_HOVER_SIDE + 2 * self.APPLE_GAP, self.APPLE_HOVER_SIDE)
+            self.clearMask()
+        else:
+            self.setFixedSize(116, 40)
+        for button in self.buttons:
+            button.setProperty("appleStyle", self._apple_style)
+        self._set_progress(self._progress)
+
     def _set_progress(self, value):
         self._progress = max(0., min(1., float(value)))
+        if self._apple_style:
+            side = round(self.APPLE_SIDE + (self.APPLE_HOVER_SIDE - self.APPLE_SIDE) * self._progress)
+            first = self.APPLE_HOVER_SIDE / 2.
+            pitch = self.APPLE_GAP + self.APPLE_SIDE + (self.APPLE_HOVER_SIDE - self.APPLE_SIDE) * self._progress
+            for index, button in enumerate(self.buttons):
+                button.setFixedSize(side, side)
+                button.move(round(first + pitch * index - side / 2.), round(first - side / 2.))
+                button._reveal = self._progress
+                button.update()
+            self.update()
+            return
         rect = self._capsule_rect()
         side = round(20. + 4. * self._progress)
         inset = 6. + 3. * self._progress
@@ -267,6 +308,8 @@ class MacTrafficCapsule(QFrame):
         super().hideEvent(event)
 
     def paintEvent(self, event):
+        if self._apple_style:
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = self._capsule_rect().adjusted(1.4, 1.4, -1.4, -1.4)

@@ -536,6 +536,10 @@ class GlassPushButton(GlassCaptureMixin, QPushButton):
         self.update()
 
     def paintEvent(self, event) -> None:
+        if self.property("glassFlat"):
+            # A full-width list row (settings link rows): plain QSS face only.
+            QPushButton.paintEvent(self, event)
+            return
         option = QStyleOptionButton()
         self.initStyleOption(option)
         light = self.property("glassLight")

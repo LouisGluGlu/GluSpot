@@ -209,7 +209,8 @@ class LiquidGlassWidgetTests(unittest.TestCase):
                         if button.objectName() == "DetailToggle":
                             self.assertEqual(button.property("glassRadius"), 7)
                         else:
-                            self.assertEqual(button.property("glassRadius"), 5)
+                            # The Apple-style layout rounds controls to 7 px like its QSS face.
+                            self.assertEqual(button.property("glassRadius"), 7 if window._apple_layout else 5)
             swatch = ColorButton("#a2294f", lambda: None, self.owner)
             self.assertEqual(swatch.color(), "#A2294F")
             swatch.set_color("#3f94c6")

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPointF, QRectF, QRunnable, QSize, QStringListModel, Qt, QThreadPool, QTimer, QUrl, QVariantAnimation, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion, QShortcut
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
@@ -37,6 +37,26 @@ from PySide6.QtWidgets import (
 
 from local.ios_widgets import IosSwitch
 from local.liquid_glass import GlassPushButton
+from local.settings_apple import (
+    APPLE_COLUMN_MAX_WIDTH,
+    APPLE_ROW_HPAD,
+    APPLE_ROW_VPAD,
+    APPLE_SIDEBAR_TILES,
+    APPLE_SIDEBAR_WIDTH,
+    ASSET_DIR as APPLE_ASSET_DIR,
+    SETTINGS_LAYOUT_SHORTCUT,
+    AppleGroupedLayout,
+    AppleSidebarDelegate,
+    AppleSidebarPanel,
+    AppleToast,
+    AppleWindowShell,
+    apple_layout_from_env,
+    apple_magnifier_icon,
+    apple_settings_palette,
+    apple_settings_stylesheet,
+    apple_sidebar_tile_icon,
+    make_link_row,
+)
 from local.branding import APP_NAME, APP_VERSION, install_custom_icon, resolve_icon_paths
 from local.mac_style import (
     mac_preferences_stylesheet,
@@ -136,16 +156,54 @@ class StatusLamp(QWidget):
         self.setObjectName("StatusLamp")
         self.setFixedSize(8, 8)
         self.setToolTip(self._text)
+        self._apple_style = False
+        self._shown_color = QColor(self._state_color())
+        self._fade = QVariantAnimation(self)
+        self._fade.setDuration(280)
+        self._fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._fade.valueChanged.connect(self._set_shown_color)
+
+    def _state_color(self) -> str:
+        if self._apple_style:
+            # Platform status colours: gray off, green on, red stopped.
+            return "#8e8e93" if not self._monitor_enabled else "#34c759" if self._active else "#ff3b30"
+        return "#8e8e93" if not self._monitor_enabled else "#1fc95b" if self._active else "#ff453a"
+
+    def set_apple_style(self, enabled: bool):
+        enabled = bool(enabled)
+        if enabled == self._apple_style:
+            return
+        self._apple_style = enabled
+        # Room for the soft halo around the 8 px dot.
+        self.setFixedSize(12, 12) if enabled else self.setFixedSize(8, 8)
+        self._fade.stop()
+        self._shown_color = QColor(self._state_color())
+        self.update()
+
+    def _set_shown_color(self, value):
+        self._shown_color = QColor(value)
+        self.update()
+
+    def _state_changed(self):
+        target = QColor(self._state_color())
+        if self._apple_style and self.isVisible() and target != self._shown_color:
+            self._fade.stop()
+            self._fade.setStartValue(QColor(self._shown_color))
+            self._fade.setEndValue(target)
+            self._fade.start()
+        else:
+            self._shown_color = target
+        self.update()
 
     def set_active(self, active: bool, text: str = ""):
         self._active = bool(active)
         self._text = str(text or "")
         self.setToolTip(self._text)
-        self.update()
+        self._state_changed()
 
     def set_monitor_enabled(self, enabled: bool):
         self._monitor_enabled = bool(enabled)
-        self.update()
+        self._state_changed()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -153,7 +211,31 @@ class StatusLamp(QWidget):
         self._paint_lamp(painter)
         painter.end()
 
+    def _paint_apple_lamp(self, painter: QPainter):
+        """Flat status dot with a soft same-colour halo, as in system settings."""
+        color = QColor(self._shown_color)
+        centre = QRectF(self.rect()).center()
+        halo = QRadialGradient(centre, self.width() / 2.0)
+        glow = QColor(color)
+        glow.setAlpha(70 if self._monitor_enabled else 0)
+        clear = QColor(color)
+        clear.setAlpha(0)
+        halo.setColorAt(0.55, glow)
+        halo.setColorAt(1.0, clear)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(halo)
+        painter.drawEllipse(QRectF(self.rect()))
+        dot = QRectF(centre.x() - 4.0, centre.y() - 4.0, 8.0, 8.0)
+        painter.setBrush(color)
+        painter.drawEllipse(dot)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(0, 0, 0, 36), 0.6))
+        painter.drawEllipse(dot.adjusted(0.3, 0.3, -0.3, -0.3))
+
     def _paint_lamp(self, painter: QPainter):
+        if self._apple_style:
+            self._paint_apple_lamp(painter)
+            return
         rect = QRectF(self.rect()).adjusted(0.8, 0.8, -0.8, -0.8)
         base = QColor("#8e8e93" if not self._monitor_enabled else "#1fc95b" if self._active else "#ff453a")
         shadow = QColor(base)
@@ -659,8 +741,12 @@ class SettingsWindow(QDialog):
     APPEARANCE_ROW_VPAD = 6
     APPEARANCE_LABEL_WIDTH = 100
 
-    def __init__(self, island_widget: QWidget, settings_manager=None, parent=None):
+    def __init__(self, island_widget: QWidget, settings_manager=None, parent=None, *, layout_style: str | None = None):
         super().__init__(parent)
+        # "apple" (inset grouped, default) or "classic" (the 6.51 layout).
+        # GLUSPOT_SETTINGS_LAYOUT=classic picks the old one at start;
+        # Ctrl+Shift+L switches while the window is open.
+        self._apple_layout = apple_layout_from_env() if layout_style is None else str(layout_style) != "classic"
         self.setProperty("controlHoverDisabled", True)
         self.island_widget = island_widget
         self.settings = settings_manager
@@ -710,6 +796,60 @@ class SettingsWindow(QDialog):
         self._preview_poll.timeout.connect(self._update_previews)
         from local.ui_theme import bind_theme_updates
         bind_theme_updates(self, self._apply_theme_from_transition)
+        self._layout_toast = AppleToast(self)
+        self._layout_shortcut = QShortcut(QKeySequence(SETTINGS_LAYOUT_SHORTCUT), self)
+        self._layout_shortcut.activated.connect(self._toggle_settings_layout)
+
+    def _toggle_settings_layout(self):
+        self._set_settings_layout("classic" if self._apple_layout else "apple")
+        self._layout_toast.show_text(
+            "新版设置（Ctrl+Shift+L 切回旧版）" if self._apple_layout else "旧版设置（Ctrl+Shift+L 切回新版）")
+
+    def _set_settings_layout(self, style: str):
+        """Rebuild the window body in the other layout; settings are untouched."""
+        apple = str(style) != "classic"
+        if apple == self._apple_layout:
+            return
+        page_index = int(getattr(self, "_last_settings_page_index", 0) or 0)
+        self._apple_layout = apple
+        old_shell = getattr(self, "_shell", None)
+        if old_shell is not None:
+            self.layout().removeWidget(old_shell)
+            old_shell.hide()
+            old_shell.setParent(None)
+            old_shell.deleteLater()
+        self._detail_panels = []
+        self._settings_pages = []
+        self._section_labels = []
+        self._settings_search_entries = []
+        self._active_search_page = None
+        self._row_vpad_override = None
+        self._row_label_width_override = None
+        self._compact_card_active = False
+        self.theme_dark_time_rows = []
+        self.music_background_follow_theme_checkboxes = []
+        self.tasker_follow_taskbar_color_checkboxes = []
+        self.tasker_follow_taskbar_color_hint_labels = []
+        self._build_ui()
+        self._update_theme_schedule_controls()
+        self._update_music_background_follow_dependency_controls()
+        self._apply_settings_font()
+        self._apply_rounded_window_mask()
+        page_index = max(0, min(page_index, len(self._settings_pages) - 1))
+        self._sync_settings_nav_to_page(page_index)
+        self._select_settings_page(self.nav.currentRow())
+        if self.isVisible():
+            self._update_previews()
+
+    def _apple_refresh_material(self):
+        """Glass level, theme or album colour changed: repaint the glass."""
+        shell = getattr(self, "_shell", None)
+        if isinstance(shell, AppleWindowShell):
+            shell.refresh_backdrop()
+            shell.update()
+            for widget in shell.findChildren(QWidget):
+                if widget.objectName() in {"MacSidebar", "MacCard"}:
+                    widget.update()
 
     def _apply_theme_from_transition(self) -> None:
         self._apply_theme()
@@ -768,24 +908,37 @@ class SettingsWindow(QDialog):
                     border: 1px solid {t["card_border"]};
                 }}
             """
+            if getattr(self, "_apple_layout", False):
+                shell = apple_settings_stylesheet(apple_settings_palette(self._settings_dark_mode()))
             self.setStyleSheet(mac_preferences_stylesheet(t) + shell)
             self._refresh_glass_buttons()
+            if getattr(self, "_apple_layout", False):
+                self._apple_refresh_material()
         finally:
             self._applying_theme = False
 
     def _refresh_glass_buttons(self):
         light = not self._settings_dark_mode()
+        apple = bool(getattr(self, "_apple_layout", False))
         for switch in self.findChildren(IosSwitch):
             switch.setProperty("darkMode", not light)
+            if switch.apple_style() != apple:
+                switch.set_apple_style(apple)
+        for lamp in self.findChildren(StatusLamp):
+            lamp.set_apple_style(apple)
         for button in self.findChildren(GlassPushButton):
             if isinstance(button, ColorButton):
                 continue
             button.setGlassLight(light and button.objectName() not in {"Primary", "Danger"})
-            button.setProperty("glassRadius", 5.0)
+            button.setProperty("glassRadius", 7.0 if getattr(self, "_apple_layout", False) else 5.0)
             if button.objectName() == "DetailToggle":
                 button.setProperty("glassRadius", 7.0)
 
     def _section_style(self, top: int = 12, bottom: int = 8) -> str:
+        if getattr(self, "_apple_layout", False):
+            # Group title above an inset card: small, gray, aligned with row text.
+            secondary = apple_settings_palette(self._settings_dark_mode())["secondary"]
+            return f"font-size: 12px; font-weight: 600; color: {secondary}; padding: 0;"
         return f"font-size: 15px; font-weight: 700; color: {self._theme()['section_text']}; padding: {top}px 0 {bottom}px 0;"
 
     def _register_section_label(self, label: QLabel, top: int = 12, bottom: int = 8) -> QLabel:
@@ -798,6 +951,9 @@ class SettingsWindow(QDialog):
             label.setStyleSheet(self._section_style(top, bottom))
 
     def _hint_style(self, top: int = 2, bottom: int = 8) -> str:
+        if getattr(self, "_apple_layout", False):
+            secondary = apple_settings_palette(self._settings_dark_mode())["secondary"]
+            return f"color: {secondary}; font-size: 12px; padding: 0;"
         return f"color: {self._theme()['muted']}; padding: {top}px 0 {bottom}px 0;"
 
     def changeEvent(self, event):
@@ -849,6 +1005,12 @@ class SettingsWindow(QDialog):
         return Path(__file__).resolve().parents[1] / "assets" / "seeting" / filename
 
     def _settings_sidebar_icon(self, title: str, fallback_icon: QIcon) -> tuple[QIcon, str]:
+        tile = APPLE_SIDEBAR_TILES.get(str(title or "")) if getattr(self, "_apple_layout", False) else None
+        if tile is not None:
+            color, filename = tile
+            path = APPLE_ASSET_DIR / filename
+            if path.exists():
+                return apple_sidebar_tile_icon(color, path), str(path)
         path = self._settings_sidebar_icon_path(title)
         if path is not None and path.exists():
             return QIcon(str(path)), str(path)
@@ -888,32 +1050,60 @@ class SettingsWindow(QDialog):
                         item.setIcon(icon)
 
     def _build_ui(self):
-        self._apply_theme()
+        apple = bool(getattr(self, "_apple_layout", False))
+        outer = self.layout()
+        if outer is None:
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(0, 0, 0, 0)
+            outer.setSpacing(0)
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        shell = QFrame()
+        shell = AppleWindowShell(self) if apple else QFrame()
         shell.setObjectName("MacWindowShell")
+        self._shell = shell
         outer.addWidget(shell)
+        self._apply_theme()
 
         root = QHBoxLayout(shell)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        side = QFrame()
+        side = AppleSidebarPanel(self) if apple else QFrame()
         side.setObjectName("MacSidebar")
-        side.setFixedWidth(157)
+        self._sidebar_width = APPLE_SIDEBAR_WIDTH if apple else 157
+        side.setFixedWidth(self._sidebar_width)
         side_layout = QVBoxLayout(side)
-        side_layout.setContentsMargins(8, 8, 8, 10)
-        side_layout.setSpacing(6)
+        traffic = mac_traffic_lights(self)
+        if apple:
+            # The glass panel sits 8 px inside the window (2 px on its right).
+            # Everything in it keeps one 10 px gap to the panel edge, so the
+            # first dot is as far from the panel's top as from its left.
+            # The dots' widget reserves their hovered size; at rest they sit
+            # APPLE_REST_OFFSET inside it, so that widget starts that much
+            # earlier and the search field and list carry it back.
+            gap = 10
+            inset = int(AppleSidebarPanel.INSET)
+            offset = traffic.APPLE_REST_OFFSET
+            side_layout.setContentsMargins(inset + gap - offset, inset + gap - offset, 2 + gap, inset + gap)
+            side_layout.setSpacing(12)
+            traffic.set_apple_style(True)
+        else:
+            side_layout.setContentsMargins(8, 8, 8, 10)
+            side_layout.setSpacing(6)
 
-        side_layout.addWidget(mac_traffic_lights(self), 0, Qt.AlignmentFlag.AlignLeft)
+        side_layout.addWidget(traffic, 0, Qt.AlignmentFlag.AlignLeft)
+        # Search and list: back on the 10 px line the dots sit on at rest.
+        side_body = QVBoxLayout()
+        side_body.setContentsMargins(traffic.APPLE_REST_OFFSET if apple else 0, 0, 0, 0)
+        side_body.setSpacing(side_layout.spacing())
+        side_layout.addLayout(side_body, 1)
 
         self.search_input = QLineEdit()
         self.search_input.setObjectName("MacSearch")
         self.search_input.setPlaceholderText("搜索")
+        if apple:
+            secondary = apple_settings_palette(self._settings_dark_mode())["secondary"]
+            self.search_input.addAction(apple_magnifier_icon(secondary), QLineEdit.ActionPosition.LeadingPosition)
+            self.search_input.setClearButtonEnabled(True)
         self._settings_search_completer_model = QStringListModel(self)
         self.search_completer = QCompleter(self._settings_search_completer_model, self.search_input)
         self.search_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -922,13 +1112,18 @@ class SettingsWindow(QDialog):
         self.search_completer.activated.connect(self._apply_settings_search_suggestion)
         self.search_input.setCompleter(self.search_completer)
         self.search_input.textChanged.connect(self._filter_settings_nav)
-        side_layout.addWidget(self.search_input)
+        side_body.addWidget(self.search_input)
 
         self.nav = QListWidget()
         self.nav.setObjectName("MacSidebarList")
         self.nav.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.nav.setIconSize(QSize(24, 24))
-        side_layout.addWidget(self.nav, 1)
+        if apple:
+            self.nav.setItemDelegate(AppleSidebarDelegate(self, self.nav))
+            self.nav.setMouseTracking(True)
+            self.nav.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.nav.setSpacing(1)
+        side_body.addWidget(self.nav, 1)
         root.addWidget(side)
 
         content = QWidget()
@@ -939,13 +1134,20 @@ class SettingsWindow(QDialog):
 
         title_bar = QFrame()
         title_bar.setObjectName("MacTitleBar")
-        title_bar.setFixedHeight(42)
+        title_bar.setFixedHeight(38 if apple else 42)
         title_layout = QHBoxLayout(title_bar)
         title_layout.setContentsMargins(18, 0, 18, 0)
         title_layout.setSpacing(8)
         self.title_label = QLabel()
         self.title_label.setObjectName("MacTitle")
-        title_layout.addWidget(self.title_label)
+        if apple:
+            # The page carries a large title; this small one appears once that
+            # title has scrolled away, as in the platform Settings app.
+            title_layout.addStretch(1)
+            title_layout.addWidget(self.title_label)
+            self.title_label.setVisible(False)
+        else:
+            title_layout.addWidget(self.title_label)
         title_layout.addStretch(1)
         content_layout.addWidget(title_bar)
 
@@ -989,6 +1191,14 @@ class SettingsWindow(QDialog):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.verticalScrollBar().setSingleStep(24)
+        if getattr(self, "_apple_layout", False):
+            column = self._apple_page_body(scroll, "搜索结果")
+            group = QWidget()
+            group.setObjectName("AppleGroup")
+            self.settings_search_results_layout = AppleGroupedLayout(self, group)
+            column.layout().addWidget(group)
+            column.layout().addStretch(1)
+            return scroll
         page = QWidget()
         page.setObjectName("MacScrollBody")
         layout = QVBoxLayout(page)
@@ -997,6 +1207,70 @@ class SettingsWindow(QDialog):
         scroll.setWidget(page)
         self.settings_search_results_layout = layout
         return scroll
+
+    def _apple_page_body(self, scroll: QScrollArea, title: str) -> QWidget:
+        """Centred column of limited width with a large title; returns the column."""
+        body = QWidget()
+        body.setObjectName("MacScrollBody")
+        outer = QHBoxLayout(body)
+        outer.setContentsMargins(24, 2, 24, 28)
+        outer.setSpacing(0)
+        pane = QWidget()
+        pane.setObjectName("AppleColumn")
+        pane.setMaximumWidth(APPLE_COLUMN_MAX_WIDTH)
+        pane_layout = QVBoxLayout(pane)
+        pane_layout.setContentsMargins(0, 0, 0, 0)
+        pane_layout.setSpacing(0)
+        column = QWidget()
+        column.setObjectName("AppleColumn")
+        column_layout = QVBoxLayout(column)
+        column_layout.setContentsMargins(0, 0, 0, 0)
+        column_layout.setSpacing(20)
+        heading = QLabel(title)
+        heading.setObjectName("AppleLargeTitle")
+        column_layout.addWidget(heading)
+        detail_host = QWidget()
+        detail_host.setObjectName("AppleColumn")
+        detail_layout = QVBoxLayout(detail_host)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(0)
+        detail_host.setVisible(False)
+        pane_layout.addWidget(column, 1)
+        pane_layout.addWidget(detail_host, 1)
+        outer.addStretch(1)
+        outer.addWidget(pane, 100)
+        outer.addStretch(1)
+        scroll.setWidget(body)
+        scroll._apple_column = column
+        scroll._apple_detail_host = detail_host
+        scroll._apple_heading = heading
+        scroll.verticalScrollBar().valueChanged.connect(lambda _value: self._apple_sync_title_bar())
+        return column
+
+    def _apple_sync_title_bar(self):
+        if not getattr(self, "_apple_layout", False) or not hasattr(self, "stack"):
+            return
+        page = self.stack.currentWidget()
+        heading = getattr(page, "_apple_heading", None)
+        scrolled = isinstance(page, QScrollArea) and page.verticalScrollBar().value() > 34
+        self.title_label.setVisible(bool(scrolled and heading is not None))
+
+    def _apple_show_detail(self, page: QWidget, view: QWidget | None):
+        """Push a second-level view inside the page, or go back to the page."""
+        column = getattr(page, "_apple_column", None)
+        host = getattr(page, "_apple_detail_host", None)
+        if column is None or host is None:
+            return
+        if view is None and host.isHidden():
+            return  # no second-level view is open; keep the scroll position
+        for index in range(host.layout().count()):
+            child = host.layout().itemAt(index).widget()
+            if child is not None:
+                child.setVisible(child is view)
+        host.setVisible(view is not None)
+        column.setVisible(view is None)
+        if isinstance(page, QScrollArea):
+            page.verticalScrollBar().setValue(0)
 
     def _select_settings_page(self, row: int):
         item = self.nav.item(row) if row >= 0 else None
@@ -1010,6 +1284,7 @@ class SettingsWindow(QDialog):
         self._last_settings_page_index = page_index
         self.stack.setCurrentIndex(page_index)
         self.title_label.setText(str(self._settings_pages[page_index].get("title", "")))
+        self._apple_sync_title_bar()
         entry_id = item.data(Qt.ItemDataRole.UserRole + 1) if item is not None else None
         if entry_id:
             QTimer.singleShot(0, lambda page_index=page_index, entry_id=str(entry_id): self._scroll_to_search_entry(page_index, entry_id))
@@ -1208,14 +1483,20 @@ class SettingsWindow(QDialog):
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
+        reset_groups = getattr(layout, "reset_groups", None)
+        if callable(reset_groups):
+            reset_groups()
 
     def _populate_settings_search_results(self, query: str, matches: list[dict[str, object]]):
         layout = getattr(self, "settings_search_results_layout", None)
         if layout is None:
             return
         self._clear_settings_search_results()
+        apple = getattr(self, "_apple_layout", False)
         summary = QLabel(f"找到 {len(matches)} 个相关设置项")
         summary.setObjectName("SearchResultSummary")
+        if apple:
+            summary.setProperty("appleSectionHeader", True)
         layout.addWidget(summary)
         if not matches:
             empty = QLabel("没有匹配的设置项")
@@ -1229,6 +1510,9 @@ class SettingsWindow(QDialog):
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(12, 9, 10, 9)
             row_layout.setSpacing(10)
+            if apple:
+                row.setProperty("appleRow", True)
+                row_layout.setContentsMargins(APPLE_ROW_HPAD, 8, 12, 8)
 
             text_box = QVBoxLayout()
             text_box.setContentsMargins(0, 0, 0, 0)
@@ -1253,7 +1537,7 @@ class SettingsWindow(QDialog):
             open_button = GlassPushButton("打开")
             open_button.setObjectName("SearchResultAction")
             open_button.setGlassLight(not self._settings_dark_mode())
-            open_button.setProperty("glassRadius", 5.0)
+            open_button.setProperty("glassRadius", 7.0 if apple else 5.0)
             entry_id = str(entry.get("id", ""))
             open_button.clicked.connect(lambda _checked=False, item_id=entry_id: self._activate_settings_search_entry(item_id))
             row_layout.addWidget(open_button, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -1269,6 +1553,7 @@ class SettingsWindow(QDialog):
         if getattr(self, "settings_search_page", None) is not None:
             self.stack.setCurrentWidget(self.settings_search_page)
         self.title_label.setText("搜索结果")
+        self._apple_sync_title_bar()
 
     def _sync_settings_nav_to_page(self, page_index: int):
         if not hasattr(self, "nav"):
@@ -1350,7 +1635,7 @@ class SettingsWindow(QDialog):
         page.verticalScrollBar().setValue(max(0, y - 16))
 
     def _is_window_drag_area(self, point) -> bool:
-        if point.y() > 44 and point.x() > 157:
+        if point.y() > 44 and point.x() > int(getattr(self, "_sidebar_width", 157)):
             return False
         child = self.childAt(point.toPoint())
         if child is None:
@@ -1387,6 +1672,12 @@ class SettingsWindow(QDialog):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.verticalScrollBar().setSingleStep(24)
+        if getattr(self, "_apple_layout", False):
+            scroll._content_layout = self._apple_page_body(scroll, title).layout()
+            scroll._settings_search_title = title
+            scroll._settings_search_entries = []
+            self._active_search_page = scroll
+            return scroll
         page = QWidget()
         page.setObjectName("MacScrollBody")
         layout = QVBoxLayout(page)
@@ -1416,7 +1707,7 @@ class SettingsWindow(QDialog):
         self._row_label_width_override = self.APPEARANCE_LABEL_WIDTH
         self._compact_card_active = True
         layout = getattr(page, "_content_layout", None)
-        if layout is not None:
+        if layout is not None and not getattr(self, "_apple_layout", False):
             layout.setContentsMargins(14, 8, 16, 14)
             layout.setSpacing(10)
 
@@ -1426,6 +1717,14 @@ class SettingsWindow(QDialog):
         self._compact_card_active = False
 
     def _card(self, parent_layout: QVBoxLayout) -> QFrame:
+        if getattr(self, "_apple_layout", False):
+            # One group: title above, inset card(s) of rows, gray footer below.
+            group = QFrame()
+            group.setObjectName("AppleGroup")
+            group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+            AppleGroupedLayout(self, group)
+            parent_layout.addWidget(group)
+            return group
         card = QFrame()
         card.setObjectName("MacCard")
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
@@ -1441,6 +1740,8 @@ class SettingsWindow(QDialog):
     def _row(self, layout: QVBoxLayout, title: str, control: QWidget | None):
         if control is None:
             return None
+        if getattr(self, "_apple_layout", False):
+            return self._apple_row(layout, title, control)
         row = QWidget()
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
@@ -1452,6 +1753,48 @@ class SettingsWindow(QDialog):
             control.setSizePolicy(QSizePolicy.Policy.Expanding, control.sizePolicy().verticalPolicy())
         row_layout.addWidget(label, 0)
         row_layout.addWidget(control, 1)
+        layout.addWidget(row)
+        self._register_settings_search_entry(title, row, terms=self._settings_search_widget_terms(control), priority=8)
+        return row
+
+    def _apple_row(self, layout: QVBoxLayout, title: str, control: QWidget) -> QWidget:
+        """Card row: title on the left, control on the right.
+
+        A wrapping text value becomes the row's gray subtitle; an input
+        field takes the remaining width; anything else hugs the right edge.
+        """
+        row = QWidget()
+        row.setProperty("appleRow", True)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(APPLE_ROW_HPAD, APPLE_ROW_VPAD, APPLE_ROW_HPAD, APPLE_ROW_VPAD)
+        row_layout.setSpacing(16)
+        label = QLabel(title)
+        label.setObjectName("RowTitle")
+        if isinstance(control, QLabel) and control.wordWrap():
+            text_box = QVBoxLayout()
+            text_box.setContentsMargins(0, 0, 0, 0)
+            text_box.setSpacing(2)
+            control.setProperty("appleSubtitle", True)
+            text_box.addWidget(label)
+            text_box.addWidget(control)
+            row_layout.addLayout(text_box, 1)
+        elif isinstance(control, QLineEdit) or control.findChild(QLineEdit) is not None:
+            row_layout.addWidget(label, 0)
+            control.setSizePolicy(QSizePolicy.Policy.Expanding, control.sizePolicy().verticalPolicy())
+            row_layout.addWidget(control, 1)
+        else:
+            row_layout.addWidget(label, 1)
+            if isinstance(control, QComboBox):
+                control.setMinimumWidth(150)
+                control.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            elif isinstance(control, IosSwitch) and not control.text():
+                control.setFixedWidth(round(IosSwitch.APPLE_TRACK_WIDTH) + 2)
+            elif isinstance(control, QLabel):
+                control.setProperty("appleValue", True)
+                control.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            else:
+                control.setSizePolicy(QSizePolicy.Policy.Preferred, control.sizePolicy().verticalPolicy())
+            row_layout.addWidget(control, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(row)
         self._register_settings_search_entry(title, row, terms=self._settings_search_widget_terms(control), priority=8)
         return row
@@ -1476,6 +1819,9 @@ class SettingsWindow(QDialog):
         row.setObjectName("PathPickerRowStacked")
         row_layout = QVBoxLayout(row)
         row_layout.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
+        if getattr(self, "_apple_layout", False):
+            row.setProperty("appleRow", True)
+            row_layout.setContentsMargins(APPLE_ROW_HPAD, APPLE_ROW_VPAD, APPLE_ROW_HPAD, APPLE_ROW_VPAD)
         row_layout.setSpacing(7)
         label = QLabel(title)
         label.setObjectName("RowTitle")
@@ -1487,6 +1833,8 @@ class SettingsWindow(QDialog):
 
     def _section_label(self, text: str, top: int = 12, bottom: int = 8) -> QLabel:
         label = QLabel(text)
+        if getattr(self, "_apple_layout", False):
+            label.setProperty("appleSectionHeader", True)
         self._register_section_label(label, top, bottom)
         self._register_settings_search_entry(text, label, terms=(text,), priority=3)
         return label
@@ -1536,6 +1884,32 @@ class SettingsWindow(QDialog):
                 self.island_widget.update()
 
     def _indicator_row(self, layout: QVBoxLayout, title: str, indicator: StatusLamp, control: QWidget):
+        if getattr(self, "_apple_layout", False):
+            # Status row: lamp, then the title with the status as its subtitle.
+            row_widget = QWidget()
+            row_widget.setProperty("appleRow", True)
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(APPLE_ROW_HPAD, APPLE_ROW_VPAD, APPLE_ROW_HPAD, APPLE_ROW_VPAD)
+            row_layout.setSpacing(10)
+            label = QLabel(title)
+            label.setObjectName("RowTitle")
+            text_box = QVBoxLayout()
+            text_box.setContentsMargins(0, 0, 0, 0)
+            text_box.setSpacing(2)
+            text_box.addWidget(label)
+            if isinstance(control, QLabel):
+                control.setProperty("appleSubtitle", True)
+            text_box.addWidget(control)
+            lamp_box = QVBoxLayout()
+            lamp_box.setContentsMargins(0, 0, 0, 0)
+            lamp_box.addSpacing(4)
+            lamp_box.addWidget(indicator)
+            lamp_box.addStretch(1)
+            row_layout.addLayout(lamp_box, 0)
+            row_layout.addLayout(text_box, 1)
+            layout.addWidget(row_widget)
+            self._register_settings_search_entry(title, row_widget, terms=self._settings_search_widget_terms(control), priority=8)
+            return row_widget
         row_widget = QWidget()
         grid = QGridLayout(row_widget)
         grid.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
@@ -1573,7 +1947,71 @@ class SettingsWindow(QDialog):
         layout.addWidget(group)
         return group
 
+    def _apple_detail_panel(self, layout: QVBoxLayout, title: str, indicator: StatusLamp | None = None) -> tuple[QFrame, QVBoxLayout, QPushButton]:
+        """A "›" row that pushes a second-level view of the same page."""
+        page = getattr(self, "_active_search_page", None)
+        host = getattr(page, "_apple_detail_host", None)
+        panel = QFrame()
+        panel.setObjectName("DetailPanel")
+        panel.setProperty("appleRow", True)
+        panel_layout = QHBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
+        toggle = GlassPushButton()
+        toggle.setObjectName("DetailToggle")
+        toggle.setCheckable(True)
+        toggle.setProperty("detail_title", title)
+        toggle.setProperty("appleDetail", True)
+        toggle.setText(title)
+        make_link_row(self, toggle)
+        if indicator is not None:
+            panel_layout.addSpacing(APPLE_ROW_HPAD)
+            panel_layout.addWidget(indicator, 0, Qt.AlignmentFlag.AlignVCenter)
+        panel_layout.addWidget(toggle, 1)
+
+        view = QWidget()
+        view.setObjectName("AppleDetailView")
+        view_layout = QVBoxLayout(view)
+        view_layout.setContentsMargins(0, 0, 0, 0)
+        view_layout.setSpacing(14)
+        back = QPushButton(f"‹ {getattr(page, '_settings_search_title', '') or '返回'}")
+        back.setObjectName("AppleBackButton")
+        back.setCursor(Qt.CursorShape.PointingHandCursor)
+        back.clicked.connect(lambda _checked=False: toggle.setChecked(False))
+        heading = QLabel(title)
+        heading.setObjectName("AppleLargeTitle")
+        body = QFrame()
+        body.setObjectName("DetailBody")
+        body_layout = AppleGroupedLayout(self, body)
+        body_layout.setSpacing(6)
+        body.setVisible(False)
+        view_layout.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
+        view_layout.addWidget(heading)
+        view_layout.addWidget(body)
+        view_layout.addStretch(1)
+        view.setVisible(False)
+        if host is not None:
+            host.layout().addWidget(view)
+
+        def update_open_state(opened: bool):
+            body.setVisible(opened)
+            if page is not None:
+                self._apple_show_detail(page, view if opened else None)
+
+        toggle.toggled.connect(update_open_state)
+        layout.addWidget(panel)
+        self._detail_panels.append((toggle, body))
+        self._register_settings_search_entry(title, panel, terms=(toggle.text(), f"{title} 详细设置"), priority=6)
+        return panel, body_layout, toggle
+
+    def _detail_toggle_text(self, toggle: QPushButton, title: str, opened: bool) -> str:
+        if toggle.property("appleDetail"):
+            return str(title)
+        return f"{title} 详细设置" + (" · 收起" if opened else "")
+
     def _detail_panel(self, layout: QVBoxLayout, title: str, indicator: StatusLamp | None = None) -> tuple[QFrame, QVBoxLayout, QPushButton]:
+        if getattr(self, "_apple_layout", False):
+            return self._apple_detail_panel(layout, title, indicator)
         panel = QFrame()
         panel.setObjectName("DetailPanel")
         panel_layout = QVBoxLayout(panel)
@@ -1619,7 +2057,7 @@ class SettingsWindow(QDialog):
     def _set_detail_panel_title(self, toggle: QPushButton, title: str):
         toggle.setProperty("detail_title", title)
         opened = bool(toggle.isChecked())
-        toggle.setText(f"{title} 详细设置" + (" · 收起" if opened else ""))
+        toggle.setText(self._detail_toggle_text(toggle, title, opened))
 
     def _music_app_profiles_setting(self) -> dict[str, dict[str, object]]:
         raw = self._setting_value("v2_music_app_profiles", {}) or {}
@@ -1777,7 +2215,9 @@ class SettingsWindow(QDialog):
             toggle.blockSignals(False)
             body.setVisible(False)
             base_title = str(toggle.property("detail_title") or "详细")
-            toggle.setText(f"{base_title} 详细设置")
+            toggle.setText(self._detail_toggle_text(toggle, base_title, False))
+        for page in getattr(self, "_settings_pages", []):
+            self._apple_show_detail(page.get("page"), None)
 
     def _preview_frame(self, height: int = 42) -> QFrame:
         frame = QFrame()
@@ -1821,6 +2261,11 @@ class SettingsWindow(QDialog):
         grid.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
         grid.setHorizontalSpacing(12 if getattr(self, "_compact_card_active", False) else 14)
         grid.setVerticalSpacing(6)
+        if getattr(self, "_apple_layout", False):
+            # Title and value on the first line, the slider across the card below.
+            row.setProperty("appleRow", True)
+            grid.setContentsMargins(APPLE_ROW_HPAD, APPLE_ROW_VPAD + 1, APPLE_ROW_HPAD, APPLE_ROW_VPAD)
+            grid.setVerticalSpacing(4)
         title_label = QLabel(title)
         title_label.setObjectName("RowTitle")
         value_label = QLabel(f"{value}{suffix}")
@@ -2818,6 +3263,9 @@ class SettingsWindow(QDialog):
         finder = getattr(self, "finder_bar_preview", None)
         if finder is not None:
             finder.refresh_track()
+        shell = getattr(self, "_shell", None)
+        if isinstance(shell, AppleWindowShell):
+            shell.refresh_backdrop()  # follows the album colour; no-op when unchanged
         preview = getattr(self, "music_preview", None)
         if isinstance(preview, MusicAmbiencePreview):
             style = self._current_music_ambience_style()
@@ -2862,6 +3310,8 @@ class SettingsWindow(QDialog):
     def _set_music_glass_level(self, value: int):
         self._save("v2_music_glass_level", normalize_music_glass_level(value))
         self._publish_surface_theme(animate=False)
+        if getattr(self, "_apple_layout", False):
+            self._apple_refresh_material()
 
     def _music_background_follow_previous_style(self) -> str:
         value = str(self._setting_value("v2_music_background_follow_previous_style", "") or "").strip().lower()
@@ -3048,6 +3498,7 @@ class SettingsWindow(QDialog):
 
     def _settings_page_changed(self, row: int):
         self._collapse_detail_panels()
+        self._apple_sync_title_bar()
         if row != self._barrage_page_index and hasattr(self.island_widget, "set_settings_window_active"):
             self.island_widget.set_settings_window_active(False)
         if row == self._diagnostics_page_index:
