@@ -11,7 +11,7 @@ import os
 import time
 
 from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QAbstractButton, QGraphicsOpacityEffect, QLabel, QWidget
 
 from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop, widget_glass_level
@@ -32,8 +32,14 @@ REFRESH_HEADER = 60
 REFRESH_ROW, REFRESH_STRIDE, REFRESH_COVER = 60, 64, 48
 RAIL_WIDE, RAIL_NARROW, RAIL_KEY = 156, 56, 38
 SECTION_ORDER = ("for_you", "recommended", "personal")
-PULL_TO_NEXT = 360          # wheel units past the end of a list that turn to the next section
-PLATE_MS, FADE_MS = 260, 240
+PULL_TO_REFRESH = 360       # wheel units up past the top of a list that reload the section
+REFRESH_MIN_S, REFRESH_MAX_S = 0.6, 4.0
+APPEAR_S, APPEAR_STAGGER_S = 0.24, 0.045   # each new row fades in, one after another, in order
+COVER_WAIT_S = 3.0          # a row waits at most this long for its cover before it shows
+SCROLL_FADE = 22            # px at the list's top edge that fade out under the heading once scrolled
+PLATE_MS = 260
+# One radius family: the window 24; planes 18; keys, plates and rows 12.
+RADIUS_WINDOW, RADIUS_PLANE, RADIUS_KEY = 24, 18, 12
 
 
 BAR_SLACK = 24             # px a size must clear past a threshold before the bar changes pose
@@ -108,9 +114,10 @@ def _type(painter, rect, text, size, color, weight=QFont.Weight.Normal, align=Qt
         text, Qt.TextElideMode.ElideRight, max(1, round(rect.width()))))
 
 
-class _SectionPull(QObject):
-    """Wheel past the end of a section's list turns to the next one (and past
-    the top, back to the previous one)."""
+class _TopPull(QObject):
+    """Wheel up past the top of a section's list: a loading capsule (three
+    looping dots in a large rounded frame) grows in; past the threshold the
+    section reloads."""
 
     def __init__(self, view):
         super().__init__(view.owner)
@@ -118,32 +125,30 @@ class _SectionPull(QObject):
         self.pull = 0
         self.reset = QTimer(self)
         self.reset.setSingleShot(True)
-        self.reset.setInterval(700)
+        self.reset.setInterval(600)
         self.reset.timeout.connect(self._clear)
 
     def _clear(self):
         self.pull = 0
+        self.view.set_pull(0.0)
 
     def eventFilter(self, watched, event):
         if event.type() != QEvent.Type.Wheel or not self.view.pull_active():
             return False
         bar = self.view.owner.scroll.verticalScrollBar()
         delta = event.angleDelta().y()
-        if delta < 0 and bar.value() >= bar.maximum():
-            self.pull = max(0, self.pull) - delta
-        elif delta > 0 and bar.value() <= bar.minimum():
-            self.pull = min(0, self.pull) - delta
-        else:
-            self.pull = 0
-            return False
-        self.reset.start()
-        if self.pull >= PULL_TO_NEXT:
-            self.pull = 0
-            self.view.step_section(1)
-        elif self.pull <= -PULL_TO_NEXT:
-            self.pull = 0
-            self.view.step_section(-1)
-        return True
+        if delta > 0 and bar.value() <= bar.minimum():
+            self.pull += delta
+            self.reset.start()
+            if self.pull >= PULL_TO_REFRESH:
+                self.pull = 0
+                self.view.start_refresh()
+            else:
+                self.view.set_pull(self.pull / PULL_TO_REFRESH)
+            return True
+        if self.pull:
+            self._clear()
+        return False
 
 
 def refresh_default() -> bool:
@@ -253,7 +258,7 @@ class _SectionButton(QAbstractButton):
         with QPainter(self) as p:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             if not self.isChecked() and (self.underMouse() or self.hasFocus()):
-                paint_row_state(p, QRectF(self.rect()).adjusted(1, 1, -1, -1), 11, dark=dark, hovered=True)
+                paint_row_state(p, QRectF(self.rect()).adjusted(1, 1, -1, -1), RADIUS_KEY, dark=dark, hovered=True)
             color = ink if self.isChecked() else quiet
             side = 20
             icon = QRectF((self.width() - side) / 2 if self.icons_only else 11, (self.height() - side) / 2, side, side)
@@ -401,7 +406,7 @@ class _VariantRow(QWidget):
                 tones = refresh_tones(dark)
                 if not self.card:
                     x, y = 6 + REFRESH_COVER + 14, (self.height() - 42) // 2
-                    paint_row_state(p, QRectF(self.rect()), 12, dark=dark,
+                    paint_row_state(p, QRectF(self.rect()), RADIUS_KEY, dark=dark,
                                     hovered=self.underMouse() and self.isEnabled(), selected=self._is_playing())
             width = self.width() - x - (88 if self.collection.song else 8)
             query = getattr(self.owner, "_highlight_query", "")
@@ -456,20 +461,23 @@ class LibraryVariantPresentation:
         self._plate_motion.setStartValue(0.)
         self._plate_motion.setEndValue(1.)
         self._plate_motion.valueChanged.connect(self._move_plate)
-        self._pull = _SectionPull(self)
+        self._pull = _TopPull(self)
         owner.scroll.viewport().installEventFilter(self._pull)
-        self._fade = QGraphicsOpacityEffect(owner.scroll)
-        self._fade.setOpacity(1.)
-        self._fade.setEnabled(False)
-        owner.scroll.setGraphicsEffect(self._fade)
-        self._fade_motion = QVariantAnimation(owner)
-        self._fade_motion.setDuration(FADE_MS)
-        self._fade_motion.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._fade_motion.valueChanged.connect(lambda value: self._fade.setOpacity(float(value)))
-        self._fade_motion.finished.connect(lambda: self._fade.setEnabled(False))
-        self.next_hint = QLabel(owner.content)
-        self.next_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.next_hint.hide()
+        self.pull_amount = 0.0
+        self.refreshing_since = None
+        self.dots_rect = QRectF()
+        self._dots_timer = QTimer(owner)
+        self._dots_timer.setInterval(33)
+        self._dots_timer.timeout.connect(self._tick_dots)
+        self._appear_at = {}                     # row key -> when its fade-in begins
+        self._waiting_since = {}                 # row key -> since when it waits for its cover
+        self._last_appear_at = 0.0
+        self._shown_keys = {}                    # section -> keys that have appeared
+        self._appear_timer = QTimer(owner)
+        self._appear_timer.setInterval(16)
+        self._appear_timer.timeout.connect(self._tick_appear)
+        self.heading_rule = QRectF()
+        owner.scroll.verticalScrollBar().valueChanged.connect(self._scrolled)
         self.section = "for_you"
         self.last_catalog_section = "for_you"
         self.buttons = {key: _SectionButton(key, self) for key in SECTIONS}
@@ -530,21 +538,159 @@ class LibraryVariantPresentation:
         return (self.refresh and o.library_variant == "sidebar" and not o.search.text().strip()
                 and self.section in SECTION_ORDER and not getattr(o, "playlist_page_open", False))
 
-    def step_section(self, step):
-        if self.section not in SECTION_ORDER:
+    def set_pull(self, amount):
+        if self.refreshing_since is not None:
             return
-        index = SECTION_ORDER.index(self.section) + step
-        if not 0 <= index < len(SECTION_ORDER):
-            return
+        self.pull_amount = max(0.0, min(1.0, float(amount)))
+        if self.pull_amount > 0.0 and not self._dots_timer.isActive():
+            self._dots_timer.start()
+        self.owner.update(self.dots_rect.toAlignedRect().adjusted(-4, -4, 4, 4))
+
+    # --- the heading stays a layer above the list ---------------------------
+    def _heading_layered(self):
         o = self.owner
-        self.select_section(SECTION_ORDER[index])
-        bar = o.scroll.verticalScrollBar()
-        bar.setValue(bar.maximum() if step < 0 else 0)
-        self._fade.setEnabled(True)
-        self._fade_motion.stop()
-        self._fade_motion.setStartValue(0.)
-        self._fade_motion.setEndValue(1.)
-        self._fade_motion.start()
+        return (self.refresh and o.library_variant == "sidebar" and o.isVisible()
+                and o.scroll.verticalScrollBar().value() > 0)
+
+    def _scrolled(self, _value=None):
+        """Once the list is scrolled, it fades out under the heading and a
+        hairline separates the two; at the top nothing changes."""
+        o = self.owner
+        layered = self._heading_layered()
+        effect = o.scroll.graphicsEffect()
+        mine = isinstance(effect, QGraphicsOpacityEffect) and getattr(effect, "_gluspot_heading", False)
+        if layered and not mine:
+            effect = QGraphicsOpacityEffect(o.scroll)
+            effect._gluspot_heading = True
+            gradient = QLinearGradient(0.0, 0.0, 0.0, float(SCROLL_FADE))
+            gradient.setColorAt(0.0, QColor(0, 0, 0, 0))
+            gradient.setColorAt(1.0, QColor(0, 0, 0, 255))
+            effect.setOpacityMask(QBrush(gradient))
+            o.scroll.setGraphicsEffect(effect)
+        elif not layered and mine:
+            o.scroll.setGraphicsEffect(None)
+        if not self.heading_rule.isEmpty():
+            o.update(self.heading_rule.toAlignedRect().adjusted(-2, -2, 2, 2))
+
+    def _section_loading(self):
+        """The visible section is loading, or the whole library is and shows nothing yet."""
+        o = self.owner
+        if self.section in getattr(o, "_catalog_loading", ()):
+            return True
+        return bool(getattr(o, "_loading", False)) and not o._visual_items()
+
+    def start_refresh(self):
+        """Reload the section the listener pulled on; dots run until it lands."""
+        if self.refreshing_since is not None:
+            return
+        self.refreshing_since = time.monotonic()
+        self.pull_amount = 1.0
+        if not self._dots_timer.isActive():
+            self._dots_timer.start()
+        signal = getattr(self.owner, "sectionRefreshRequested", None)
+        if signal is not None:
+            signal.emit(self.section)
+
+    def _tick_dots(self):
+        o = self.owner
+        if self.refreshing_since is not None:
+            elapsed = time.monotonic() - self.refreshing_since
+            loading = self.section in getattr(o, "_catalog_loading", ())
+            if elapsed >= REFRESH_MAX_S or (elapsed >= REFRESH_MIN_S and not loading):
+                self.refreshing_since = None
+                self.pull_amount = 0.0
+        if self.pull_amount <= 0.0 and self.refreshing_since is None and not self._section_loading():
+            self._dots_timer.stop()
+        o.update(self.dots_rect.toAlignedRect().adjusted(-4, -4, 4, 4))
+
+    def paint_dots(self, p, ink):
+        """Three looping dots in a large rounded frame, faded in with the pull."""
+        rect = self.dots_rect
+        loading = self._section_loading()
+        if rect.isEmpty() or (self.pull_amount <= 0.0 and self.refreshing_since is None and not loading):
+            return
+        p.save()
+        p.setOpacity(p.opacity() * (1.0 if self.refreshing_since is not None or loading else self.pull_amount))
+        _glass(p, self.owner, rect, "refresh-dots", rect.height() / 2, opacity=.9)
+        frame = QColor(ink)
+        frame.setAlpha(70)
+        p.setPen(QPen(frame, 1.0))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(rect.adjusted(.5, .5, -.5, -.5), rect.height() / 2, rect.height() / 2)
+        now = time.monotonic()
+        p.setPen(Qt.PenStyle.NoPen)
+        for index in range(3):
+            phase = math.sin(math.tau * (now * 1.4 - index * 0.18))
+            dot = QColor(ink)
+            dot.setAlphaF(0.30 + 0.70 * max(0.0, phase))
+            p.setBrush(dot)
+            centre = QPointF(rect.center().x() + (index - 1) * 12.0, rect.center().y() - 1.5 * max(0.0, phase))
+            p.drawEllipse(centre, 3.2, 3.2)
+        p.restore()
+
+    # --- rows appear in order, each once its cover is in ------------------
+    def _note_appearing(self, row, key, section, now, order):
+        """A row new to this section waits, invisible, until its cover has
+        arrived (or failed, or it has none); rows then appear strictly in
+        order, one after another. A row seen before shows at once."""
+        seen = self._shown_keys.setdefault(section, set())
+        begin = self._appear_at.get(key)
+        if key in seen and begin is None:
+            return order
+        effect = QGraphicsOpacityEffect(row)
+        if begin is None:
+            row.waiting_since = self._waiting_since.setdefault(key, now)
+            effect.setOpacity(0.0)
+        else:
+            row.appear_at = begin
+            effect.setOpacity(max(0.0, min(1.0, (now - begin) / APPEAR_S)))
+        row.setGraphicsEffect(effect)
+        if not self._appear_timer.isActive():
+            self._appear_timer.start()
+        return order + 1
+
+    def _cover_ready(self, row, now):
+        o, key = self.owner, row.collection.key
+        cover = row.cover
+        if not cover.loading or not cover.image.isNull() or key in getattr(o, "_artwork", {}):
+            return True                       # no cover to wait for, or it came (or failed)
+        if cover.visibleRegion().isEmpty():
+            return True                       # off screen: its cover is only asked for when seen
+        return now - getattr(row, "waiting_since", now) >= COVER_WAIT_S
+
+    def _tick_appear(self):
+        now, busy = time.monotonic(), False
+        section = self.section
+        seen = self._shown_keys.setdefault(section, set())
+        last = getattr(self, "_last_appear_at", 0.0)
+        blocked = False
+        for row in list(self.owner._rows):
+            key = row.collection.key
+            if getattr(row, "waiting_since", None) is not None:
+                if blocked or not self._cover_ready(row, now):
+                    blocked, busy = True, True      # strict order: later rows wait too
+                    continue
+                row.waiting_since = None
+                self._waiting_since.pop(key, None)
+                begin = max(now, last + APPEAR_STAGGER_S)
+                last = begin
+                row.appear_at = self._appear_at[key] = begin
+                seen.add(key)
+            begin = getattr(row, "appear_at", None)
+            if begin is None:
+                continue
+            effect = row.graphicsEffect()
+            amount = (now - begin) / APPEAR_S
+            if amount >= 1.0 or effect is None:
+                row.setGraphicsEffect(None)
+                row.appear_at = None
+                self._appear_at.pop(key, None)
+                continue
+            effect.setOpacity(max(0.0, amount))
+            busy = True
+        self._last_appear_at = last
+        if not busy:
+            self._appear_timer.stop()
 
     def toggle_refresh(self):
         """Ctrl+Shift+L: the refreshed library or the earlier one, for a side-by-side look."""
@@ -617,9 +763,14 @@ class LibraryVariantPresentation:
         values = o.collections
         if o.library_variant in {"sidebar", "compact"} and not o.search.text().strip():
             values = o._catalog_groups().get(self.section, ()) if self.section != "search" else ()
+        appear = (self.refresh and o.library_variant == "sidebar" and not o.search.text().strip()
+                  and o.isVisible() and not o.isMinimized())
+        now, order = time.monotonic(), 0
         for item in values:
             row = _VariantRow(item, o, card=o.library_variant == "sidebar" and o.width() >= 720
                               and not o.search.text().strip())
+            if appear:
+                order = self._note_appearing(row, item.key, self.section, now, order)
             row.show()
             o._rows.append(row)
 
@@ -796,8 +947,15 @@ class LibraryVariantPresentation:
             if mode == "pill":
                 pill_w = min(w - 32, island.PILL_WIDTH)
                 self.player = QRectF(round((w - pill_w) / 2), bar_top, pill_w, bar_h)
+                island.merged_bottom_radius = 0.0
             else:
-                self.player = QRectF(16, bar_top, w - 32, bar_h)
+                # The bar is the window's bottom edge: full width, flush with
+                # the frame, its bottom corners the window's own.
+                bar_top = h - 1 - bar_h
+                self.player = QRectF(1, bar_top, w - 2, bar_h)
+                island.merged_bottom_radius = RADIUS_WINDOW - 1
+                self.rail.setBottom(bar_top - 12)
+                self.pane.setBottom(bar_top - 12)
             slots = 6 if not rail_wide else 5
             key_h = min(RAIL_KEY, max(26, int((self.rail.height() - 28) / slots)))
             gap = min(4, max(0, int((self.rail.height() - 28 - key_h * slots) / slots)))
@@ -832,6 +990,7 @@ class LibraryVariantPresentation:
         elif variant == "sidebar":
             self.rule = QRectF()
             o.now_playing_island.set_bar_mode("tall")
+            o.now_playing_island.merged_bottom_radius = 0.0
             login = login_variant_layout("sidebar", w, h, (True,) * 4)
             bar_top = h - o.now_playing_island.HEIGHT - 16
             self.rail = QRectF(login.rail)
@@ -905,19 +1064,6 @@ class LibraryVariantPresentation:
                 row._layout()
             stride = REFRESH_STRIDE if refreshed else 76
             top += math.ceil(len(o._rows) / columns) * (side + 64) if wide else len(o._rows) * stride
-            following = (SECTION_ORDER[SECTION_ORDER.index(self.section) + 1]
-                         if refreshed and self.section in SECTION_ORDER[:-1] and o._rows else "")
-            if following:
-                from local.ui_theme import active_tokens
-                self.next_hint.setText(f"继续下滑 · {SECTIONS[following]}")
-                self.next_hint.setFont(_entry_font(11))
-                self.next_hint.setStyleSheet(
-                    f"color:{refresh_tones(active_tokens(o).dark)['muted'].name()};background:transparent;")
-                self.next_hint.setGeometry(0, top + 6, cw, 30)
-                self.next_hint.show()
-                top += 40
-            else:
-                self.next_hint.hide()
         elif refreshed:
             for row in o._rows:
                 row.setGeometry(0, top, cw, REFRESH_ROW)
@@ -933,6 +1079,12 @@ class LibraryVariantPresentation:
                         or (o._loading and not has_items and not o._catalog_loading))
         if o._search_waiting_empty() or (query and o._error and not has_items):
             skeleton = False
+        if refreshed and not query:
+            # No skeleton: a playlist shows once its cover is in, in order;
+            # while the section loads, the dots in its heading run.
+            skeleton = False
+            if self._section_loading() and not self._dots_timer.isActive():
+                self._dots_timer.start()
         o._catalog_skeleton.setVisible(skeleton)
         skeleton_height = 216
         if variant == "sidebar":
@@ -964,8 +1116,12 @@ class LibraryVariantPresentation:
         self.sync_status_pulse()
         if refreshed:
             self._sync_plate(False)
+            self.dots_rect = QRectF(self.pane.right() - 20 - 64, self.pane.y() + 14, 64, 30)
+            self.heading_rule = QRectF(self.pane.x() + 16, scroll_rect.y() - 1, self.pane.width() - 32, 1)
         else:
-            self.next_hint.hide()
+            self.dots_rect = QRectF()
+            self.heading_rule = QRectF()
+        self._scrolled()
 
     def _progress(self, p, rect, *, times=True):
         track = self.owner._now_playing
@@ -1042,17 +1198,17 @@ class LibraryVariantPresentation:
             _type(p, QRectF(24, 9, o.width() - 120, 28), "音乐库", 20, ink, QFont.Weight.Bold)
             _type(p, QRectF(25, 36, o.width() - 120, 18), name, 11, fresh["muted"])
             if not self.rail.isEmpty():
-                _glass(p, o, self.rail, "rail", 18, opacity=.55)
+                _glass(p, o, self.rail, "rail", RADIUS_PLANE, opacity=.55)
             if not self.pane.isEmpty():
-                _glass(p, o, self.pane, "content", 20)
+                _glass(p, o, self.pane, "content", RADIUS_PLANE)
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setPen(QPen(fresh["edge"], 1))
-                p.drawRoundedRect(self.pane.adjusted(.5, .5, -.5, -.5), 20, 20)
+                p.drawRoundedRect(self.pane.adjusted(.5, .5, -.5, -.5), RADIUS_PLANE, RADIUS_PLANE)
                 p.setPen(Qt.PenStyle.NoPen)
             if not self.plate.isEmpty():
                 from local.row_states import paint_row_state
-                _glass(p, o, self.plate, "selection", 11, active=True, opacity=.9)
-                paint_row_state(p, self.plate, 11, dark=dark, selected=True)
+                _glass(p, o, self.plate, "selection", RADIUS_KEY, active=True, opacity=.9)
+                paint_row_state(p, self.plate, RADIUS_KEY, dark=dark, selected=True)
             if not self.rule.isEmpty():
                 p.setBrush(fresh["rule"])
                 p.drawRect(self.rule)
@@ -1078,6 +1234,11 @@ class LibraryVariantPresentation:
             title_rect = QRectF(self.pane.x() + 20, self.pane.y() + 12, self.pane.width() - 40, 34)
             if heading:
                 _type(p, title_rect, heading, 22, ink, QFont.Weight.Bold)
+            self.paint_dots(p, ink)
+            if not self.heading_rule.isEmpty() and not page_open and self._heading_layered():
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(fresh["rule"])
+                p.drawRect(self.heading_rule)
             if heading and count and not o._catalog_skeleton.isVisible():
                 font = _entry_font(22)
                 font.setWeight(QFont.Weight.Bold)

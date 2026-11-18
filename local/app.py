@@ -403,8 +403,10 @@ class LocalIslandApp:
         from local.motion_cover_playback import MotionCoverSession, install_motion_cover
         def _netease_dynamic_cover(song_id, service=self.online_music):
             from api.online_music import OnlineMusicError
+            from api.online_music_bridge import background_requests
             try:
-                return service.dynamic_cover("netease", song_id)
+                with background_requests():
+                    return service.dynamic_cover("netease", song_id)
             except OnlineMusicError as error:
                 if error.code in {"auth_required", "unsupported", "unavailable"}:
                     return ""          # no account: a clear miss, Apple still answers

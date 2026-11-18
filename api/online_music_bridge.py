@@ -17,6 +17,40 @@ from api.online_music import OnlineMusicError
 from api.online_music_diagnostics import current_login_trace, login_phase, login_request_cancelled, record_login_phase
 
 
+_REQUEST_PRIORITY = threading.local()
+
+
+class background_requests:
+    """Mark this thread's bridge requests as background work.
+
+    The bridge answers one request at a time. Background requests (prefetch,
+    later pages, covers, lyric enrichment) step aside whenever a foreground
+    request (the song the listener chose, the page they opened) is waiting,
+    so a click is never queued behind a pile of prefetches.
+    """
+
+    def __enter__(self):
+        self._previous = getattr(_REQUEST_PRIORITY, "background", False)
+        _REQUEST_PRIORITY.background = True
+        return self
+
+    def __exit__(self, *exc):
+        _REQUEST_PRIORITY.background = self._previous
+        return False
+
+
+def in_background(action):
+    """``action`` wrapped so that its bridge requests run as background work."""
+    def run(*args, **kwargs):
+        with background_requests():
+            return action(*args, **kwargs)
+    return run
+
+
+def request_is_background() -> bool:
+    return bool(getattr(_REQUEST_PRIORITY, "background", False))
+
+
 class NodeOnlineMusicBackend:
     _packages = {"netease": "@neteasecloudmusicapienhanced/api", "qq": "@yakult-green-tea/qq-music-api", "kugou": "kugoumusicapi"}
     _max_line_bytes = 8 * 1024 * 1024
@@ -33,6 +67,8 @@ class NodeOnlineMusicBackend:
         self.node_path = str(configured_node or (runtime / "node.exe" if (runtime / "node.exe").is_file() else shutil.which("node") or ""))
         self.timeout_seconds = max(1.0, min(float(timeout_seconds), 45.0))
         self._lock = threading.RLock()
+        self._foreground_waiting = 0
+        self._priority_lock = threading.Lock()
         self._lifecycle_lock = threading.RLock()
         self._active_request: tuple[subprocess.Popen, str, threading.Event] | None = None
         self._cancellation_epoch = 0
@@ -219,7 +255,7 @@ class NodeOnlineMusicBackend:
             cancellation_epoch = self._cancellation_epoch
         deadline = min(time.monotonic() + self.timeout_seconds, trace.deadline) if trace else time.monotonic() + self.timeout_seconds
         with login_phase("auth_queue"):
-            acquired = self._lock.acquire(timeout=max(0., deadline - time.monotonic()))
+            acquired = self._acquire_bridge(deadline, background=request_is_background())
         if not acquired:
             raise OnlineMusicError("timeout", source_id, "登录请求排队超时，请重试", stage="auth_queue", category="timeout")
         process = None
@@ -301,6 +337,30 @@ class NodeOnlineMusicBackend:
                 if self._active_request and self._active_request[0] is process:
                     self._active_request = None
             self._lock.release()
+
+    def _acquire_bridge(self, deadline: float, *, background: bool) -> bool:
+        """The bridge lock; a background request waits while a foreground one does."""
+        if not background:
+            with self._priority_lock:
+                self._foreground_waiting += 1
+            try:
+                return self._lock.acquire(timeout=max(0., deadline - time.monotonic()))
+            finally:
+                with self._priority_lock:
+                    self._foreground_waiting -= 1
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if self._foreground_waiting:
+                time.sleep(min(.02, remaining))
+                continue
+            if self._lock.acquire(timeout=min(.05, remaining)):
+                if not self._foreground_waiting:
+                    return True
+                # A foreground request arrived while this one took the lock.
+                self._lock.release()
+                time.sleep(.002)
 
     def _stop_process(self, *, expected_process=None) -> None:
         with self._lifecycle_lock:

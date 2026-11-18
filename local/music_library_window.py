@@ -579,6 +579,8 @@ class _CatalogSkeleton(QWidget):
 
 class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     retryRequested = Signal()
+    # A pull past the top of a section's list: reload that section only.
+    sectionRefreshRequested = Signal(str)
     backRequested = Signal()
     sourceSwitchRequested = Signal()
     logoutRequested = Signal()

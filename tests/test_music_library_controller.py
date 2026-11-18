@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from PySide6.QtCore import QObject, QRect, Signal
@@ -1634,3 +1635,17 @@ class OwnedControllerHandoffTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecommendedOrderTests(unittest.TestCase):
+    def test_order_differs_per_launch_and_holds_within_one(self):
+        rows = tuple(SimpleNamespace(key=f"playlist:netease:{i}") for i in range(30))
+        first = MusicLibraryController.__new__(MusicLibraryController)
+        once = first._recommended_order(rows)
+        self.assertEqual(once, first._recommended_order(tuple(reversed(rows))))   # cached vs fresh: same order
+        self.assertEqual(sorted(r.key for r in once), sorted(r.key for r in rows))
+        orders = set()
+        for _ in range(5):                                  # five launches
+            launch = MusicLibraryController.__new__(MusicLibraryController)
+            orders.add(tuple(r.key for r in launch._recommended_order(rows)))
+        self.assertGreater(len(orders), 1)

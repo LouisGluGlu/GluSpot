@@ -177,7 +177,13 @@ class LibraryLayoutVariantTests(unittest.TestCase):
                             self.assertGreater(w.search.width(), 44)
                             self.assertFalse(w.search.geometry().intersects(w.now_playing_button.geometry()))
                         self.assertTrue(w.progress_button.isHidden())
-                        self.assertEqual(w._catalog_skeleton.isVisible(), state == "loading")
+                        if variant == "sidebar":
+                            # No skeleton in the refreshed sidebar: its heading's dots run instead.
+                            self.assertFalse(w._catalog_skeleton.isVisible())
+                            if state == "loading":
+                                self.assertTrue(view._dots_timer.isActive())
+                        else:
+                            self.assertEqual(w._catalog_skeleton.isVisible(), state == "loading")
                         self.assertEqual(w.empty_action.isVisible(), state == "empty")
                         self.assertEqual(w.now_playing_button.isVisible(), state == "loaded" and variant != "sidebar")
                         self.assertEqual(w.now_playing_island.isVisible(), variant == "sidebar")
@@ -391,7 +397,13 @@ class LibraryLayoutVariantTests(unittest.TestCase):
             island = w.now_playing_island
             self.assertEqual(island.bar_mode, mode)
             self.assertEqual(island.height(), island.bar_height(mode))
-            self.assertLessEqual(island.geometry().bottom(), w.height() - 14)
+            if mode == "pill":
+                self.assertLessEqual(island.geometry().bottom(), w.height() - 14)
+            else:
+                # The bar is the window's bottom edge, side to side.
+                self.assertEqual((island.geometry().left(), island.geometry().bottom()), (1, w.height() - 2))
+                self.assertEqual(island.width(), w.width() - 2)
+                self.assertGreater(island.merged_bottom_radius, 0)
             island.grab()
             if mode == "pill":
                 self.assertEqual(island.music_button_rects, {})
@@ -405,24 +417,83 @@ class LibraryLayoutVariantTests(unittest.TestCase):
                 controls = min(r.left() for r in island.music_button_rects.values())
                 self.assertLess(island.music_cover_rect.right(), controls)
 
-    def test_wheel_past_the_end_of_a_section_turns_to_the_next(self):
-        from local.library_layout_variants import PULL_TO_NEXT
+    def test_pull_past_the_top_shows_the_dots_and_reloads_only_that_section(self):
+        from local.library_layout_variants import PULL_TO_REFRESH, REFRESH_MIN_S
         w = self.prepare("sidebar", (433, 550))
         view = w._variant_view
-        view.select_section("for_you")
+        view.select_section("recommended")
         self.app.processEvents()
         self.assertTrue(view.pull_active())
-        self.assertTrue(view.next_hint.isVisible())
-        self.assertIn("推荐歌单", view.next_hint.text())
-        view._pull.pull = 0
-        view.step_section(1)
-        self.assertEqual(view.section, "recommended")
-        self.assertTrue(view.buttons["recommended"].isChecked())
-        view.step_section(-1)
-        self.assertEqual(view.section, "for_you")
-        view.step_section(-1)                       # nothing before the first section
-        self.assertEqual(view.section, "for_you")
-        self.assertGreater(PULL_TO_NEXT, 120)       # more than one wheel notch
+        self.assertFalse(view.dots_rect.isEmpty())
+        self.assertTrue(view.pane.contains(view.dots_rect))
+        reloads = QSignalSpy(w.sectionRefreshRequested)
+        view.set_pull(.5)
+        self.assertEqual(view.pull_amount, .5)
+        self.assertEqual(reloads.count(), 0)
+        view.start_refresh()
+        self.assertEqual(reloads.count(), 1)
+        self.assertEqual(reloads.at(0), ["recommended"])
+        self.assertIsNotNone(view.refreshing_since)
+        view.start_refresh()                             # one reload at a time
+        self.assertEqual(reloads.count(), 1)
+        view.refreshing_since -= REFRESH_MIN_S + .1      # and the section is not loading
+        view._tick_dots()
+        self.assertIsNone(view.refreshing_since)
+        self.assertEqual(view.pull_amount, 0.0)
+        self.assertGreater(PULL_TO_REFRESH, 120)         # more than one wheel notch
+
+    def test_a_row_shows_once_its_cover_is_in_and_rows_keep_their_order(self):
+        from local.library_layout_variants import APPEAR_STAGGER_S
+        w = self.prepare("sidebar", (433, 550))
+        view = w._variant_view
+        view._shown_keys.clear()
+        view._appear_at.clear()
+        view._waiting_since.clear()
+        view.select_section("recommended")
+        self.app.processEvents()
+        rows = list(w._rows)
+        self.assertTrue(rows)
+        self.assertTrue(all(getattr(row, "waiting_since", None) is not None for row in rows))
+        self.assertTrue(all(row.graphicsEffect() is not None and row.graphicsEffect().opacity() == 0.0
+                            for row in rows))
+        # The first row's cover has not come yet: nothing after it shows either.
+        first = rows[0]
+        w._artwork.pop(first.collection.key, None)
+        first.cover.loading, first.cover.image = True, QImage()
+        view._tick_appear()
+        self.assertTrue(all(getattr(row, "appear_at", None) is None for row in rows))
+        # It arrives: rows appear in order, one after another.
+        w.set_artwork(first.collection.key, self.art)
+        view._tick_appear()
+        starts = [row.appear_at for row in rows if getattr(row, "appear_at", None) is not None]
+        self.assertEqual(len(starts), len(rows))
+        self.assertEqual(starts, sorted(starts))
+        if len(starts) > 1:
+            self.assertAlmostEqual(starts[1] - starts[0], APPEAR_STAGGER_S, delta=.01)
+        # Coming back to a section that has appeared shows it at once.
+        for row in rows:
+            row.appear_at = 0.0
+        view._tick_appear()
+        view.select_section("personal")
+        view.select_section("recommended")
+        self.assertTrue(all(row.graphicsEffect() is None for row in w._rows))
+
+    def test_scrolled_list_fades_under_a_layered_heading(self):
+        w = self.prepare("sidebar", (433, 550))
+        view = w._variant_view
+        bar = w.scroll.verticalScrollBar()
+        bar.setRange(0, 400)
+        bar.setValue(0)
+        self.assertIsNone(w.scroll.graphicsEffect())             # at the top nothing changes
+        self.assertFalse(view.heading_rule.isEmpty())
+        self.assertLessEqual(view.heading_rule.bottom(), w.scroll.geometry().top())
+        bar.setValue(120)
+        effect = w.scroll.graphicsEffect()
+        self.assertIsNotNone(effect)
+        self.assertTrue(getattr(effect, "_gluspot_heading", False))
+        self.assertTrue(view._heading_layered())
+        bar.setValue(0)
+        self.assertIsNone(w.scroll.graphicsEffect())
 
     def test_selection_plate_slides_to_the_chosen_section(self):
         w = self.prepare("sidebar")
@@ -555,7 +626,8 @@ class LibraryLayoutVariantTests(unittest.TestCase):
         # The cover sits the same distance from the top, bottom and left edges.
         cover = island.music_cover_rect
         self.assertAlmostEqual(cover.top() - 1, island.height() - 1 - cover.bottom(), delta=1)
-        self.assertAlmostEqual(cover.left() - 1, cover.top() - 1, delta=1)
+        # Merged into the bottom edge, the cover lines up with the rail.
+        self.assertAlmostEqual(island.x() + cover.left(), w._variant_view.rail.x(), delta=1.5)
 
     def test_hovered_and_selected_rows_never_share_a_colour(self):
         from local.row_states import hover_colors, selected_color
@@ -577,7 +649,7 @@ class LibraryLayoutVariantTests(unittest.TestCase):
             if island.bar_mode == "pill":
                 self.assertAlmostEqual(view.player.center().x(), w.width() / 2, delta=1)
             else:
-                self.assertEqual((view.player.left(), view.player.right()), (16, w.width() - 16))
+                self.assertEqual((view.player.left(), view.player.right()), (1, w.width() - 1))
             self.assertLess(view.rail_source.geometry().bottom(), view.player.top())
             self.assertTrue(view.rail.contains(QRectF(view.rail_source.geometry())))
             buttons = tuple(view.buttons.values())
@@ -642,7 +714,9 @@ class LibraryLayoutVariantTests(unittest.TestCase):
                 w.more_button.click()
                 self.assertEqual(requested.count(), 2)
                 w.set_catalog_loading("recommended", True)
-                self.assertTrue(w._catalog_skeleton.isVisible())
+                # The refreshed sidebar shows the skeleton only on a section's
+                # first load; a later page fills in row by row.
+                self.assertEqual(w._catalog_skeleton.isVisible(), variant != "sidebar")
                 self.assertFalse(w.more_button.isVisible())
                 self.assertTrue(w.search.isEnabled())
                 w.set_catalog_loading("recommended", False)
@@ -656,7 +730,7 @@ class LibraryLayoutVariantTests(unittest.TestCase):
         self.assertFalse(w._catalog_skeleton.isVisible())
         self.assertFalse(w.more_button.isVisible())
         w._variant_view.select_section("personal")
-        self.assertTrue(w._catalog_skeleton.isVisible())
+        self.assertFalse(w._catalog_skeleton.isVisible())      # it already has rows
         w.set_catalog_loading("personal", False)
         self.assertTrue(w.more_button.isVisible())
         w._variant_view.select_section("recommended")

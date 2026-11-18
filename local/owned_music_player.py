@@ -1825,7 +1825,8 @@ class OwnedMusicPlayer(QObject):
                 return None
             self._playlist_page_songs(page, context.source_id)
             return page
-        if not self.prefetch_tasks.submit(token, fetch):
+        from api.online_music_bridge import in_background
+        if not self.prefetch_tasks.submit(token, in_background(fetch)):
             context.request = None
             self._playlist_page_failed(context, "busy")
             return False
@@ -2605,9 +2606,10 @@ class OwnedMusicPlayer(QObject):
         if tasks is None:
             tasks = self._apple_sea_tasks = MusicTasks(self, worker_count=1, task_timeout_seconds=240.0)
             tasks.completed.connect(self._apple_sea_completed)
+        from api.online_music_bridge import in_background
         accepted = tasks.submit(("apple_sea", self._epoch, key, track_id),
-                                lambda: apple_sea_source.borrow(self.service, self.stream_cache, song,
-                                                                cancelled=lambda: self._closed))
+                                in_background(lambda: apple_sea_source.borrow(self.service, self.stream_cache, song,
+                                                                              cancelled=lambda: self._closed)))
         if accepted:
             pending.add(key)
         return accepted
@@ -2974,7 +2976,8 @@ class OwnedMusicPlayer(QObject):
                 return None
             return self.stream_cache.prepare(self._resolve_stream(song), cancelled=cancelled)
 
-        if not self.download_tasks.submit(token, prepare):
+        from api.online_music_bridge import in_background
+        if not self.download_tasks.submit(token, in_background(prepare)):
             self._audio_prefetch_request = None
             if song.media_kind == "dj_voice" and not self._dj_overlay_voices:
                 self._set_dj_presentation("failed", upcoming[0])
@@ -3073,7 +3076,8 @@ class OwnedMusicPlayer(QObject):
                 return None
             return self._prepare_audio(self._resolve_stream(missing), cancelled=cancelled)
 
-        if not self.download_tasks.submit(token, prepare):
+        from api.online_music_bridge import in_background
+        if not self.download_tasks.submit(token, in_background(prepare)):
             if not self._closed and self._dj_prefetch_requests.get(missing) == token:
                 del self._dj_prefetch_requests[missing]
                 self._dj_prefetch_timer.start()
@@ -3194,7 +3198,8 @@ class OwnedMusicPlayer(QObject):
 
         # Reuse the bounded low-priority catalog/prefetch workers. A slow
         # backup lookup cannot occupy either foreground stream/lyric worker.
-        if not self.prefetch_tasks.submit(token, search):
+        from api.online_music_bridge import in_background
+        if not self.prefetch_tasks.submit(token, in_background(search)):
             self._lyrics_enrichment_pending = None
             return False
         return True
@@ -3641,10 +3646,11 @@ class OwnedMusicPlayer(QObject):
         token = ("fm_prefetch", epoch, catalog_epoch, source, generation, self._fm_prefetch_serial)
         self._fm_prefetch_request = token
         self._fm_prefetch_pending = True
-        if not self.prefetch_tasks.submit(token,
+        from api.online_music_bridge import in_background
+        if not self.prefetch_tasks.submit(token, in_background(
                 lambda: fetch() if not self._closed and epoch == self._queue_epoch
                 and catalog_epoch == self._catalog_epoch and generation == self._fm_generation
-                and self._fm_prefetch_request == token else ()):
+                and self._fm_prefetch_request == token else ())):
             self._fm_prefetch_pending = False
             self._fm_prefetch_request = None
             if dj:

@@ -455,6 +455,7 @@ class TaskbarDropOverlay(QWidget):
             self.hide()
             return
         self.corner_radius = float(corner_radius)
+        self._magnet_painted = None
         self.drop_rects = []
         for rect in zones:
             local = QRectF(rect)
@@ -481,10 +482,20 @@ class TaskbarDropOverlay(QWidget):
         self.magnet_caption = str(caption or "")
         self.magnet_pinned = bool(pinned)
         self.magnet_radius = 18.0 if radius is None else max(0.0, float(radius))
-        self.setGeometry(screen.toAlignedRect())
-        self.show()
-        self._raise_as_topmost()
-        self.update()
+        # A drag calls this on every mouse move. Re-placing, re-showing and
+        # re-raising a full-screen layer each time made it flicker: only
+        # what changed is touched, and the layer is raised when it appears.
+        geometry = screen.toAlignedRect()
+        if self.geometry() != geometry:
+            self.setGeometry(geometry)
+        if not self.isVisible():
+            self.show()
+            self._raise_as_topmost()
+        state = (QRectF(local), self.magnet_caption, round(self.magnet_radius, 2),
+                 round(float(getattr(self, "magnet_opacity", 1.0) or 0.0), 3))
+        if state != getattr(self, "_magnet_painted", None):
+            self._magnet_painted = state
+            self.update()
 
     def paintEvent(self, event):
         magnet = QRectF(getattr(self, "magnet_local", QRectF()))
@@ -7947,15 +7958,16 @@ class IslandStackVisual(QWidget):
     def _remember_magnet_drag_origin(self) -> None:
         """Keep the mode the drag started in. Pulling off a bar sets Free mid-drag."""
         mode = self._location_mode_token()
-        self._magnet_drag_origin = mode if mode in {"finder", "tasker"} else ""
+        # Tasker has its own taskbar recognition; only Finder uses the magnet.
+        self._magnet_drag_origin = mode if mode == "finder" else ""
 
     def _magnet_drag_enabled(self) -> bool:
         """The tile and the snap exist only in Finder and Tasker. Free never snaps."""
         if bool(getattr(self, "dragging", False)) or bool(getattr(self, "_magnet_spring_active", False)):
             origin = str(getattr(self, "_magnet_drag_origin", "") or "")
-            if origin in {"finder", "tasker"}:
+            if origin == "finder":
                 return True
-        return self._location_mode_token() in {"finder", "tasker"}
+        return self._location_mode_token() == "finder"
 
     def _note_magnet_during_drag(self) -> None:
         if not bool(getattr(self, "dragging", False)) or not self._magnet_drag_enabled():
@@ -7971,11 +7983,7 @@ class IslandStackVisual(QWidget):
             origin = str(getattr(self, "_magnet_drag_origin", "") or "")
             if origin in {"finder", "tasker"}:
                 mode = origin
-        if mode == "finder":
-            return "finder"
-        if mode == "tasker":
-            return "taskbar"
-        return ""
+        return "finder" if mode == "finder" else ""
 
     def _magnet_tile_rect(self) -> QRectF:
         from local.spring_motion import magnet_tile_rect
@@ -7993,7 +8001,9 @@ class IslandStackVisual(QWidget):
             bar = QRectF(getattr(self, "finder_bar_rect", QRectF()))
         elif mode == "taskbar":
             bar = QRectF(self._bottom_taskbar_rect_for_screen(screen))
-        return magnet_tile_rect(geo, mode=mode, bar=bar)
+        island = self._current_main_global_rect()
+        near = island.center() if not island.isNull() else None
+        return magnet_tile_rect(geo, mode=mode, bar=bar, near=near)
 
     def _magnet_screen_rect(self) -> QRectF:
         probe = self.mapToGlobal(QPoint(max(1, self.width() // 2), max(1, self.height() // 2)))
@@ -8028,49 +8038,72 @@ class IslandStackVisual(QWidget):
         overlap = magnet_overlap(island, tile)
         self._magnet_overlap = overlap
         latch.observe(island.x(), island.y(), overlap, now)
-        if not latch.pinned:
+        if overlap <= 0.0:
+            # Only leaving the tile brings a faded tile back. A small move
+            # while still over it used to restart the dwell and the fade
+            # again and again: the tile flickered.
             self._magnet_tile_dismissed = False
-        elif getattr(self, "_magnet_tile_dismissed", False):
-            self._hide_magnet_overlay()
-            return
         self._sync_magnet_overlay(tile, latch.caption(), latch.pinned, now)
 
+    MAGNET_HINTS = {"near": "靠近吸附", "armed": "松手吸附", "pinned": "松手固定"}
+
     def _sync_magnet_overlay(self, tile: QRectF, caption: str, pinned: bool, now: float | None = None) -> None:
-        from local.spring_motion import magnet_fade_opacity
-        screen = self._magnet_screen_rect()
-        if screen.isNull() or tile.isNull():
+        """The island itself shows what a release will do: a fixed-width
+        label over it, no tile on the screen (the tile layer flickered)."""
+        if tile.isNull():
             self._hide_magnet_overlay()
             return
-        overlay = getattr(self, "taskbar_drop_overlay", None)
-        if overlay is None:
-            overlay = TaskbarDropOverlay()
-            self.taskbar_drop_overlay = overlay
-        if pinned:
-            # The tile fades out. It does not change color or grow a stay label.
-            if getattr(overlay, "magnet_fade_started", None) is None:
-                overlay.magnet_fade_started = time.monotonic() if now is None else now
-            opacity = magnet_fade_opacity((time.monotonic() if now is None else now) - float(overlay.magnet_fade_started))
-            caption = ""
+        latch = getattr(self, "_magnet_latch", None)
+        overlap = float(getattr(self, "_magnet_overlap", 0.0) or 0.0)
+        if pinned or (latch is not None and latch.pinned):
+            state = "pinned"
+        elif caption == "松手吸附" or (latch is not None and latch.armed):
+            state = "armed"
+        elif overlap > 0.0:
+            state = "near"
         else:
-            overlay.magnet_fade_started = None
-            opacity = 1.0
-        if pinned and opacity <= 0.01:
-            self._magnet_tile_dismissed = True
-            self._hide_magnet_overlay()
+            state = ""
+        if state != getattr(self, "_magnet_hint", ""):
+            self._magnet_hint = state
+            self.update()
+
+    def _paint_magnet_hint(self) -> None:
+        state = str(getattr(self, "_magnet_hint", "") or "")
+        text = self.MAGNET_HINTS.get(state, "")
+        if not text:
             return
-        overlay.magnet_opacity = opacity
-        previous = (str(getattr(overlay, "magnet_caption", "")), round(float(getattr(overlay, "magnet_opacity", 1.0)), 3),
-                    QRectF(getattr(overlay, "magnet_local", QRectF())))
-        from local.spring_motion import magnet_tile_radius
-        overlay.show_magnet(screen, tile, caption, False, radius=magnet_tile_radius(tile, mode=self._magnet_mode()))
-        if previous == (overlay.magnet_caption, round(opacity, 3), QRectF(overlay.magnet_local)):
+        island = self._current_main_global_rect()
+        if island.isNull():
             return
+        corner = self.mapFromGlobal(QPoint(round(island.x()), round(island.y())))
+        rect = QRectF(corner.x(), corner.y(), island.width(), island.height())
+        fill = {"near": QColor(46, 48, 56, 225), "armed": QColor(37, 112, 214, 235),
+                "pinned": QColor(24, 78, 160, 240)}[state]
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            radius = min(rect.height() / 2.0, self._u(22.0))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            painter.drawRoundedRect(rect.adjusted(1.0, 1.0, -1.0, -1.0), radius, radius)
+            font = painter.font()
+            font.setPixelSize(max(12, round(min(rect.height() * 0.32, self._u(16.0)))))
+            font.setWeight(QFont.Weight.DemiBold)
+            painter.setFont(font)
+            painter.setPen(QColor(255, 255, 255, 240))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+        finally:
+            painter.end()
 
     def _hide_magnet_overlay(self) -> None:
+        if getattr(self, "_magnet_hint", ""):
+            self._magnet_hint = ""
+            self.update()
         overlay = getattr(self, "taskbar_drop_overlay", None)
         if overlay is None:
             return
         overlay.magnet_local = QRectF()
+        overlay._magnet_painted = None
         overlay.magnet_caption = ""
         overlay.magnet_pinned = False
         overlay.magnet_opacity = 1.0
@@ -11696,6 +11729,8 @@ class IslandStackVisual(QWidget):
         self._island_lyric_frame_phase = None
         try:
             self._paint_island_frame(event)
+            if getattr(self, "_magnet_hint", ""):
+                self._paint_magnet_hint()
         finally:
             self._island_lyric_frame_at = None
             self._island_lyric_frame_phase = None

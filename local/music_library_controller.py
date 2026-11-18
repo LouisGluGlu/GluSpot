@@ -46,6 +46,9 @@ class MusicLibraryController(QObject):
         self.art_tasks.completed.connect(self._art_completed)
         self.window.sourceSwitchRequested.connect(self.switch_source)
         self.window.retryRequested.connect(self._retry_current_library)
+        refresh = getattr(self.window, "sectionRefreshRequested", None)
+        if refresh is not None:
+            refresh.connect(self.refresh_section)
         self.window.backRequested.connect(self.back)
         self.window.logoutRequested.connect(self.logout)
         self.window.collectionRequested.connect(self.play_collection)
@@ -851,6 +854,35 @@ class MusicLibraryController(QObject):
             return self.service.recommended_playlists(source, limit=60, offset=0, shelf="for_you")
         self.tasks.submit(("for_you_catalog", epoch, 0), fetch)
 
+    def _recommended_order(self, rows):
+        """A different order every launch (and every pull to refresh), the
+        same one for the rest of it, so the cached list and the fresh one
+        never shuffle against each other."""
+        import hashlib
+        salt = getattr(self, "_recommended_salt", None)
+        if salt is None:
+            import secrets
+            salt = self._recommended_salt = secrets.token_hex(8)
+        return tuple(sorted(rows, key=lambda row: hashlib.sha1((salt + row.key).encode("utf-8")).digest()))
+
+    def refresh_section(self, section):
+        """Pull to refresh: reload one section in place, keeping what shows."""
+        if self._closed or not self._source or self._logout_pending or self._query:
+            return False
+        if section == "recommended":
+            import secrets
+            self._recommended_salt = secrets.token_hex(8)
+            self._recommended_offset = 0
+            self._recommended_replace = True
+            self._recommended_pending = False
+            self._fetch_recommended()
+            return True
+        if section == "personal" and not self._catalog_pending:
+            self._catalog_offset = 0
+            self._fetch_catalog_page()
+            return True
+        return False
+
     def _fetch_recommended(self):
         if self._recommended_pending or self._source not in {"netease", "qq", "apple_music"}:
             return
@@ -902,7 +934,7 @@ class MusicLibraryController(QObject):
                         self._collections = self._rows(catalog.items)
                     if recommended is not None and recommended.items:
                         self._collections = self._append_unique(self._collections,
-                                                               self._rows(recommended.items, group="recommended"))
+                                                               self._recommended_order(self._rows(recommended.items, group="recommended")))
                     if self._collections:
                         self.window.set_collections(self._collections)
                         self._prefetch_catalog_artwork()
@@ -950,8 +982,13 @@ class MusicLibraryController(QObject):
                 return
             self._recommended_retry = False
             self._finish_catalog_retry("recommended")
-            rows = self._rows((p for p in result.items if isinstance(p, OnlinePlaylist) and p.source_id == self._source), "recommended")
-            self._collections = self._append_unique(self._collections, rows)
+            rows = self._recommended_order(self._rows(
+                (p for p in result.items if isinstance(p, OnlinePlaylist) and p.source_id == self._source), "recommended"))
+            if getattr(self, "_recommended_replace", False) and request == 0:
+                self._recommended_replace = False
+                self._collections = tuple(row for row in self._collections if row.group != "recommended") + tuple(rows)
+            else:
+                self._collections = self._append_unique(self._collections, rows)
             self._recommended_offset = result.next_offset
             self._recommended_has_more = bool(result.has_more and result.next_offset > request)
             if not self._query:
@@ -1134,9 +1171,10 @@ class MusicLibraryController(QObject):
             return
         epoch = self._epoch
         self._recommendation_art_pending.add(kind)
-        if not self.tasks.submit(("recommendation_cover", epoch, kind),
+        from api.online_music_bridge import in_background
+        if not self.tasks.submit(("recommendation_cover", epoch, kind), in_background(
                 lambda: self.service.recommendation_artwork(kind, "netease")
-                if not self._closed and epoch == self._epoch else ""):
+                if not self._closed and epoch == self._epoch else "")):
             self._recommendation_art_pending.discard(kind)
             self._retry_recommendation_cover_later(kind)
 
@@ -1431,6 +1469,10 @@ class MusicLibraryController(QObject):
             if row.kind == "daily":
                 return tuple(self.service.daily_recommendations(source))
             return self.service.playlist_tracks(source, row.playlist_id, limit=100, offset=offset)
+        if offset:
+            # Later pages fill in behind what the listener does next.
+            from api.online_music_bridge import in_background
+            fetch = in_background(fetch)
         if not self.tasks.submit(("page_tracks", epoch, row.key, row, offset), fetch):
             self.window.set_playlist_tracks(row, self._page_rows, error="暂时无法载入歌曲，请稍后再试")
 

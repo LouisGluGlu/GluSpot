@@ -173,7 +173,8 @@ class ComplaintRestoreTests(unittest.TestCase):
             visual.location_mode = "finder"
             self.assertTrue(visual._magnet_drag_enabled())
             visual.location_mode = "tasker"
-            self.assertTrue(visual._magnet_drag_enabled())
+            # Tasker has its own taskbar recognition: no magnet there.
+            self.assertFalse(visual._magnet_drag_enabled())
             visual.location_mode = "free"
             self.assertFalse(visual._magnet_drag_enabled())
         finally:
@@ -252,7 +253,7 @@ class ComplaintRestoreTests(unittest.TestCase):
         visual = IslandStackVisual()
         try:
             visual.finder_bar_rect = QRectF(*mapped)
-            for mode, enabled in (("finder", True), ("tasker", True), ("free", False), ("top", False)):
+            for mode, enabled in (("finder", True), ("tasker", False), ("free", False), ("top", False)):
                 visual._magnet_drag_origin = ""
                 visual.dragging = False
                 visual._magnet_spring_active = False

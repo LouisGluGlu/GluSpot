@@ -778,8 +778,14 @@ class RectSpring:
         self.active = False
 
 
-def magnet_tile_rect(screen: QRectF, *, mode: str, bar: QRectF | None = None) -> QRectF:
-    """Finder: a slot inside the Finder bar. Taskbar: a slot on the taskbar.
+TASKBAR_SLOTS = ((0.30, 0.40), (0.60, 0.70))   # share of the taskbar's width, left to right
+
+
+def magnet_tile_rect(screen: QRectF, *, mode: str, bar: QRectF | None = None,
+                     near: QPointF | None = None) -> QRectF:
+    """Finder: a slot inside the Finder bar. Taskbar: one of two slots on the
+    taskbar, at 30-40% and 60-70% of its width (either side of the centred
+    task icons), the one nearer ``near``.
 
     Free placement does not use this rect. The island itself is not the tile.
     """
@@ -789,6 +795,19 @@ def magnet_tile_rect(screen: QRectF, *, mode: str, bar: QRectF | None = None) ->
     if mode not in {"finder", "taskbar"}:
         return QRectF()
     bar = QRectF(bar) if bar is not None else QRectF()
+    if mode == "taskbar":
+        span = bar if not bar.isNull() and bar.height() >= 8.0 and bar.width() >= 8.0 else QRectF(
+            screen.left(), screen.bottom() - min(40.0, screen.height() * 0.2), screen.width(), min(40.0, screen.height() * 0.2))
+        height = min(span.height(), screen.height() * 0.2)
+        slots = []
+        for low, high in TASKBAR_SLOTS:
+            centre = span.left() + span.width() * (low + high) / 2.0
+            width = min(span.width(), max(160.0, span.width() * (high - low)))
+            slots.append(QRectF(centre - width / 2.0, span.top() + (span.height() - height) / 2.0, width, height))
+        tile = min(slots, key=lambda r: abs(r.center().x() - near.x())) if near is not None else slots[0]
+        x = min(max(screen.left(), tile.x()), screen.right() - tile.width())
+        y = min(max(screen.top(), tile.y()), screen.bottom() - tile.height())
+        return QRectF(x, y, tile.width(), tile.height())
     if not bar.isNull() and bar.height() >= 8.0 and bar.width() >= 8.0:
         height = min(bar.height(), screen.height() * 0.2)
         width = min(bar.width(), max(160.0, min(420.0, bar.width() * 0.42)))

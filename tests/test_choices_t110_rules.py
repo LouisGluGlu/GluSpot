@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QPointF, QRectF
 
 from local.spring_motion import (
     COVER_CORNER_RATIO, CriticalSpring, MagnetLatch, RectSpring,
@@ -133,8 +133,15 @@ class MagnetLatchTests(unittest.TestCase):
         taskbar = magnet_tile_rect(screen, mode="taskbar", bar=QRectF(0, 1040, 1920, 40))
         self.assertAlmostEqual(finder.center().x(), screen.center().x(), delta=1)
         self.assertLess(finder.center().y(), screen.height() * 0.2)
-        self.assertAlmostEqual(taskbar.center().x(), screen.center().x(), delta=1)
+        # The taskbar has two slots, either side of the centred task icons:
+        # 30-40% and 60-70% of its width; the island takes the nearer one.
+        self.assertAlmostEqual(taskbar.center().x(), 1920 * 0.35, delta=1)
         self.assertGreater(taskbar.center().y(), screen.height() * 0.8)
+        right = magnet_tile_rect(screen, mode="taskbar", bar=QRectF(0, 1040, 1920, 40), near=QPointF(1500, 1060))
+        self.assertAlmostEqual(right.center().x(), 1920 * 0.65, delta=1)
+        left = magnet_tile_rect(screen, mode="taskbar", bar=QRectF(0, 1040, 1920, 40), near=QPointF(200, 1060))
+        self.assertAlmostEqual(left.center().x(), 1920 * 0.35, delta=1)
+        self.assertGreaterEqual(left.width(), 160)
         island = QRectF(100, 100, 248, 64)
         docked = docked_island_rect(island, finder)
         self.assertEqual(docked.size(), island.size())

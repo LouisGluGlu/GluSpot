@@ -315,6 +315,10 @@ class MotionCoverSession(QObject):
         source = result.local_path if result.local_path and os.path.isfile(result.local_path) else result.url
         if not source:
             return
+        if ".m3u8" in source.split("?", 1)[0].casefold():
+            # A playlist (an older cache entry) would make the decoder probe
+            # every rendition; only a direct file plays.
+            return
         if self._source == source:
             return
         # A file that finishes after streaming has started must not restart the

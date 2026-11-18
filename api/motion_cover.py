@@ -985,24 +985,27 @@ def query_apple(track: MotionTrack, cancel: CancelToken, deadline: float, fetch,
         video = editorial_video_url(json.loads(body.decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return ""
-    if not video or cancel.is_set() or clock() >= deadline:
+    if not video:
+        return ""
+    # Only one direct MP4 rendition ever reaches the player: handed the master
+    # playlist, FFmpeg probes all of its (up to 28, up to 2160p) streams.
+    # Running out of time here is "not yet", never "no motion cover".
+    def unresolved():
+        raise TimeoutError("motion cover rendition not resolved in time")
+    if urlsplit(video).path.casefold().endswith(".mp4"):
         return video
-    try:
-        playlist = _json_request(fetch, "GET", video, cancel, deadline, clock=clock, headers={"User-Agent": _USER_AGENT})
-    except (TimeoutError, ValueError, URLError):
-        return video
+    if cancel.is_set() or clock() >= deadline:
+        unresolved()
+    playlist = _json_request(fetch, "GET", video, cancel, deadline, clock=clock, headers={"User-Agent": _USER_AGENT})
     text = playlist.decode("utf-8", errors="replace")
     variants = parse_hls_variants(text, video)
     chosen = choose_hls_variant(variants)
     if chosen is None:
-        return direct_media_url(text, video) or video
-    if clock() >= deadline - 0.2 or cancel.is_set():
-        return chosen.url
-    try:
-        media = _json_request(fetch, "GET", chosen.url, cancel, deadline, clock=clock, headers={"User-Agent": _USER_AGENT})
-    except (TimeoutError, ValueError, URLError):
-        return chosen.url
-    return direct_media_url(media.decode("utf-8", errors="replace"), chosen.url) or chosen.url
+        return direct_media_url(text, video) or unresolved()
+    if cancel.is_set() or clock() >= deadline:
+        unresolved()
+    media = _json_request(fetch, "GET", chosen.url, cancel, deadline, clock=clock, headers={"User-Agent": _USER_AGENT})
+    return direct_media_url(media.decode("utf-8", errors="replace"), chosen.url) or unresolved()
 
 
 class MotionCoverResolver:

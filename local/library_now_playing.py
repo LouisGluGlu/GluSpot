@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QRectF, Qt, Signal, Slot
-from PySide6.QtGui import QPainter
+from PySide6.QtGui import QPainter, QPainterPath
 from PySide6.QtWidgets import QWidget
 
 from api.models import IslandVisualData
@@ -55,6 +55,7 @@ class LibraryNowPlayingIsland(IslandStackVisual):
         self.location_mode = "free"
         self.music_expanded_layout_style = "standard"
         self.bar_mode = "tall"
+        self.merged_bottom_radius = 0.0     # > 0: the bar is the window's bottom edge
         self._source_island = None
         self._has_track = False
         self._pressed_command = None
@@ -145,14 +146,44 @@ class LibraryNowPlayingIsland(IslandStackVisual):
 
     # A one-line bar has no lyric band: the light wave would run through the
     # title and the bottom glow blurs its corners.
-    ROW_SKIPPED_STEPS = frozenset({"light_wave", "bottom_ambience"})
+    ROW_SKIPPED_STEPS = frozenset({"bottom_ambience"})
+    ROW_WAVE_DROP = 0.24              # the light wave rides near the row's bottom edge, under the words
     ROW_RADIUS = 18.0
     ROW_MARGIN = 10.0
 
     def _execute_music_surface_paint_step(self, step, *args, **kwargs):
         if self.bar_mode == "row" and step in self.ROW_SKIPPED_STEPS:
             return None
+        if self.bar_mode == "row" and step == "light_wave" and len(args) >= 2 and isinstance(args[1], QRectF):
+            # Sea level's ripple stays in the one-line bar, lowered so it runs
+            # under the title instead of through it.
+            painter, rect = args[0], args[1]
+            painter.save()
+            painter.setClipPath(self._music_shell_path(rect, self._music_shell_radius(rect, True), True),
+                                Qt.ClipOperation.IntersectClip)
+            lowered = QRectF(rect).translated(0.0, rect.height() * self.ROW_WAVE_DROP)
+            try:
+                return super()._execute_music_surface_paint_step(step, painter, lowered, *args[2:], **kwargs)
+            finally:
+                painter.restore()
         return super()._execute_music_surface_paint_step(step, *args, **kwargs)
+
+    def _music_shell_path(self, rect, radius, expanded=False):
+        bottom = float(getattr(self, "merged_bottom_radius", 0.0) or 0.0)
+        if bottom <= 0.0 or self.bar_mode == "pill":
+            return super()._music_shell_path(rect, radius, expanded)
+        # Flat top (a divider under the content), rounded bottom corners
+        # following the window's frame.
+        r = min(bottom, rect.height() / 2.0, rect.width() / 2.0)
+        path = QPainterPath()
+        path.moveTo(rect.topLeft())
+        path.lineTo(rect.topRight())
+        path.lineTo(rect.right(), rect.bottom() - r)
+        path.arcTo(QRectF(rect.right() - 2 * r, rect.bottom() - 2 * r, 2 * r, 2 * r), 0.0, -90.0)
+        path.lineTo(rect.left() + r, rect.bottom())
+        path.arcTo(QRectF(rect.left(), rect.bottom() - 2 * r, 2 * r, 2 * r), -90.0, -90.0)
+        path.closeSubpath()
+        return path
 
     def _music_shell_radius(self, rect, expanded):
         if self.bar_mode == "row" and expanded:
@@ -168,7 +199,11 @@ class LibraryNowPlayingIsland(IslandStackVisual):
         u = self._u
         margin = u(self.ROW_MARGIN)
         side = max(1., rect.height() - 2 * margin)
-        cover = QRectF(rect.left() + margin, rect.top() + margin, side, side)
+        # Merged into the window's bottom edge, the cover lines up with the rail.
+        # Window pixels, not the island's visual scale: the bar sits at x = 1
+        # and paints inside a 1 px inset, so 14 lands the cover on x = 16.
+        left = 14.0 if getattr(self, "merged_bottom_radius", 0.0) else margin
+        cover = QRectF(rect.left() + left, rect.top() + margin, side, side)
         self.music_cover_rect = QRectF(cover)
         self._paint_interactive_music_cover(painter, cover, u(10))
         order = ["music:previous", "music:toggle_play_pause", "music:next"]
