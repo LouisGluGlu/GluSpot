@@ -4,6 +4,12 @@ import os
 import sys
 import time
 
+# numpy's bundled OpenBLAS commits a 32 MB buffer per logical core as soon as
+# numpy is imported (384 MB on a 12-core PC, never touched). GluSpot's matrix
+# work is tiny, so one BLAS thread is enough. This must run before anything
+# imports numpy; an explicit user/environment value still wins.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)

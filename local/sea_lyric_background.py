@@ -117,12 +117,38 @@ class _DecodeThread(QThread):
         decoder.bufferReady.connect(ready)
         decoder.finished.connect(loop.quit)
         decoder.error.connect(lambda _code: loop.quit())
-        QTimer.singleShot(120000, loop.quit)
-        decoder.setSource(QUrl.fromLocalFile(self.path))
-        decoder.start()
-        loop.exec()
-        decoder.stop()
-        self.pcm = _to_8k_mono(chunks, shape["rate"], shape["channels"])
+        try:
+            QTimer.singleShot(120000, loop.quit)
+            decoder.setSource(QUrl.fromLocalFile(self.path))
+            decoder.start()
+            loop.exec()
+            decoder.stop()
+            self.pcm = _to_8k_mono(chunks, shape["rate"], shape["channels"])
+        finally:
+            chunks.clear()
+            _dispose_decoder(decoder)
+
+
+def _dispose_decoder(decoder) -> None:
+    """Destroy a QAudioDecoder made without a parent, right now.
+
+    ``ready`` closes over the decoder and its chunk list, and the decoder's
+    own signal connection holds ``ready``. Python's GC cannot see the C++ half
+    of that cycle, so the decoder and every decoded chunk (about 140 MB for a
+    three-minute 48 kHz stereo song) would stay alive for good. ``deleteLater``
+    is not enough: ``playlist_audio_compare.decode_file`` calls ``run`` directly
+    on a thread whose event loop may never run again.
+    """
+    import shiboken6
+
+    if not shiboken6.isValid(decoder):
+        return
+    for signal in (decoder.bufferReady, decoder.finished, decoder.error):
+        try:
+            signal.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+    shiboken6.delete(decoder)
 
 
 # --- analysis: melody, drums, syllables, arrival ------------------------------
