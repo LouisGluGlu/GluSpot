@@ -710,6 +710,9 @@ class LibraryVariantPresentation:
         for button in (*self.buttons.values(), self.rail_source, self.play_button, self.player_button):
             button.setVisible(visible)
         if not visible:
+            sync_button = getattr(self.owner, "playlist_sync_button", None)
+            if sync_button is not None:
+                sync_button.hide()
             self.status_timer.stop()
             for button in (self.owner.empty_action, self.owner.recovery_action):
                 button.setGlassLight(False)
@@ -773,6 +776,25 @@ class LibraryVariantPresentation:
                 order = self._note_appearing(row, item.key, self.section, now, order)
             row.show()
             o._rows.append(row)
+
+    def layout_sync_entry(self, variant, refreshed, query):
+        """同步歌单 at the right of the 个人歌单 heading, NetEase and Apple Music only."""
+        o = self.owner
+        button = getattr(o, "playlist_sync_button", None)
+        if button is None:
+            return
+        account = getattr(o, "_account", None)
+        page = getattr(o, "playlist_page", None)
+        comparing = getattr(o, "_sync_progress", None) is not None
+        show = (variant == "sidebar" and not query and (self.section == "personal" or comparing)
+                and getattr(account, "source_id", "") in {"netease", "apple_music"} and not self.pane.isEmpty()
+                and (getattr(page, "collection", None) is None or comparing))
+        button.setVisible(show)
+        if show:
+            top = self.pane.y() + (10 if refreshed else 0)
+            width = 132 if comparing else 104
+            button.setGeometry(round(self.pane.right() - (18 if refreshed else 0) - width), round(top), width, 32)
+            button.raise_()
 
     def layout_header(self):
         o = self.owner
@@ -1035,6 +1057,7 @@ class LibraryVariantPresentation:
             self.player = QRectF(16, 192 if searching else 138, w - 32, 62)
             self.pane = QRectF(16, self.player.bottom() + 16, w - 32, h - self.player.bottom() - 32)
             scroll_rect = self.pane.adjusted(8, 38, -8, -8).toAlignedRect()
+        self.layout_sync_entry(variant, refreshed, query)
         o.search.setPlaceholderText("搜索歌曲、歌手与歌单")
         o.search.setAccessibleDescription("搜索当前平台；Ctrl+F 搜索，Esc 返回音乐库")
         if not o.search.expanded:

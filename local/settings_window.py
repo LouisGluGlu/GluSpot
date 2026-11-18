@@ -2463,8 +2463,13 @@ class SettingsWindow(QDialog):
         self.personal_dj_voice_button = GlassPushButton("私人DJ音色")
         self.personal_dj_voice_button.clicked.connect(self._open_personal_dj_voices)
         c.addWidget(self.personal_dj_voice_button)
+        self.playlist_sync_button = GlassPushButton("歌单同步")
+        self.playlist_sync_button.setAccessibleName("打开网易云与 Apple Music 歌单同步")
+        self.playlist_sync_button.clicked.connect(self._open_playlist_sync)
+        c.addWidget(self.playlist_sync_button)
 
-        hint = QLabel("在音乐来源页查看各平台登录状态、扫码登录或退出账号。私人 DJ 当前适用于网易云音乐私人漫游。")
+        hint = QLabel("在音乐来源页查看各平台登录状态、扫码登录或退出账号。私人 DJ 当前适用于网易云音乐私人漫游。"
+                      "歌单同步在网易云和 Apple Music 之间按你选的方向同步一份歌单。")
         hint.setObjectName("Muted")
         hint.setWordWrap(True)
         c.addWidget(hint)
@@ -2831,6 +2836,7 @@ class SettingsWindow(QDialog):
         c = self._card(layout).layout()
         c.addWidget(self._section_label("关于", 2, 6))
         self._row(c, "版本", self._readonly_value(f"{APP_NAME} {APP_VERSION}"))
+        self._build_update_card(layout)
 
         icon_card = self._card(layout)
         icon_layout = icon_card.layout()
@@ -3574,6 +3580,131 @@ class SettingsWindow(QDialog):
 
     def _open_online_music_login(self):
         callback = getattr(self, "online_music_login_callback", None)
+        if callable(callback):
+            callback()
+
+    def _build_update_card(self, layout: QVBoxLayout):
+        """软件更新: two switches (both off by default), a check key, and what a new release brings."""
+        c = self._card(layout).layout()
+        c.addWidget(self._section_label("软件更新", 2, 6))
+        self.update_check_switch = self._check(
+            "自动检查更新", bool(self._setting_value("v2_update_check_enabled", False)), self._set_update_check)
+        c.addWidget(self.update_check_switch)
+        self.update_auto_switch = self._check(
+            "自动更新", bool(self._setting_value("v2_update_auto_enabled", False)), self._set_update_auto)
+        c.addWidget(self.update_auto_switch)
+        self.update_check_button = GlassPushButton("检查更新")
+        self.update_check_button.clicked.connect(self._check_for_updates)
+        self.update_status_label = self._readonly_value("尚未检查")
+        status = QWidget()
+        status_layout = QHBoxLayout(status)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(10)
+        status_layout.addWidget(self.update_status_label, 1)
+        status_layout.addWidget(self.update_check_button, 0)
+        self._row(c, "检查新版本", status)
+        self.update_notes_label = QLabel("")
+        self.update_notes_label.setWordWrap(True)
+        self.update_notes_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.update_notes_row = self._row(c, "更新内容", self.update_notes_label)
+        actions = QWidget()
+        actions_layout = QHBoxLayout(actions)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(8)
+        self.update_ignore_button = GlassPushButton("忽略此版本")
+        self.update_ignore_button.clicked.connect(self._ignore_update)
+        self.update_now_button = GlassPushButton("更新")
+        self.update_now_button.setObjectName("Primary")
+        self.update_now_button.clicked.connect(self._update_now)
+        actions_layout.addStretch(1)
+        actions_layout.addWidget(self.update_ignore_button)
+        actions_layout.addWidget(self.update_now_button)
+        self.update_actions_row = self._row(c, "新版本", actions)
+        hint = QLabel("打开「自动检查更新」后，每次启动 GluSpot 会检查一次新版本，有新版会通知你。"
+                      "「自动更新」需要先打开自动检查：在后台下载，并在退出 GluSpot 时自动装好。"
+                      "只认正式版；便携版不会替换文件，只会打开下载页。")
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        c.addWidget(hint)
+        self.refresh_update_state()
+
+    def show_update_section(self):
+        """Open the 高级 page, where 软件更新 lives (from the update notification)."""
+        for page_index, page in enumerate(getattr(self, "_settings_pages", [])):
+            if str(page.get("title", "")) == "高级" and hasattr(self, "nav"):
+                for row in range(self.nav.count()):
+                    item = self.nav.item(row)
+                    if item is not None and item.data(Qt.ItemDataRole.UserRole) == page_index:
+                        self.nav.setCurrentRow(row)
+                        return True
+        return False
+
+    def _update_controller(self):
+        return getattr(self, "update_controller", None)
+
+    def _set_update_check(self, enabled: bool):
+        controller = self._update_controller()
+        if controller is not None:
+            controller.set_check_enabled(enabled)
+        else:
+            self._save("v2_update_check_enabled", bool(enabled))
+            if not enabled:
+                self._save("v2_update_auto_enabled", False)
+        self.refresh_update_state()
+
+    def _set_update_auto(self, enabled: bool):
+        if enabled and not bool(self._setting_value("v2_update_check_enabled", False)):
+            self._set_switch_checked(self.update_auto_switch, False)
+            return
+        controller = self._update_controller()
+        if controller is not None:
+            controller.set_auto_enabled(enabled)
+        else:
+            self._save("v2_update_auto_enabled", bool(enabled))
+        self.refresh_update_state()
+
+    def _check_for_updates(self):
+        controller = self._update_controller()
+        if controller is not None:
+            controller.check(manual=True)
+
+    def _update_now(self):
+        controller = self._update_controller()
+        if controller is not None:
+            controller.update_now()
+
+    def _ignore_update(self):
+        controller = self._update_controller()
+        if controller is not None:
+            controller.ignore()
+
+    def refresh_update_state(self):
+        """Show the controller's state: status line, notes and the 更新 / 忽略 keys."""
+        if not hasattr(self, "update_check_switch"):
+            return
+        check_on = bool(self._setting_value("v2_update_check_enabled", False))
+        auto_on = bool(self._setting_value("v2_update_auto_enabled", False)) and check_on
+        self._set_switch_checked(self.update_check_switch, check_on)
+        self._set_switch_checked(self.update_auto_switch, auto_on)
+        self.update_auto_switch.setEnabled(check_on)
+        controller = self._update_controller()
+        state = getattr(controller, "state", "idle")
+        release = getattr(controller, "release", None)
+        self.update_status_label.setText(getattr(controller, "message", "") or "尚未检查")
+        self.update_check_button.setEnabled(state not in {"checking", "downloading", "installing"})
+        offer = (release is not None and state in {"available", "downloading", "ready", "error"}
+                 and release.version != APP_VERSION)
+        notes = (release.notes or "这一版没有写更新说明。").strip() if offer else ""
+        self.update_notes_label.setText(release.title + "\n" + notes if offer else "")
+        self.update_notes_row.setVisible(bool(offer))
+        self.update_actions_row.setVisible(bool(offer))
+        if offer:
+            portable = controller.kind() != "installed"
+            self.update_now_button.setText("打开下载页" if portable else ("安装并重启" if state == "ready" else "更新"))
+            self.update_now_button.setEnabled(state not in {"downloading", "installing"})
+
+    def _open_playlist_sync(self):
+        callback = getattr(self, "playlist_sync_callback", None)
         if callable(callback):
             callback()
 

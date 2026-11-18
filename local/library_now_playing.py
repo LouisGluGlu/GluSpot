@@ -147,7 +147,8 @@ class LibraryNowPlayingIsland(IslandStackVisual):
     # A one-line bar has no lyric band: the light wave would run through the
     # title and the bottom glow blurs its corners.
     ROW_SKIPPED_STEPS = frozenset({"bottom_ambience"})
-    ROW_WAVE_DROP = 0.24              # the light wave rides near the row's bottom edge, under the words
+    ROW_WATER_LINE = 0.22             # the water line sits above the words, which lie in the sea as in the tall bar
+    ROW_LYRIC_HEIGHT = 40.0           # under the dual-line threshold: one centred line
     ROW_RADIUS = 18.0
     ROW_MARGIN = 10.0
 
@@ -155,20 +156,29 @@ class LibraryNowPlayingIsland(IslandStackVisual):
         if self.bar_mode == "row" and step in self.ROW_SKIPPED_STEPS:
             return None
         if self.bar_mode == "row" and step == "light_wave" and len(args) >= 2 and isinstance(args[1], QRectF):
-            # Sea level's ripple stays in the one-line bar, lowered so it runs
-            # under the title instead of through it.
             painter, rect = args[0], args[1]
-            painter.save()
-            painter.setClipPath(self._music_shell_path(rect, self._music_shell_radius(rect, True), True),
-                                Qt.ClipOperation.IntersectClip)
-            lowered = QRectF(rect).translated(0.0, rect.height() * self.ROW_WAVE_DROP)
-            try:
-                return super()._execute_music_surface_paint_step(step, painter, lowered, *args[2:], **kwargs)
-            finally:
-                painter.restore()
+            return self._paint_row_light_wave(painter, rect, step, *args[2:], **kwargs)
         return super()._execute_music_surface_paint_step(step, *args, **kwargs)
 
+    def _paint_row_light_wave(self, painter, rect, step, *rest, **kwargs):
+        """Sea level's ripple at the same scale as in the tall bar: the wave is
+        laid out on a tall bar's height with its water line a little under the
+        row's middle, so the crest moves and the sea light shows beneath it.
+        Every clip the renderer asks for is the row's own shell (its corners
+        are the window's corners), never the taller layout's."""
+        tall = rect.height() * self.HEIGHT / max(1.0, float(self.ROW_HEIGHT))
+        water = rect.top() + rect.height() * self.ROW_WATER_LINE
+        layout = QRectF(rect.left(), water - tall * .495, rect.width(), tall)
+        self._row_wave_shell = self._music_shell_path(rect, self._music_shell_radius(rect, True), True)
+        try:
+            return super()._execute_music_surface_paint_step(step, painter, layout, *rest, **kwargs)
+        finally:
+            self._row_wave_shell = None
+
     def _music_shell_path(self, rect, radius, expanded=False):
+        shell = getattr(self, "_row_wave_shell", None)
+        if shell is not None:
+            return QPainterPath(shell)
         bottom = float(getattr(self, "merged_bottom_radius", 0.0) or 0.0)
         if bottom <= 0.0 or self.bar_mode == "pill":
             return super()._music_shell_path(rect, radius, expanded)
@@ -195,7 +205,6 @@ class LibraryNowPlayingIsland(IslandStackVisual):
         over artist; the current lyric line centred between them and the
         transport; previous, play and next in fixed places (a key that does
         not apply right now, such as previous on personal FM, is dimmed)."""
-        from PySide6.QtGui import QFont, QFontMetricsF
         u = self._u
         margin = u(self.ROW_MARGIN)
         side = max(1., rect.height() - 2 * margin)
@@ -235,29 +244,13 @@ class LibraryNowPlayingIsland(IslandStackVisual):
         lane = QRectF(left + info_w + u(14), rect.top(), controls_x - u(14) - (left + info_w + u(14)), rect.height())
         if lane.width() < u(60):
             return
-        try:
-            lines = self._current_lyric_display_lines()
-        except Exception:
-            lines = []
-        text = str(lines[0] if lines else "").strip()
-        if not text:
+        if not self.lyrics:
             return
-        # One line, centred both ways: shrink to fit down to 12 px, then elide.
-        font = QFont(painter.font())
-        font.setWeight(QFont.Weight.DemiBold)
-        size_px = 17.0
-        while True:
-            font.setPixelSize(round(u(size_px)))
-            width = QFontMetricsF(font).horizontalAdvance(text)
-            if width <= lane.width() or size_px <= 12.0:
-                break
-            size_px -= 1.0
-        painter.save()
-        painter.setFont(font)
-        painter.setPen(self._music_lyric_text_color(240))
-        shown = QFontMetricsF(font).elidedText(text, Qt.TextElideMode.ElideRight, lane.width())
-        painter.drawText(lane, Qt.AlignmentFlag.AlignCenter, shown)
-        painter.restore()
+        # The island's own one-line lyric: word-by-word reading, centred, and
+        # a line too long for the lane scrolls with faded edges.
+        height = min(lane.height(), u(self.ROW_LYRIC_HEIGHT))
+        self._paint_compact_lyric_viewport(
+            painter, QRectF(lane.left(), lane.center().y() - height / 2, lane.width(), height))
 
     def set_track(self, track):
         self._has_track = track is not None

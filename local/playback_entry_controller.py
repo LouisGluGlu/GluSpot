@@ -331,20 +331,36 @@ class PlaybackEntryController(QObject):
         if not self.tasks.submit(("logout", generation, source_id), work):
             self.window.message_label.setText("退出失败，请重试")
 
-    def open_playlist_sync(self, source_id="apple_music"):
-        """Show the sync example. Playlist reads and writes stay off the UI thread."""
-        if self._closed or source_id != "apple_music":
+    def open_playlist_sync(self, source_id="", playlist_id=""):
+        """Open playlist sync from settings or the library. Reads and writes stay off the UI thread.
+
+        source_id/playlist_id preselect the source side when opened from one playlist.
+        """
+        if self._closed:
             return
         from local.apple_music_sync_dialog import PlaylistSyncDialog
-        dialog = PlaylistSyncDialog(self.window)
-        dialog.previewRequested.connect(self._request_sync_preview)
-        dialog.confirmRequested.connect(self._request_sync_write)
-        dialog.netease_button.clicked.connect(lambda _checked=False: self._request_sync_lists())
-        dialog.apple_button.clicked.connect(lambda _checked=False: self._request_sync_lists())
-        dialog.finished.connect(lambda *_args: setattr(self, "_sync_dialog", None))
-        self._sync_dialog = dialog
-        self._sync_payload = None
+        dialog = getattr(self, "_sync_dialog", None)
+        if dialog is None:
+            dialog = PlaylistSyncDialog(None, settings_get=getattr(getattr(self, "settings", None), "get", None))
+            dialog.previewRequested.connect(self._request_sync_preview)
+            dialog.confirmRequested.connect(self._request_sync_write)
+            dialog.directionChanged.connect(lambda _direction: self._request_sync_lists())
+            dialog.sourceChanged.connect(self._sync_source_changed)
+            dialog.modeChanged.connect(self._sync_mode_changed)
+            dialog.auditionRequested.connect(self._sync_audition)
+            dialog.auditionStarted.connect(self._pause_main_for_audition)
+            dialog.audition.output_provider = getattr(self, "audition_output_callback", None)
+            dialog.island_widget = getattr(self, "island", None)
+            dialog.finished.connect(lambda *_args: setattr(self, "_sync_dialog", None))
+            self._sync_dialog = dialog
+        if source_id == "netease":
+            dialog.set_direction("netease_to_apple")
+        elif source_id == "apple_music":
+            dialog.set_direction("apple_to_netease")
+        self._sync_select = str(playlist_id or "")
         dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
         self._request_sync_lists()
 
     def _sync_store(self):
@@ -363,17 +379,196 @@ class PlaybackEntryController(QObject):
         if dialog is None or self._closed:
             return
         generation = self._generation
+        dialog.set_busy(True, "正在读取两边的歌单…")
         if not self.tasks.submit(("sync_lists", generation), lambda: self._load_sync_lists()
                 if not self._closed and generation == self._generation else None):
-            dialog.set_result("服务繁忙，请稍后重试")
+            dialog.set_busy(False, "服务繁忙，请稍后重试")
 
     def _load_sync_lists(self):
-        netease = self.service.playlists("netease")
-        apple = self.service.playlists("apple_music")
-        return (
-            tuple((item.playlist_id, item.title) for item in netease.items),
-            tuple((item.playlist_id, item.title) for item in apple.items),
-        )
+        def every(reader, pages=10):
+            rows, offset = [], 0
+            for _ in range(pages):
+                page = reader(offset)
+                rows.extend((item.playlist_id, item.title) for item in page.items)
+                if not page.has_more or page.next_offset <= offset:
+                    break
+                offset = page.next_offset
+            return tuple(dict.fromkeys(rows))
+
+        def safe(reader):
+            try:
+                return every(reader), ""
+            except Exception as exc:  # noqa: BLE001 - one side signed out must not hide the other
+                return (), getattr(exc, "code", "") or "failed"
+
+        netease, netease_error = safe(lambda offset: self.service.playlists("netease", limit=100, offset=offset))
+        writable, writable_error = safe(lambda offset: self.service.writable_playlists("netease", limit=100, offset=offset))
+        apple, apple_error = safe(lambda offset: self.service.playlists("apple_music", limit=100, offset=offset))
+        missing = []
+        if netease_error or writable_error:
+            missing.append("网易云")
+        if apple_error:
+            missing.append("Apple Music")
+        return {"netease": netease, "netease_writable": writable, "apple_music": apple, "missing": tuple(missing)}
+
+    def _sync_source_changed(self, playlist_id):
+        """Bring back the pair and mode saved for this source playlist."""
+        dialog = getattr(self, "_sync_dialog", None)
+        if dialog is None or not playlist_id:
+            return
+        from api.apple_music_sync import find_for_playlist, sides
+        source_side, target_side = sides(dialog.direction())
+        link = find_for_playlist(self._sync_store(), source_side, playlist_id)
+        if link is not None:
+            dialog.select_target(link.playlist_id(target_side))
+            dialog.set_mode(link.mode if link.direction == dialog.direction() else "manual")
+        else:
+            dialog.set_mode("manual")
+
+    def _sync_mode_changed(self, mode):
+        dialog = getattr(self, "_sync_dialog", None)
+        if dialog is None:
+            return
+        request = dialog.request()
+        from local.apple_music_sync_flow import save_mode
+        try:
+            saved = save_mode(self._sync_store(), request["direction"], request["source_playlist_id"],
+                              request["target_playlist_id"], mode)
+        except OSError:
+            dialog.set_message("没能保存同步方式，请重试。")
+            return
+        if saved is not None:
+            dialog.set_message("已改成自动同步。" if mode == "auto" else "已改成手动同步。")
+        else:
+            dialog.set_message("同步方式会在第一次同步时一起保存。")
+
+    def _sync_audition(self, song, start=0.0, end=0.0):
+        """Find the song's audio address off the UI thread; the window plays it itself."""
+        dialog = getattr(self, "_sync_dialog", None)
+        if dialog is None or self._closed:
+            return
+        if getattr(song, "preview_url", ""):
+            # Apple's preview address is already known: play at once, no queue.
+            dialog.play_audition(song, song.preview_url, start, end)
+            return
+        generation = self._generation
+
+        def work():
+            from local.playlist_audio_compare import AudioSource
+            try:
+                return song, AudioSource(self.service).url(song), start, end
+            except Exception:  # noqa: BLE001 - a song without audio just cannot be heard
+                return song, "", start, end
+
+        if not self.tasks.submit(("sync_audition", generation), work):
+            dialog.set_message("服务繁忙，请稍后再试听")
+
+    def _pause_main_for_audition(self):
+        callback = getattr(self, "pause_main_callback", None)
+        if callable(callback):
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 - listening must not depend on the main player
+                pass
+
+    def _sync_verdict_cache(self):
+        cache = getattr(self, "_sync_verdict_store", None)
+        if cache is None:
+            import os
+            from pathlib import Path
+            from local.playlist_audio_compare import VerdictCache
+            base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
+            cache = VerdictCache(Path(base) / "GluSpot" / "playlist-audio-compare.json")
+            self._sync_verdict_store = cache
+        return cache
+
+    def _known_verdicts(self, plan):
+        """Cached audio results for this plan's choices: {source key: {candidate key: verdict}}."""
+        from api.apple_music_sync import song_key
+        from local.playlist_audio_compare import pair_key
+        cache = self._sync_verdict_cache()
+        found = {}
+        for item in plan.choices:
+            for candidate in item.candidates:
+                verdict = cache.get(pair_key(item.source, candidate))
+                if verdict is not None:
+                    found.setdefault(song_key(item.source), {})[song_key(candidate)] = verdict
+        return found
+
+    def _start_audio_compare(self, preview):
+        """Background audio check of every choice; progress reaches the window and the library."""
+        from dataclasses import replace
+        from api.apple_music_sync import song_key
+        from local.playlist_audio_compare import AudioCompareJob, AudioSource
+        self._stop_audio_compare()
+        known = self._known_verdicts(preview.plan)
+        self._sync_verdicts = known
+        self._sync_base_preview = preview
+        waiting = [item for item in preview.plan.choices
+                   if any(song_key(c) not in known.get(song_key(item.source), {}) for c in item.candidates)]
+        if not waiting:
+            return
+        job = AudioCompareJob(waiting, AudioSource(self.service), self._sync_verdict_cache(), self)
+        job.progress.connect(self._audio_compare_progress)
+        job.verdictReady.connect(self._audio_compare_verdict)
+        job.done.connect(self._audio_compare_done)
+        job.finished.connect(job.deleteLater)
+        self._sync_compare_job = job
+        self._sync_compare_total = len(waiting)
+        job.start()
+
+    def _stop_audio_compare(self):
+        job = getattr(self, "_sync_compare_job", None)
+        self._sync_compare_job = None
+        if job is not None:
+            for signal in (job.progress, job.verdictReady, job.done):
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+            job.stop()
+            self._audio_compare_progress(0, 0, running=False)
+
+    def _audio_compare_progress(self, done, total, running=True):
+        dialog = getattr(self, "_sync_dialog", None)
+        if dialog is not None:
+            dialog.set_compare_progress(done, total, running)
+        callback = getattr(self, "compare_progress_callback", None)
+        if callable(callback):
+            callback(done, total, running)
+
+    def _audio_compare_verdict(self, source_key, candidate_key, verdict):
+        self._sync_verdicts = dict(getattr(self, "_sync_verdicts", {}) or {})
+        self._sync_verdicts.setdefault(source_key, {})[candidate_key] = verdict
+        dialog = getattr(self, "_sync_dialog", None)
+        if dialog is not None and dialog.preview() is not None and getattr(self, "_sync_base_preview", None) is not None                 and dialog.preview().source_playlist_id == self._sync_base_preview.source_playlist_id:
+            dialog.show_verdict(source_key, candidate_key, verdict)
+
+    def _audio_compare_done(self, total, resolved):
+        self._sync_compare_job = None
+        self._audio_compare_progress(total, total, running=False)
+        base = getattr(self, "_sync_base_preview", None)
+        dialog = getattr(self, "_sync_dialog", None)
+        if base is not None and dialog is not None and dialog.preview() is not None                 and dialog.preview().source_playlist_id == base.source_playlist_id:
+            self._show_preview_with_verdicts(base)
+        text = f"音轨比对完成：{total} 首里有 {resolved} 首声音一致，已自动选好"
+        text += "。" if resolved == total else f"，{total - resolved} 首等你听过再选。"
+        if dialog is not None:
+            dialog.set_message(text)
+        callback = getattr(self, "compare_done_callback", None)
+        if callable(callback):
+            callback(text)
+
+    def _show_preview_with_verdicts(self, base):
+        from dataclasses import replace
+        from api.apple_music_sync import apply_audio_verdicts
+        from local.apple_music_sync_flow import preview_summary
+        dialog = getattr(self, "_sync_dialog", None)
+        if dialog is None:
+            return
+        verdicts = getattr(self, "_sync_verdicts", {}) or {}
+        shown = replace(base, plan=apply_audio_verdicts(base.plan, verdicts))
+        dialog.set_preview(shown, preview_summary(shown), verdicts)
 
     def _request_sync_preview(self):
         dialog = getattr(self, "_sync_dialog", None)
@@ -381,60 +576,96 @@ class PlaybackEntryController(QObject):
             return
         request = dialog.request()
         from local.apple_music_sync_flow import sync_direction_allowed
-        if not sync_direction_allowed(request["direction"]):
-            dialog.set_result("反向同步还没打开。现在只从网易云导入到 Apple Music。")
+        if not sync_direction_allowed(request["direction"]) or not request["source_playlist_id"]:
+            dialog.set_message("先选一个来源歌单。")
             return
-        dialog.set_busy(True)
+        dialog.set_busy(True, "正在比对两边的歌单，歌多的话要一会儿…")
+        dialog.start_loading(skeleton=True)
         generation = self._generation
 
+        relay = self._sync_progress_relay()
+
         def work():
-            from local.apple_music_sync_flow import build_import_preview, preview_lines
-            rows, plan, _link = build_import_preview(
+            from local.apple_music_sync_flow import build_sync_preview, preview_summary
+            preview = build_sync_preview(
                 self.service, request["direction"], request["source_playlist_id"],
                 request["target_playlist_id"], self._sync_store(),
+                progress=lambda done, total, song: relay.progress.emit(done, total, song),
             )
-            uncertain = tuple(
-                (row.source.song_id, f"{row.source.title} / {row.source.artist}")
-                for row in rows if row.state == "uncertain"
-            )
-            return {"text": preview_lines(rows, plan), "uncertain": uncertain, "rows": rows, "plan": plan}
+            return {"preview": preview, "summary": preview_summary(preview)}
 
         if not self.tasks.submit(("sync_preview", generation), work):
-            dialog.set_busy(False)
-            dialog.set_result("服务繁忙，请稍后重试")
+            dialog.set_busy(False, "服务繁忙，请稍后重试")
+
+    def _sync_progress_relay(self):
+        """Carries per-song progress from the worker to the sync window (queued to the UI thread)."""
+        relay = getattr(self, "_sync_relay", None)
+        if relay is None:
+            from PySide6.QtCore import Signal
+
+            class _Relay(QObject):
+                progress = Signal(int, int, object)
+
+            relay = _Relay()
+            relay.progress.connect(self._sync_scan_progress)
+            self._sync_relay = relay
+        return relay
+
+    def _sync_scan_progress(self, done, total, song):
+        dialog = getattr(self, "_sync_dialog", None)
+        if dialog is not None:
+            dialog.set_scan_progress(done, total, song)
 
     def _request_sync_write(self):
         dialog = getattr(self, "_sync_dialog", None)
-        payload = getattr(self, "_sync_payload", None)
-        if dialog is None or payload is None or self._closed:
+        preview = dialog.preview() if dialog is not None else None
+        if dialog is None or preview is None or self._closed:
             return
         request = dialog.request()
-        from local.apple_music_sync_flow import sync_direction_allowed
-        if not sync_direction_allowed(request["direction"]):
-            dialog.set_result("反向同步还没打开。现在只从网易云导入到 Apple Music。")
+        if (request["direction"] != preview.direction or request["source_playlist_id"] != preview.source_playlist_id
+                or request["target_playlist_id"] != preview.target_playlist_id):
+            dialog.set_message("歌单换过了，请重新检查差异。")
             return
-        dialog.set_busy(True)
+        from dataclasses import replace
+        decisions = dialog.decisions()
+        removing = dialog.removal_songs(decisions)
+        if request["mode"] == "manual" and removing:
+            if dialog.confirm_removals(removing):
+                decisions = replace(decisions, confirm_removals=True)
+            else:
+                decisions = replace(decisions, confirm_removals=False, target_added={
+                    key: value for key, value in decisions.target_added.items() if value != "remove"})
+        dialog.set_busy(True, "正在同步…")
+        dialog.start_loading(skeleton=False)
         generation = self._generation
 
         def work():
-            from local.apple_music_sync_flow import execute_import, result_lines, selected_additions
-            additions = selected_additions(payload["rows"], payload["plan"], request["include_uncertain"])
-            direction = request["direction"]
-            if direction == "netease_to_apple":
-                netease_id, apple_id = request["source_playlist_id"], request["target_playlist_id"]
-            else:
-                apple_id, netease_id = request["source_playlist_id"], request["target_playlist_id"]
-            result = execute_import(
-                self.service, direction, netease_id, apple_id, additions, self._sync_store(),
-                new_name=request["new_name"],
-            )
+            from local.apple_music_sync_flow import execute_sync, result_lines
+            result = execute_sync(self.service, preview, decisions, self._sync_store(),
+                                  new_name=request["new_name"], mode=request["mode"])
             return result_lines(result)
 
         if not self.tasks.submit(("sync_write", generation), work):
-            dialog.set_busy(False)
-            dialog.set_result("服务繁忙，请稍后重试")
+            dialog.set_busy(False, "服务繁忙，请稍后重试")
+
+    def run_auto_playlist_sync(self):
+        """Pairs set to auto, once per start. The summary goes to sync_notice_callback."""
+        if self._closed or getattr(self, "_sync_auto_started", False):
+            return False
+        store = self._sync_store()
+        if not any(link.mode == "auto" for link in store.load_all()):
+            return False
+        self._sync_auto_started = True
+        from local.apple_music_sync_flow import auto_summary, run_auto_sync
+        return self.tasks.submit(("sync_auto", self._generation),
+                                 lambda: auto_summary(run_auto_sync(self.service, store)))
 
     def _sync_completed(self, kind, result, error):
+        if kind == "sync_auto":
+            callback = getattr(self, "sync_notice_callback", None)
+            if not error and result and callable(callback):
+                callback(str(result))
+            return
         dialog = getattr(self, "_sync_dialog", None)
         if dialog is None:
             return
@@ -443,19 +674,31 @@ class PlaybackEntryController(QObject):
             dialog.set_result("这次没有完成，请重试。")
             return
         if kind == "sync_lists":
-            netease, apple = result
-            if dialog.direction() == "netease_to_apple":
-                dialog.set_source_playlists(netease)
-                dialog.set_target_playlists(apple)
+            from api.apple_music_sync import sides
+            source_side, target_side = sides(dialog.direction())
+            sources = result["netease"] if source_side == "netease" else result["apple_music"]
+            targets = result["netease_writable"] if target_side == "netease" else result["apple_music"]
+            select = getattr(self, "_sync_select", "")
+            self._sync_select = ""
+            dialog.set_source_playlists(sources, select=select)
+            dialog.set_target_playlists(targets)
+            self._sync_source_changed(dialog.request()["source_playlist_id"])
+            if result["missing"]:
+                dialog.set_message("、".join(result["missing"]) + " 没有读到歌单，请先在音乐来源里登录。")
             else:
-                dialog.set_source_playlists(apple)
-                dialog.set_target_playlists(netease)
+                dialog.set_message("选好两个歌单，再点「检查差异」。")
             return
         if kind == "sync_preview":
-            self._sync_payload = result
-            dialog.set_preview(result["text"], result["uncertain"])
+            self._sync_verdicts = self._known_verdicts(result["preview"].plan)
+            self._show_preview_with_verdicts(result["preview"])
+            self._start_audio_compare(result["preview"])
+            return
+        if kind == "sync_audition":
+            song, url, start, end = result
+            dialog.play_audition(song, url, start, end)
             return
         dialog.set_result(str(result))
+        self._request_sync_lists()
 
     def begin_login(self, source_id):
         if (self._closed or source_id not in LOGIN_SOURCE_IDS
@@ -509,6 +752,10 @@ class PlaybackEntryController(QObject):
         if self._closed:
             return
         kind, generation, *extra = token
+        if kind == "sync_auto":
+            # Startup sync outlives login generations; it only reports a summary.
+            self._sync_completed(kind, result, error)
+            return
         if kind == "accounts":
             if generation == self._route_generation:
                 self._has_login = bool(result) if not error else False
@@ -595,7 +842,7 @@ class PlaybackEntryController(QObject):
             else:
                 self.begin_login(source)
             return
-        if kind in {"sync_lists", "sync_preview", "sync_write"}:
+        if kind in {"sync_lists", "sync_preview", "sync_write", "sync_audition"}:
             self._sync_completed(kind, result, error)
             return
         if kind == "avatar":

@@ -386,6 +386,31 @@ class LibraryLayoutVariantTests(unittest.TestCase):
             for a, b in zip(rows, rows[1:]):
                 self.assertEqual(b.y() - a.y(), REFRESH_STRIDE)
 
+    def test_personal_heading_has_playlist_sync_inside_the_pane(self):
+        for size in SIZES:
+            w = self.prepare("sidebar", size)
+            view = w._variant_view
+            view.select_section("for_you")
+            self.app.processEvents()
+            self.assertFalse(w.playlist_sync_button.isVisible())
+            view.select_section("personal")
+            self.app.processEvents()
+            button = w.playlist_sync_button
+            self.assertTrue(button.isVisible())
+            self.assertTrue(view.pane.contains(QRectF(button.geometry())))
+            self.assertFalse(button.geometry().intersects(w.scroll.geometry()))
+            fired = []
+            w.playlistSyncRequested.connect(fired.append)
+            button.click()
+            self.assertEqual(fired[-1:], [None])
+            w.open_playlist_page(self.catalog[-1])
+            self.assertFalse(button.isVisible())
+            w.close_playlist_page()
+            self.assertTrue(button.isVisible())
+        w.set_library_variant("classic")
+        self.app.processEvents()
+        self.assertFalse(w.playlist_sync_button.isVisible())
+
     def test_now_playing_bar_takes_the_window_shape_pose(self):
         from local.library_layout_variants import bar_mode_for
         self.assertEqual(bar_mode_for(960, 540), "row")       # wide and short: one line

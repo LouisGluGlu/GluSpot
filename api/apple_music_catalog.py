@@ -30,6 +30,8 @@ class SongIdentity:
     duration_seconds: float = 0.0
     artwork_url: str = ""
     catalog_id: str = ""
+    # Apple's public 30-second preview (unencrypted AAC); "" elsewhere.
+    preview_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,16 @@ def _catalog_id(resource: dict, attributes: dict) -> str:
     return ""
 
 
+def preview_url(attributes: dict) -> str:
+    """The catalog's 30-second preview address, https only."""
+    rows = attributes.get("previews") if isinstance(attributes.get("previews"), list) else []
+    for row in rows:
+        url = _text(row.get("url")).strip() if isinstance(row, dict) else ""
+        if url.startswith("https://") and len(url) <= 2000:
+            return url
+    return ""
+
+
 def _artwork_of(attributes: dict) -> str:
     artwork = attributes.get("artwork") if isinstance(attributes.get("artwork"), dict) else {}
     return artwork_url(_text(artwork.get("url")))
@@ -141,7 +153,8 @@ def song_from_resource(resource, *, source_id: str = "apple_music", resources: d
         album = _text(catalog_attributes.get("albumName")).strip()[:300]
     if not duration:
         duration = _milliseconds(catalog_attributes.get("durationInMillis")) / 1000.0
-    return SongIdentity(source_id, song_id[:200], title[:400], artist, album, duration, artwork, catalog_id)
+    preview = preview_url(attributes) or preview_url(catalog_attributes)
+    return SongIdentity(source_id, song_id[:200], title[:400], artist, album, duration, artwork, catalog_id, preview)
 
 
 def playlist_from_resource(resource) -> dict | None:
@@ -261,6 +274,7 @@ def service_song(song: SongIdentity) -> dict:
         "duration": song.duration_seconds,
         "picUrl": song.artwork_url,
         "catalog_id": song.catalog_id,
+        "preview_url": song.preview_url,
     }
 
 
@@ -335,40 +349,190 @@ def _pair_score(title: str, artist: str, duration: str) -> float:
     return weights[title] * 3 + weights[artist] * 2 + weights[duration] * 2
 
 
+_RELEASE_SUFFIX = re.compile(r"\s+(single|ep)$")
+# Platform notes such as 【独家】 say nothing about the recording (GoMusic drops them too).
+_PLATFORM_NOTE = re.compile(r"\s*【[^】]*】")
+_BRACKETED = re.compile(r"[\(\[（［]([^\)\]）］]*)[\)\]）］]")
+_DASH_SUFFIX = re.compile(r"\s+[-–—]\s+(.+)$")
+# Bracket or dash text that marks a different recording. Kept apart so "(Live)"
+# never matches the studio song, while "(feat. X)" or "(Remastered)" do.
+_VERSION_WORDS = (
+    "live", "现场", "演唱会", "remix", "mix", "acoustic", "不插电", "instrumental", "inst", "伴奏", "纯音乐",
+    "karaoke", "demo", "cover", "翻唱", "sped up", "speed up", "slowed", "nightcore", "8d", "dj", "版",
+    "version", "ver.", "edit", "piano", "orchestral", "a cappella", "acapella",
+)
+_IGNORED_WORDS = ("feat", "ft.", "with ", "remaster", "explicit", "clean", "mono", "stereo")
+_CJK = re.compile(r"[぀-ヿ㐀-鿿豈-﫿]+")
+_LATIN = re.compile(r"[a-z0-9][a-z0-9'.&]*(?:\s+[a-z0-9][a-z0-9'.&]*)*")
+
+
+def album_key(album: str) -> str:
+    """Album name for comparison: Apple adds " - Single" / " - EP" to the same release."""
+    return _RELEASE_SUFFIX.sub("", fold(album)).strip()
+
+
+def title_parts(title: str) -> tuple[str, frozenset]:
+    """(core title, version marks). "晴天 (Live)" -> ("晴天", {"live"}); "(feat. X)" is dropped."""
+    text = unicodedata.normalize("NFKC", title or "").casefold()
+    text = _PLATFORM_NOTE.sub("", text)
+    marks = set()
+    extras = [match.group(1) for match in _BRACKETED.finditer(text)]
+    text = _BRACKETED.sub(" ", text)
+    dash = _DASH_SUFFIX.search(text)
+    if dash:
+        extras.append(dash.group(1))
+        text = text[:dash.start()]
+    for extra in extras:
+        extra = extra.strip()
+        if not extra or any(word in extra for word in _IGNORED_WORDS):
+            continue
+        for word in _VERSION_WORDS:
+            if word in extra:
+                marks.add(word)
+    core = re.sub(r"[^\w\s一-鿿]", " ", text, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", core).strip(), frozenset(marks)
+
+
+def same_title(left: str, right: str) -> bool:
+    """Same core title and the same version marks (Live, Remix, 伴奏 …)."""
+    a, b = title_parts(left), title_parts(right)
+    return bool(a[0]) and a == b
+
+
+def artist_names(value: str) -> frozenset:
+    """Every way one credit can be written: whole names, and their Chinese and Latin parts.
+
+    "刘柏辛Lexie" -> {"刘柏辛lexie", "刘柏辛", "lexie"}, so it meets "Lexie Liu" (via
+    "lexie") or "刘柏辛" on another platform.
+    """
+    folded = unicodedata.normalize("NFKC", value or "").casefold()
+    names = set()
+    for part in re.split(r"\s*(?:/|&|、|,|，|;|；| feat\.? | ft\.? | x | and | with )\s*", " " + folded + " "):
+        part = re.sub(r"[\(（][^\)）]*[\)）]", " ", part).strip()
+        if not part:
+            continue
+        whole = re.sub(r"[^\w一-鿿]", "", part)
+        if len(whole) >= 2:
+            names.add(whole)
+        for cjk in _CJK.findall(part):
+            if len(cjk) >= 2:
+                names.add(cjk)
+        for latin in _LATIN.findall(part):
+            latin = latin.strip()
+            words = latin.split()
+            if len(latin) >= 3:
+                names.add(latin.replace(" ", ""))
+            names.update(word for word in words if len(word) >= 3)
+    return frozenset(names)
+
+
+def same_artist(left: str, right: str) -> bool:
+    """Any shared name, or names that are nearly the same spelling."""
+    a, b = artist_names(left), artist_names(right)
+    if not a or not b:
+        return False
+    if a & b:
+        return True
+    return artist_strength(left, right) == "strong"
+
+
+def _closest(source: SongIdentity, candidates):
+    def key(candidate):
+        same_album = bool(source.album and candidate.album and album_key(source.album) == album_key(candidate.album))
+        gap = (abs(candidate.duration_seconds - source.duration_seconds)
+               if candidate.duration_seconds and source.duration_seconds else 0.0)
+        same_name = candidate.album.casefold().strip() == source.album.casefold().strip()
+        return (not same_album, not same_name, gap)
+    return min(candidates, key=key)
+
+
+def same_release(source: SongIdentity, candidate: SongIdentity) -> bool:
+    """Title, artist and album all agree: the same song on the same release."""
+    if not source.album or not candidate.album:
+        return False
+    return (same_title(source.title, candidate.title) and same_artist(source.artist, candidate.artist)
+            and album_key(source.album) == album_key(candidate.album))
+
+
+def similarity(source: SongIdentity, candidate: SongIdentity) -> float:
+    """How alike two songs look, 0..1: title most, then artist, duration and album."""
+    a, b = title_parts(source.title), title_parts(candidate.title)
+    title = _ratio(a[0], b[0])
+    if a[1] != b[1]:
+        title *= 0.8
+    artist = 1.0 if same_artist(source.artist, candidate.artist) else _ratio(fold(source.artist), fold(candidate.artist))
+    relation = duration_relation(source.duration_seconds, candidate.duration_seconds)
+    duration = {"close": 1.0, "near": 0.5, "unknown": 0.5, "far": 0.0}[relation]
+    album = 1.0 if source.album and candidate.album and album_key(source.album) == album_key(candidate.album) else 0.0
+    score = (title * 5 + artist * 3 + duration * 1.5 + album * 0.5) / 10.0
+    return score if title >= 0.5 else score * 0.5  # a different title is rarely the same song
+
+
+# Never offered for a normal song: these are other products, not the recording.
+_NEVER_SUGGEST = frozenset({"karaoke", "instrumental", "inst", "伴奏", "纯音乐", "nightcore", "sped up", "speed up",
+                            "slowed", "8d"})
+
+
+def _worth_asking(source: SongIdentity, candidate: SongIdentity) -> bool:
+    """A fuzzy suggestion must be plausibly the same song.
+
+    Same core title (only the version or the artist differs), or the same
+    artist with a nearly identical title. Karaoke, instrumental and sped-up
+    versions are never suggested for a song that is not one itself.
+    """
+    source_core, source_marks = title_parts(source.title)
+    core, marks = title_parts(candidate.title)
+    if (marks - source_marks) & _NEVER_SUGGEST:
+        return False
+    if core and core == source_core:
+        return True
+    return same_artist(source.artist, candidate.artist) and _ratio(source_core, core) >= 0.8
+
+
 def classify_song(source: SongIdentity, candidates: tuple[SongIdentity, ...] | list[SongIdentity]) -> MatchRow:
-    """Pick at most one target. A tie between two good songs stays uncertain."""
-    ranked = []
-    for candidate in candidates:
-        if not isinstance(candidate, SongIdentity) or not candidate.song_id or not candidate.title:
-            continue
-        title = title_strength(source.title, candidate.title)
-        artist = artist_strength(source.artist, candidate.artist)
-        duration = duration_relation(source.duration_seconds, candidate.duration_seconds)
-        if title == "none":
-            continue
-        ranked.append((_pair_score(title, artist, duration), title, artist, duration, candidate))
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    if not ranked:
-        return MatchRow("unmatched", source, None, "曲库里没有歌名接近的歌", 0.0)
-    score, title, artist, duration, target = ranked[0]
-    rival = ranked[1][0] if len(ranked) > 1 else -1
-    if title == "strong" and artist == "strong" and duration == "close":
-        if rival >= score - 0.15 and ranked[1][1] == "strong" and ranked[1][2] == "strong" and ranked[1][3] == "close":
-            return MatchRow("uncertain", source, target, "有两首同样接近，需要你选", score)
-        return MatchRow("matched", source, target, "歌名、歌手、时长都接近", score)
-    if title == "strong" and artist == "strong" and duration == "unknown":
-        return MatchRow("uncertain", source, target, "歌名和歌手接近，但没有时长，不能直接当同一首", score)
-    if title == "strong" and artist == "unknown" and duration == "close":
-        return MatchRow("uncertain", source, target, "歌名和时长接近，但两边都没有歌手名", score)
-    if title == "strong" and artist == "strong" and duration == "near":
-        return MatchRow("uncertain", source, target, "歌名和歌手接近，时长差得有点多", score)
-    if title == "strong" and artist == "weak" and duration == "close":
-        return MatchRow("uncertain", source, target, "歌名和时长接近，歌手只对上一部分", score)
-    if title == "weak" and artist == "strong" and duration == "close":
-        return MatchRow("uncertain", source, target, "歌手和时长接近，歌名只是像", score)
-    if duration == "far":
-        return MatchRow("unmatched", source, None, "时长差太多，不当成同一首", score)
-    return MatchRow("unmatched", source, None, "歌名、歌手、时长没有同时接近", score)
+    """Pick at most one target (rules confirmed by the user on 2026-11-18).
+
+    Title and artist both agreeing (version marks such as Live must agree too;
+    an artist may be written differently, e.g. "刘柏辛Lexie" / "Lexie Liu") is
+    the same song: no question, no audio check. Among several, the same album,
+    then the closest duration wins. Only when title or artist disagree is the
+    match fuzzy, and then only the single most similar song is offered.
+    """
+    usable = [candidate for candidate in candidates
+              if isinstance(candidate, SongIdentity) and candidate.song_id and candidate.title]
+    exact = [candidate for candidate in usable
+             if same_title(source.title, candidate.title) and same_artist(source.artist, candidate.artist)
+             and duration_relation(source.duration_seconds, candidate.duration_seconds) != "far"]
+    if exact:
+        best = _closest(source, exact)
+        same_album = bool(source.album and best.album and album_key(source.album) == album_key(best.album))
+        return MatchRow("matched", source, best, "歌名、歌手、专辑都一致" if same_album else "歌名和歌手一致", 1.0)
+    if not usable:
+        return MatchRow("unmatched", source, None, "曲库里没有搜到", 0.0)
+    worth = [candidate for candidate in usable if _worth_asking(source, candidate)]
+    if not worth:
+        return MatchRow("unmatched", source, None, "没有歌名接近的同一首歌", 0.0)
+    best = max(worth, key=lambda candidate: similarity(source, candidate))
+    score = similarity(source, best)
+    reasons = []
+    if not same_title(source.title, best.title):
+        reasons.append("歌名不完全一样")
+    if not same_artist(source.artist, best.artist):
+        reasons.append("歌手名不一样")
+    if duration_relation(source.duration_seconds, best.duration_seconds) == "far":
+        reasons.append("时长差得多")
+    return MatchRow("uncertain", source, best, "，".join(reasons) + "，这是最像的一首", score)
+
+
+def rank_candidates(source: SongIdentity, candidates, limit: int = 1) -> tuple[SongIdentity, ...]:
+    """The most similar candidate(s), best first. The sync window asks about one."""
+    seen, usable = set(), []
+    for candidate in candidates or ():
+        if isinstance(candidate, SongIdentity) and candidate.song_id and candidate.title and candidate.song_id not in seen:
+            seen.add(candidate.song_id)
+            usable.append(candidate)
+    usable.sort(key=lambda candidate: -similarity(source, candidate))
+    return tuple(usable[:max(1, limit)])
 
 
 def build_preview(songs: tuple[SongIdentity, ...] | list[SongIdentity], finder) -> tuple[MatchRow, ...]:

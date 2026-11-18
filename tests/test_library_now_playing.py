@@ -4,7 +4,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QByteArray, QBuffer, QCoreApplication, QEvent, QIODevice, QRect, Qt
+from PySide6.QtCore import QByteArray, QBuffer, QCoreApplication, QEvent, QIODevice, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtTest import QTest
@@ -97,6 +97,48 @@ class LibraryNowPlayingTests(unittest.TestCase):
         self.assertEqual(set(self.island.music_button_rects),
                          {'music:previous', 'music:toggle_play_pause', 'music:next'})
         self.assertFalse(self.island.music_cover_rect.isEmpty())
+
+    def _row(self):
+        self.island.setFixedSize(900, self.island.ROW_HEIGHT)
+        self.island.set_bar_mode('row')
+        self.island.set_track(self.track)
+        self.app.processEvents()
+
+    def test_row_lyric_uses_the_island_reading_painter(self):
+        # The one-line bar reads word by word like the island, not plain text.
+        self._row()
+        lanes = []
+        original = LibraryNowPlayingIsland._paint_compact_lyric_viewport
+        def spy(island, painter, rect):
+            lanes.append(QRectF(rect))
+            return original(island, painter, rect)
+        with patch.object(LibraryNowPlayingIsland, '_paint_compact_lyric_viewport', spy):
+            self.island.grab()
+        self.assertTrue(lanes)
+        lane = lanes[-1]
+        self.assertLess(lane.height(), self.island._u(48.0))       # one line, never the dual-line pose
+        self.assertAlmostEqual(lane.center().y(), self.island.height() / 2, delta=1.)
+        cover, previous = self.island.music_cover_rect, self.island.music_button_rects['music:previous']
+        self.assertGreater(lane.left(), cover.right())
+        self.assertLess(lane.right(), previous.left())
+
+    def test_row_ripple_rides_above_the_words_inside_the_row_shell(self):
+        self._row()
+        seen = []
+        def wave(island, painter, rect, radius, expanded):
+            seen.append((QRectF(rect), island._music_shell_path(rect, radius, expanded).boundingRect()))
+        with patch.object(IslandStackVisual, '_paint_music_light_wave', wave):
+            self.island.grab()
+        self.assertTrue(seen)
+        layout, shell = seen[-1]
+        row = QRectF(self.island.rect())
+        water = layout.top() + layout.height() * .495
+        self.assertLess(water, row.center().y() - self.island._u(8.))      # above the lyric line
+        self.assertGreater(water, row.top())
+        self.assertGreater(layout.height(), row.height() * 1.8)            # laid out at the tall bar's scale
+        # The renderer's clip is the row's own shell, never the taller layout's.
+        self.assertTrue(row.adjusted(-1, -1, 1, 1).contains(shell))
+        self.assertIsNone(getattr(self.island, '_row_wave_shell', None))
 
     def test_double_click_keeps_fixed_expanded_pose_and_never_enters_native_island_lifecycle(self):
         self.island.set_track(self.track)

@@ -593,6 +593,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     queueNextRequested = Signal(object)
     # A playlist's own page: open it, play from it, add a song to a playlist.
     playlistPageRequested = Signal(object)
+    playlistSyncRequested = Signal(object)  # a personal playlist, or None from the list heading
     playlistSongRequested = Signal(object, object, int, object, str)
     playlistAddRequested = Signal(object, object)
     # A search song played now, ahead of the current queue (插播).
@@ -792,6 +793,16 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.refresh_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
         self.refresh_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.refresh_shortcut.activated.connect(lambda: self._variant_view.toggle_refresh())
+        # Playlist sync entry beside the 个人歌单 heading; the variant layout places it.
+        self.playlist_sync_button = GlassPushButton("同步歌单", self)
+        self.playlist_sync_button.setFont(_entry_font(13))
+        self.playlist_sync_button.setProperty("glassRadius", 16.0)
+        self.playlist_sync_button.setProperty("glassRefractive", True)
+        self.playlist_sync_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playlist_sync_button.setAccessibleName("网易云与 Apple Music 歌单同步")
+        self.playlist_sync_button.setStyleSheet("QPushButton { color: #f3f4f7; background: transparent; border: none; }")
+        self.playlist_sync_button.clicked.connect(lambda _checked=False: self.playlistSyncRequested.emit(None))
+        self.playlist_sync_button.hide()
         self.empty_action = GlassPushButton("搜索歌曲", self)
         self.empty_action.setFont(_entry_font(14))
         self.empty_action.setProperty("glassRadius", 12.0)
@@ -841,6 +852,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.playlist_page.songRequested.connect(self._song_from_page)
         self.playlist_page.queueNextRequested.connect(self.queueNextRequested)
         self.playlist_page.addRequested.connect(self.playlistAddRequested)
+        self.playlist_page.syncRequested.connect(self.playlistSyncRequested)
         self.playlist_page.artworkNeeded.connect(self._page_artwork_needed)
         from local.music_search_history_panel import SearchHistoryPanel
         self.search_history_panel = SearchHistoryPanel(self)
@@ -1091,6 +1103,14 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
                 pass
         return None
 
+    def set_sync_progress(self, done, total, running):
+        """Playlist-sync audio check: the 同步歌单 key shows the progress, in every section."""
+        self._sync_progress = (int(done), int(total)) if running and total else None
+        button = self.playlist_sync_button
+        button.setText(f"音轨比对 {done}/{total}" if self._sync_progress else "同步歌单")
+        button.setToolTip("后台正在比对候选歌曲的音轨，点开查看" if self._sync_progress else "")
+        self._layout()
+
     def set_notice(self, message):
         self._notice = str(message or '')
         self.scroll.setToolTip(self._notice)
@@ -1192,6 +1212,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             self._variant_view.restore_catalog_section()
             self._rebuild_rows()
         self._account = account
+        self.playlist_page.sync_source = account.source_id
         source = next((item for item in ENTRY_SOURCES if item.source_id == account.source_id), ENTRY_SOURCES[0])
         self.source_button.source = source
         self.source_button.setText(source.name)
@@ -1827,6 +1848,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         """Show one playlist's songs over the list area; the controller fills it."""
         self.playlist_page.open(collection)
         self.scroll.hide()
+        self.playlist_sync_button.hide()  # the page has its own sync button
         self._place_playlist_page()
         self.playlistPageRequested.emit(collection)
 

@@ -20,9 +20,9 @@ _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(?:token|cookie|password|authorization|secret)s?\b\s*[=:]\s*\S+"
 )
 _SECRET_WORD = re.compile(r"(?i)\b(?:token|cookie|password|authorization|secret)s?\b")
-_COUNTS = {"count", "added", "failed"}
+_COUNTS = {"count", "added", "removed", "failed"}
 _LABELS = {"stage", "action", "result", "preview", "reason"}
-_ORDER = ("stage", "action", "result", "count", "added", "failed", "preview", "reason")
+_ORDER = ("stage", "action", "result", "count", "added", "removed", "failed", "preview", "reason")
 
 
 def apple_log(operation: str, **fields) -> None:

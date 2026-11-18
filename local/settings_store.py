@@ -230,6 +230,10 @@ DEFAULT_SETTINGS = {
     "v2_library_last_playback_surface": "fullscreen",
     "v2_music_content_layout": "lyrics",
     "v2_personal_dj_enabled": False,
+    # Software update (6.52): both off until the user turns them on.
+    "v2_update_check_enabled": False,
+    "v2_update_auto_enabled": False,
+    "v2_update_ignored_version": "",
     "v2_motion_cover_enabled": True,
     "v2_personal_dj_voice_key": "",
     "v2_broadcast_style": "rings",

@@ -20,15 +20,12 @@ from api.apple_music_catalog import (
     songs_from_payload,
 )
 from api.apple_music_companion import MemoryAppleMusicCompanion, ProcessAppleMusicCompanion, availability
-from api.apple_music_sync import FileLinkStore, MemoryLinkStore, refuse_delete
 from api.models import ColorToken
 from api.online_music import (
     AccountSnapshot, CatalogPage, LoginSnapshot, OnlineMusicError, OnlineMusicService, OnlinePlaylist, OnlineSong,
 )
 from api.online_music_credentials import ProtectedCredentialStore
 from api.online_music_router import RoutingOnlineBackend
-from local.apple_music_sync_dialog import PlaylistSyncDialog
-from local.apple_music_sync_flow import build_import_preview, execute_import, selected_additions
 from local.owned_music_player import OwnedMusicPlayer
 from local.playback_entry_window import PlaybackEntryWindow
 
@@ -133,128 +130,6 @@ class MatchingTests(unittest.TestCase):
         self.assertEqual((song.artist, song.album, song.duration_seconds, song.catalog_id), ("周杰伦", "叶惠美", 269.0, "12345"))
         self.assertEqual(song.artwork_url, "https://example.test/image/500x500bb.jpg")
         self.assertEqual(service_song(song)["picUrl"], song.artwork_url)
-
-
-class SyncRuleTests(unittest.TestCase):
-    def service(self):
-        return _CatalogService()
-
-    def test_preview_does_not_write_and_confirm_adds_only_the_match(self):
-        service = self.service()
-        store = MemoryLinkStore()
-        rows, plan, _link = build_import_preview(service, "netease_to_apple", "npl", "", store)
-        self.assertEqual(service.writes, [])
-        self.assertEqual([row.state for row in rows], ["matched", "unmatched"])
-        with self.assertLogs("GluSpot.apple", level="INFO") as logs:
-            result = execute_import(
-                service, "netease_to_apple", "npl", "", selected_additions(rows, plan, ()), store, new_name="搬来的",
-            )
-        blob = "\n".join(logs.output)
-        self.assertIn("operation=write", blob)
-        self.assertNotIn("npl", blob)
-        self.assertNotIn("token", blob.lower())
-        self.assertEqual(result.added, 1)
-        self.assertEqual(result.failed, 0)
-        self.assertEqual(service.writes[0][0], "create")
-        self.assertEqual(service.writes[1], ("append", "apple_music", "created", ("a1",)))
-        self.assertEqual(store.find("netease", "npl", "apple_music", "created").pairs, (("n1", "a1"),))
-
-    def test_second_sync_skips_pairs_and_lists_conflicts_without_deleting(self):
-        service = self.service()
-        store = MemoryLinkStore()
-        rows, plan, _link = build_import_preview(service, "netease_to_apple", "npl", "apl", store)
-        first = execute_import(service, "netease_to_apple", "npl", "apl", selected_additions(rows, plan, ()), store)
-        self.assertEqual(first.added, 1)
-        service.tracks[("apple_music", "apl")].append(OnlineSong("apple_music", "extra", "另一首", "别人", duration_seconds=200))
-        service.tracks[("netease", "npl")].pop(0)
-        again, incremental, _link = build_import_preview(service, "netease_to_apple", "npl", "apl", store)
-        self.assertEqual(incremental.additions, ())
-        self.assertTrue(any(conflict.kind == "missing_on_source" for conflict in incremental.conflicts))
-        self.assertTrue(any(conflict.kind == "added_on_target" for conflict in incremental.conflicts))
-        before = list(service.writes)
-        execute_import(service, "netease_to_apple", "npl", "apl", selected_additions(again, incremental, ()), store)
-        self.assertEqual(service.writes, before)
-        with self.assertRaises(ValueError):
-            refuse_delete("delete")
-
-    def test_uncertain_row_is_added_only_when_named_and_failure_is_not_retried(self):
-        source = song("netease", "n9", "晴天", "周杰伦", 0)
-        rows = build_preview([source], lambda _song: [song("apple_music", "a9", "晴天", "周杰伦", 200)])
-        self.assertEqual(rows[0].state, "uncertain")
-        self.assertEqual(selected_additions(rows, type("Plan", (), {"additions": ()})(), ()), ())
-        chosen = selected_additions(rows, type("Plan", (), {"additions": ()})(), ("n9",))
-        self.assertEqual(chosen[0].song_id, "a9")
-
-        class Once:
-            def __init__(self):
-                self.calls = 0
-            def __call__(self, _item):
-                self.calls += 1
-                raise OnlineMusicError("response", "apple_music", "失败")
-
-        from api.apple_music_sync import PlaylistLink, SyncAddition, apply_additions
-        writer = Once()
-        result = apply_additions((SyncAddition("apple_music", "apl", "a9", "n9", "n9", "a9"),), writer, PlaylistLink("netease", "npl", "apple_music", "apl"))
-        self.assertEqual((result.added, result.failed, writer.calls), (0, 1, 1))
-        self.assertEqual(result.link.pairs, ())
-
-    def test_link_file_keeps_ids_only(self):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        path = Path(folder.name) / "apple-music-sync.json"
-        store = FileLinkStore(path)
-        from api.apple_music_sync import PlaylistLink
-        store.save(PlaylistLink("netease", "npl", "apple_music", "apl", (("n1", "a1"),)))
-        text = path.read_text(encoding="utf-8")
-        self.assertNotIn("token", text.lower())
-        self.assertNotIn("cookie", text.lower())
-        self.assertEqual(store.find("netease", "npl", "apple_music", "apl").pairs, (("n1", "a1"),))
-
-
-class _CatalogService:
-    def __init__(self):
-        self.writes = []
-        self.tracks = {
-            ("netease", "npl"): [
-                OnlineSong("netease", "n1", "晴天", "周杰伦", "叶惠美", 269),
-                OnlineSong("netease", "n2", "完全不同", "别人", "别的", 180),
-            ],
-            ("apple_music", "apl"): [],
-        }
-
-    def playlists(self, source_id):
-        title = "云" if source_id == "netease" else "果"
-        playlist_id = "npl" if source_id == "netease" else "apl"
-        return CatalogPage((OnlinePlaylist(source_id, playlist_id, title),), 1, False)
-
-    def playlist_tracks(self, source_id, playlist_id, limit=100, offset=0):
-        rows = self.tracks.get((source_id, playlist_id), [])
-        window = tuple(rows[offset:offset + limit])
-        return CatalogPage(window, offset + len(window), False)
-
-    def search(self, source_id, query, kind="songs", limit=5, offset=0):
-        del kind, offset
-        found = [OnlineSong("apple_music", "a1", "晴天", "周杰伦", "叶惠美", 269)]
-        if source_id == "netease":
-            found = [OnlineSong("netease", "n1", "晴天", "周杰伦", "叶惠美", 269)]
-        return CatalogPage(tuple(found[:limit]), limit, False)
-
-    def create_playlist(self, source_id, title, expected_user_id=""):
-        del expected_user_id
-        self.writes.append(("create", source_id, title))
-        playlist_id = "created"
-        self.tracks[(source_id, playlist_id)] = []
-        return playlist_id
-
-    def append_playlist_tracks(self, source_id, playlist_id, song_ids, expected_user_id=""):
-        del expected_user_id
-        self.writes.append(("append", source_id, playlist_id, tuple(song_ids)))
-        self.tracks.setdefault((source_id, playlist_id), []).extend(
-            OnlineSong(source_id, song_id, song_id, "", "", 0) for song_id in song_ids)
-
-    def add_song_to_playlist(self, source_id, song_id, playlist_id, expected_user_id=""):
-        del expected_user_id
-        self.writes.append(("add", source_id, playlist_id, song_id))
 
 
 class CompanionServiceTests(unittest.TestCase):
@@ -494,7 +369,7 @@ class AppleSurfaceTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_login_window_copy_and_connected_sync_button(self):
+    def test_login_window_copy_and_no_sync_button_on_login_page(self):
         window = PlaybackEntryWindow()
         self.addCleanup(window.close)
         window.show_sources()
@@ -514,47 +389,9 @@ class AppleSurfaceTests(unittest.TestCase):
         window.show()
         window._layout_children()
         self.assertEqual(window.source_buttons["apple_music"].connection_status, "已连接")
-        self.assertTrue(window.playlist_sync_button.isVisible())
+        # 6.52: playlist sync opens from settings and the library, never from the login page.
+        self.assertFalse(window.playlist_sync_button.isVisible())
         self.assertLess(window.enter_button.geometry().right(), window.account_logout_button.geometry().left())
-        self.assertFalse(window.playlist_sync_button.geometry().intersects(window.enter_button.geometry()))
-
-    def test_dialog_preview_gates_the_write_button(self):
-        dialog = PlaylistSyncDialog()
-        self.addCleanup(dialog.close)
-        dialog.set_source_playlists([("npl", "午后")])
-        dialog.set_target_playlists([("apl", "已有")])
-        self.assertFalse(dialog.confirm_button.isEnabled())
-        self.assertEqual(dialog.request()["direction"], "netease_to_apple")
-        self.assertTrue(dialog.apple_button.isHidden())
-        from local.apple_music_sync_dialog import SourceGlassCombo
-        self.assertIsInstance(dialog.source_list, SourceGlassCombo)
-        self.assertIsInstance(dialog.target_list, SourceGlassCombo)
-        self.assertEqual(dialog.source_list.GLASS_FILL, 56)
-        self.assertEqual(dialog.source_list.GLASS_RIM, 56)
-        popup = dialog.source_list.view().styleSheet()
-        self.assertNotIn("#007aff", popup.lower())
-        self.assertNotIn("qlineargradient", popup.lower())
-        dialog.set_preview("匹配上 1 首", [("n9", "不确定的歌")])
-        self.assertTrue(dialog.confirm_button.isEnabled())
-        from PySide6.QtCore import Qt
-        dialog.uncertain.item(0).setCheckState(Qt.CheckState.Checked)
-        self.assertEqual(dialog.request()["include_uncertain"], ("n9",))
-        dialog.set_direction("apple_to_netease")
-        self.assertEqual(dialog.direction(), "netease_to_apple")
-        self.assertTrue(dialog.confirm_button.isEnabled())
-        from local.playback_entry_controller import PlaybackEntryController
-        dialog._direction = "apple_to_netease"
-        controller = PlaybackEntryController.__new__(PlaybackEntryController)
-        controller._closed = False
-        controller._generation = 1
-        controller._sync_dialog = dialog
-        controller._sync_payload = {"rows": (), "plan": type("Plan", (), {"additions": ()})()}
-        submitted = []
-        controller.tasks = type("Tasks", (), {"submit": staticmethod(lambda token, action: submitted.append(token) or True)})()
-        controller._request_sync_preview()
-        controller._request_sync_write()
-        self.assertEqual(submitted, [])
-        self.assertIn("反向同步还没打开", dialog.detail.toPlainText())
 
     def test_owned_player_uses_companion_play_and_keeps_playback_mode_local(self):
         from api.lyrics import LocalLyricsStore
@@ -964,6 +801,34 @@ class PageBridgeContractTests(unittest.TestCase):
         self.assertNotIn("developertoken", lowered)
         self.assertNotIn("password", lowered)
         self.assertNotIn("cookie", lowered)
+
+    def test_library_writes_are_real_posts_and_refusals_throw(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node unavailable")
+        script = Path(__file__).resolve().parents[1] / "native" / "apple_music_companion" / "page_bridge.js"
+        program = r"""
+const lib = require(process.argv[1]);
+(async () => {
+const calls = [];
+const mk = {api: {music: async (path, query, options) => { calls.push({path, query, options}); return {data: [{id: "p.new", type: "library-playlists", attributes: {name: "歌单"}}]}; }}};
+const done = await lib.writeLibrary(mk, "/v1/me/library/playlists", {attributes: {name: "歌单"}});
+const call = calls[0];
+if (call.options.method !== "POST") throw new Error("not a POST");
+if (call.options.fetchOptions) throw new Error("fetchOptions is ignored by this MusicKit build");
+if (call.options.body.attributes.name !== "歌单") throw new Error("body");
+if (Object.keys(call.query).length) throw new Error("body leaked into the query");
+if (lib.libraryRows(done.result)[0].id !== "p.new") throw new Error("created id");
+const refused = {api: {music: async () => ({status: 403})}};
+let threw = false;
+try { await lib.writeLibrary(refused, "/v1/me/library/playlists/p.1/tracks", {data: []}); } catch (error) { threw = /403/.test(error.message); }
+if (!threw) throw new Error("a refused write must throw");
+console.log("ok");
+})().catch(error => { console.error(error.message); process.exit(1); });
+"""
+        completed = subprocess.run([node, "-e", program, str(script)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("ok", completed.stdout)
 
     def test_page_script_loads_a_simulated_library_response(self):
         node = shutil.which("node")

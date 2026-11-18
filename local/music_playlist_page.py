@@ -117,6 +117,11 @@ class _Canvas(QWidget):
         cover = self.cover_rect()
         return QRectF(cover.right() + 20, cover.bottom() - 38, 116, 38)
 
+    def sync_rect(self) -> QRectF:
+        """Playlist sync, beside 播放全部, only on the user's own playlists."""
+        play = self.play_all_rect()
+        return QRectF(play.right() + 10, play.top(), 92, play.height())
+
     def row_rect(self, index: int) -> QRectF:
         return QRectF(8, self.header_height() + index * ROW_HEIGHT, max(1, self.width() - 16), ROW_HEIGHT)
 
@@ -137,6 +142,8 @@ class _Canvas(QWidget):
     def hit(self, point: QPointF):
         if self.play_all_rect().contains(point) and self.page.collection is not None:
             return ("play_all", -1)
+        if self.page.can_sync() and self.sync_rect().contains(point):
+            return ("sync", -1)
         top = self.header_height()
         if point.y() < top:
             return None
@@ -154,10 +161,11 @@ class _Canvas(QWidget):
     def mouseMoveEvent(self, event):
         found = self.hit(event.position())
         row = found[1] if found else -1
-        action = found[0] if found and found[0] in ACTIONS + ("play_all", "cover") else ""
+        action = found[0] if found and found[0] in ACTIONS + ("play_all", "cover", "sync") else ""
         if (row, action) != (self._hover_row, self._hover_action):
             self._hover_row, self._hover_action = row, action
             tip = ACTION_TIPS.get(action) or ("播放全部" if action == "play_all" else
+                                              "把这个歌单同步到另一个平台" if action == "sync" else
                                               "立即播放这首，之后回到原播放列表" if action == "cover" else "")
             self.setToolTip(tip)
             self.setCursor(Qt.CursorShape.PointingHandCursor if action else Qt.CursorShape.ArrowCursor)
@@ -183,6 +191,8 @@ class _Canvas(QWidget):
         kind, index = pressed
         if kind == "play_all":
             self.page.request_play_all(self.global_rect(self.cover_rect()))
+        elif kind == "sync":
+            self.page.syncRequested.emit(self.page.collection)
         elif kind == "cover":
             self.page.request_song(index, "single", self.global_rect(self.row_cover_rect(index)))
         elif kind == "play":
@@ -283,6 +293,16 @@ class _Canvas(QWidget):
             p.setFont(label)
             p.setPen(ink)
             p.drawText(button.adjusted(36, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "播放全部")
+        if page.can_sync():
+            button = self.sync_rect()
+            backdrop, source = widget_glass_backdrop(self, button)
+            paint_liquid_glass(p, button, radius=19, refractive=True, backdrop=backdrop, backdrop_rect=source,
+                               hovered=self._hover_action == "sync", light=not dark,
+                               material_level=widget_glass_level(self), cache_token=(id(self), "sync"))
+            label = _entry_font(13)
+            p.setFont(label)
+            p.setPen(ink)
+            p.drawText(button, Qt.AlignmentFlag.AlignCenter, "同步歌单")
 
     def _paint_row(self, p: QPainter, index: int, ink: QColor, muted: QColor, dark: bool):
         page = self.page
@@ -355,6 +375,7 @@ class PlaylistPage(QWidget):
     songRequested = Signal(object, object, int, object, str)  # collection, rows, index, rect, "single"|"list"
     queueNextRequested = Signal(object)                  # song row
     addRequested = Signal(object, object)                # song row, global QPoint
+    syncRequested = Signal(object)                       # collection: open playlist sync for it
     artworkNeeded = Signal(str, str)
 
     def __init__(self, parent: QWidget, artwork_lookup, current_lookup=None):
@@ -367,6 +388,7 @@ class PlaylistPage(QWidget):
         self.loading = False
         self.error = ""
         self.description = ""
+        self.sync_source = ""  # the library account's platform; set by the window
         self._asked: set[str] = set()
         self._shrink = 0.0
         self._shrink_animation = QVariantAnimation(self)
@@ -451,6 +473,13 @@ class PlaylistPage(QWidget):
             return bool(callable(lookup) and lookup(item))
         except Exception:
             return False
+
+    def can_sync(self) -> bool:
+        """Only the user's own playlists can be a sync source."""
+        collection = self.collection
+        return bool(collection is not None and getattr(collection, "kind", "") == "playlist"
+                    and getattr(collection, "group", "") == "personal" and getattr(collection, "playlist_id", "")
+                    and getattr(self, "sync_source", "") in {"netease", "apple_music"})
 
     def summary(self) -> str:
         if self.loading and not self.rows:

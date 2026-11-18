@@ -452,6 +452,38 @@ var gluspotAppleLibrary = (function () {
     }
   }
 
+  // One library write through MusicKit's own request, which signs it; the
+  // page never reads a token. This MusicKit build's api.music(path, params,
+  // options) passes options.method and options.body straight into its request
+  // (checked on music.apple.com, MusicKit playback/AppleMusic-2646.4.0): an
+  // object body is sent as JSON. A "fetchOptions" wrapper is ignored and the
+  // call silently becomes a GET, which is what made earlier writes no-ops.
+  function describeError(error) {
+    if (!error) return "none";
+    var parts = [];
+    ["name", "errorCode", "status", "message", "description"].forEach(function (key) {
+      var value = error[key];
+      if (value !== undefined && value !== null && value !== "") parts.push(key + "=" + String(value).slice(0, 120));
+    });
+    return parts.join(" ") || String(error).slice(0, 160);
+  }
+
+  async function writeLibrary(mk, path, body, report, params) {
+    var note = typeof report === "function" ? report : function () {};
+    var options = {method: "POST"};
+    if (body !== undefined && body !== null) options.body = body;
+    try {
+      var result = await mk.api.music(path, params || {}, options);
+      var status = result && typeof result.status === "number" ? result.status : 0;
+      if (status && (status < 200 || status >= 300)) throw {name: "HttpStatus", status: status};
+      note("write path=" + path.split("?")[0] + " result=ok status=" + (status || "-"));
+      return {via: "musickit", status: status, result: result || {}};
+    } catch (error) {
+      note("write path=" + path.split("?")[0] + " result=error " + describeError(error));
+      throw new Error("write_failed " + describeError(error));
+    }
+  }
+
   return {
     pageQuery: pageQuery,
     isCatalogPlaylistId: isCatalogPlaylistId,
@@ -461,6 +493,8 @@ var gluspotAppleLibrary = (function () {
     searchPlaylists: searchPlaylists,
     documentOf: documentOf,
     libraryRows: libraryRows,
+    writeLibrary: writeLibrary,
+    describeError: describeError,
     songRows: songRows,
     collectPlaylists: collectPlaylists,
     collectTracks: collectTracks,
@@ -699,20 +733,45 @@ if (typeof window === "undefined" && typeof module !== "undefined" && module.exp
       throw new Error("argument");
     }
     if (request.op === "make_playlist") {
-      var created = await mk.api.music("/v1/me/library/playlists", {
-        method: "POST",
-        data: {attributes: {name: String(args.name || "").slice(0, 40), description: "GluSpot"}}
-      });
-      var createdRow = gluspotAppleLibrary.libraryRows(created)[0];
-      return {ok: true, playlist_id: createdRow && createdRow.id ? String(createdRow.id) : "", name: String(args.name || "")};
+      // Writes are real POSTs with a JSON body. (Passing {method, data} as the
+      // second argument of mk.api.music only adds query parameters to a GET:
+      // nothing was written, yet the call "succeeded".)
+      var name = String(args.name || "").slice(0, 40);
+      var created = await gluspotAppleLibrary.writeLibrary(mk, "/v1/me/library/playlists",
+        {attributes: {name: name, description: "GluSpot"}}, reportPageError);
+      var createdRow = gluspotAppleLibrary.libraryRows(created.result)[0];
+      var createdId = createdRow && createdRow.id ? String(createdRow.id) : "";
+      var createdName = createdRow && createdRow.attributes ? String(createdRow.attributes.name || "") : "";
+      if (!/^p\./.test(createdId) || (createdName && createdName !== name)) {
+        reportPageError("write create unconfirmed id=" + (createdId ? createdId.slice(0, 2) + "…" : "none")
+                        + " named=" + (createdName === name ? "yes" : "no") + " rows=" + gluspotAppleLibrary.libraryRows(created.result).length);
+        throw new Error("create_unconfirmed");
+      }
+      return {ok: true, playlist_id: createdId, name: name, via: created.via};
     }
     if (request.op === "append_tracks") {
-      var ids = Array.isArray(args.song_ids) ? args.song_ids : [];
-      await mk.api.music("/v1/me/library/playlists/" + encodeURIComponent(String(args.playlist_id || "")) + "/tracks", {
-        method: "POST",
-        data: {data: ids.map(function (id) { return {id: String(id), type: "songs"}; })}
-      });
-      return {ok: true, added: ids.length};
+      var ids = (Array.isArray(args.song_ids) ? args.song_ids : []).map(String);
+      var tracksPath = "/v1/me/library/playlists/" + encodeURIComponent(String(args.playlist_id || "")) + "/tracks";
+      try {
+        await gluspotAppleLibrary.writeLibrary(mk, tracksPath,
+          {data: ids.map(function (id) { return {id: id, type: "songs"}; })}, reportPageError);
+        return {ok: true, added: ids.length, via: "catalog"};
+      } catch (catalogError) {
+        // Some accounts only take library songs here (as the playlist importers
+        // found): add the songs to the library first, then add their library ids.
+        await gluspotAppleLibrary.writeLibrary(mk, "/v1/me/library", null, reportPageError, {"ids[songs]": ids.join(",")});
+        var front = mk.storefrontId || await storefront(mk);
+        var libraryIds = [];
+        for (var index = 0; index < ids.length; index += 1) {
+          var linked = await mk.api.music("/v1/catalog/" + encodeURIComponent(front) + "/songs/" + encodeURIComponent(ids[index]) + "/library");
+          var linkedRow = gluspotAppleLibrary.libraryRows(linked)[0];
+          if (linkedRow && linkedRow.id) libraryIds.push(String(linkedRow.id));
+        }
+        if (!libraryIds.length) throw catalogError;
+        await gluspotAppleLibrary.writeLibrary(mk, tracksPath,
+          {data: libraryIds.map(function (id) { return {id: id, type: "library-songs"}; })}, reportPageError);
+        return {ok: true, added: libraryIds.length, via: "library"};
+      }
     }
     throw new Error("unsupported");
   }

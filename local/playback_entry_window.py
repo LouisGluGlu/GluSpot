@@ -1618,19 +1618,7 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
             self.account_logout_button.setGeometry(leave)
             source_name = next(item.name for item in ENTRY_SOURCES if item.source_id == self._account.source_id)
             self.account_logout_button.setAccessibleName(f"退出{source_name}登录")
-            if self._account.source_id == "apple_music":
-                pane = self._source_pane_rect()
-                sync_rect = QRect(round(pane.right() - 132), round(pane.top() + 8), 120, 32)
-                blocked = (
-                    self.enter_button.geometry(), self.account_logout_button.geometry(),
-                    self.close_button.geometry(), self.back_button.geometry(),
-                )
-                clear = self.rect().contains(sync_rect) and not any(
-                    sync_rect.intersects(other) for other in blocked if other.width() > 0 and other.height() > 0)
-                if clear:
-                    self.playlist_sync_button.setGeometry(sync_rect)
-                    self.playlist_sync_button.setFont(_entry_font(13))
-                    self.playlist_sync_button.show()
+            # Playlist sync opens from settings and the library (6.52), not the login page.
         elif error_card:
             self.refresh_button.setGeometry(self._flat_action_rect(self._account_content_rects()[2]))
         else:

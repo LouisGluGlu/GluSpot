@@ -4,7 +4,7 @@
   <p><strong>桌面上的一座音乐岛。</strong></p>
   <p>歌在岛上停靠，词随鼓点涨落。<br />小到一枚胶囊，大到整片海。</p>
   <p>
-    <a href="https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.51">下载 6.51 · 安装程序 / 便携版</a>
+    <a href="https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.52">下载 6.52 · 安装程序 / 便携版</a>
     &nbsp; · &nbsp;
     <a href="https://github.com/LouisGluGlu/GluSpot/releases">发行记录</a>
   </p>
@@ -73,9 +73,9 @@
 - **安装版**：一路下一步，原目录覆盖升级，配置与账号都在。
 - **便携版**：完整解压后运行 `GluSpot.exe`，配置留在程序旁的 `GluSpot` 文件夹。
 
-[下载 GluSpot 6.51](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.51) · [本版说明](docs/release-6.51.md)
+[下载 GluSpot 6.52](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.52) · [本版说明](docs/release-6.52.md)
 
-当前为 **6.51 未签名测试版**，已知限制见本版说明。
+当前为 **6.52 未签名测试版**，已知限制见本版说明。
 
 ## 开源许可
 
@@ -90,6 +90,8 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 2026-11-18: 6.52 歌单同步加入音轨比对：Apple Music 的 30 秒试听片段和网易云整首对位比较，声音一样的候选自动选好，有区别的标出那一段供对听；后台运行，进度在同步窗口和音乐库显示，完成时提示音加托盘通知。歌名歌手专辑都一致的直接匹配；试听在同步窗口里自己播放、跟随 GluSpot 的输出设备。同步窗口改用新设置界面的样式（纯色底、分组卡片、iOS 列表蓝勾、跟随深浅主题）。新增软件更新（`api/app_update.py`、`local/app_update_controller.py`，设置 → 高级 → 软件更新）：自动检查更新、自动更新两个开关默认关，只认 GitHub 正式版，下载后核对大小和 SHA-256，自动更新在退出时静默安装，便携版只打开下载页。测试见 `tests/test_playlist_audio_compare.py`、`tests/test_app_update.py`；真实升级流程和网易云删曲还没在真机上验证。详见 [6.52 说明](docs/release-6.52.md)。
+- 2026-11-17: 6.52 歌单同步改成两个方向都能用（网易云 ↔ Apple Music），以来源歌单为准：来源里加的歌会加过去，来源里删的歌会删掉（手动模式下删歌前会再确认）。只在目标歌单里的变动、拿不准的匹配，由用户试听后选择或跳过，选过的会记住。Apple Music 不允许删歌，这类歌会单独列出来。每对歌单可以设成手动或自动，自动模式在启动时运行。入口在设置、音乐库「个人歌单」标题旁和自己的歌单页里，登录页不再放同步按钮。Apple 歌单改按曲库 id 比对，修好了第二次同步时误报变动、重复加歌的问题。测试覆盖 `tests/test_playlist_sync.py`；网易云删曲接口和整个流程还没有在真实账号上验证。详见 [6.52 说明](docs/release-6.52.md)。
 - 2026-11-12: `local/liquid_glass_controls.py` is the reusable liquid-glass plate. One slider amount maps to blur (4 px to 23.5 px) and tint (15% to 60%), the old 0–75% span. The plate interior is an even blur and tint, and the bright edge sits on the bottom. Light tints white with black ink; dark tints black with white ink. The comparison demo calls it and does not replace the live controls. See `_demos/liquid_glass_compare/demo.py`.
 - 2026-11-12: Startup reads the saved `v2_location_mode` again (`finder`, `tasker`, `top`, `free`). `636a4f7` had frozen that key to `top`, and `9cff078` still did. Finder's compact music island stays the Finder bar height, the same rule as `9cff078`. A style-two broadcast whose Lottie view is not actually showing still paints the cover indicator; entering the speaking state is unchanged.
 - 2026-11-12: The Apple lyric switch is gone. Window, narrow and fullscreen lyrics keep the existing float, glow and wrap spring, and always use the Apple line gap plus per-word reading. The blurred neighbor column is not used. The scroll spring is stiffness 220 and damping ratio 1. A hidden style-two Lottie still paints the cover broadcast. Wide and fullscreen covers use the same left and top inset. Island height, cover and lyric size stay on the 9cff078 numbers (expanded music 176u, cover 58u). Finder and Tasker drags show the magnet tile even after the bar sets the mode to Free; Free itself does not. Liquid glass is a runnable comparison in `_demos/liquid_glass_compare/demo.py` and is not wired into the controls yet.
@@ -217,7 +219,7 @@ This README is the canonical product, implementation, release-readiness, and pen
 - 6.413 improves whole-song source coverage and shared per-row reading, repairs invisible search text and packages all accumulated desktop/playback changes. Final verification passed **5518 Python tests / 297.018 seconds**, 12 native suites, 2447 production-render checks at each DPR 1/2, 401 package checks, frozen EXE diagnostics, 14 offline adapter checks, 19 QRC fallback checks and ten isolated installer scenarios. All 8399 portable entries passed CRC/per-file SHA-256; 594 frozen inputs and previous distribution files remained unchanged. [Download the modern x64 Setup and portable ZIP](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.413); see [source, artifact hashes and verification limits](docs/lyric-word-timing-6.413.md). Real account coverage, physical-display smoothness and hardware listening remain unverified.
 
 - Product name: `GluSpot`.
-- Current test-build version: `6.51`. Its Windows file version is 6.510.0.0, so it sorts after 6.50 (6.500) and 6.418. See [the 6.51 release notes](docs/release-6.51.md).
+- Current test-build version: `6.52`. Its Windows file version is 6.520.0.0, so it sorts after 6.51 (6.510), 6.50 (6.500) and 6.418. See [the 6.52 release notes](docs/release-6.52.md).
 - The October 19 lyric release packages the new credit cleanup, reliable interlude dots, QQ QRC and trusted-ID AMLL fallback in the modern Windows x64 Setup and portable ZIP. A packaging review corrected QQ's fallback to the pinned SDK's real `request` interface and verified it with the actual packaged dependency over loopback. Final verification passed **5443 Python tests / 287.814 seconds**, 12 native suites, 274 package checks, frozen EXE acceptance, 14 offline adapter checks and ten isolated installer scenarios; all 8399 ZIP entries passed CRC and per-file SHA-256. All 421 frozen source/build inputs remained unchanged, and previous dated releases are retained. See [artifacts, verification and usage](docs/windows-release-lyrics-2026-10-19.md). Real account coverage, physical-display smoothness and listening remain unverified.
 - The October 19 lyric-pipeline source follow-up expands evidence-based credit cleanup, adds display-only middle-gap dots from reliable real word endings, and obtains QQ QRC plus bounded trusted-ID AMLL TTML fallback without a new dependency. Raw lyrics, translation/romanization provenance, identity/version guards and existing provider/cache boundaries are retained. Final native Windows verification passed **5442 Python tests in 288.230 seconds**, 904 follow-up checks at each DPR 1/2 and 364 production-renderer frames per scale; all 386 frozen source files remained unchanged. Public fixed-ID QQ and AMLL read-only probes succeeded, while the existing QQ search entry missed the sample; account playback, long-session listening and physical-display smoothness remain unverified. Version and existing packages are unchanged. See [staged implementation, evidence and limits](docs/lyric-pipeline-2026-10-19.md).
 - The October 19 window-visibility release restores a proportionate **960 × 540 (16:9)** first player window, with 4:3 fallback for narrow work areas, while preserving manually resized windows and the **330 × 400** minimum. Completed compression clears inherited fullscreen/bar hiding state and restores the native island before aligning it to the cached preview, including formerly minimized windows. The production-credit cleanup/countdown option is removed and fixed on, including legacy disabled settings. Final verification passed **5310 Python tests in 276.895 seconds**, 542 related tests at each DPR 1/2, and six isolated native window lifecycle scenarios with 14 visible, non-minimized checkpoints. The new dated window-visibility Setup and portable ZIP passed 249 package checks, frozen EXE acceptance, 12 native suites, 14 offline runtime checks, ten isolated installer scenarios and all 8399 ZIP entries' CRC/per-file SHA-256 checks. All 397 frozen Python sources remained unchanged through packaging; the previous window-resize release is preserved. See [fixes, artifacts and verification](docs/window-visibility-and-release-2026-10-19.md).
@@ -438,7 +440,7 @@ No live login, credential operation, NetEase restart or PC launch was performed.
 
 ## Windows Test Build
 
-The 6.51 test packages use the PyInstaller `onedir` build. The Setup, portable ZIP and source archive are saved in `release` and published in GitHub Release v6.51. The layout keeps Qt plugins, fonts, icons, data files, and local lyrics beside the executable.
+The 6.52 test packages use the PyInstaller `onedir` build. The Setup, portable ZIP and source archive are saved in `release` and published in GitHub Release v6.52. The layout keeps Qt plugins, fonts, icons, data files, and local lyrics beside the executable.
 
 The modern runtime targets **Windows 10 1809 or later, x64** (or Windows 11). Its existing packages do not support Windows 7/8.1. A separate **Windows 7 SP1 x64 compatibility candidate** uses Python 3.8 / Qt 5 and program playback only, with unavailable SMTC capture/publication and default local output. Its build, OS-update prerequisites and actual acceptance limits are recorded in the [Windows 7 report](docs/windows-7-compatibility-2026-10-17.md). An installer that opens on an older system does not establish that its application can run there.
 
@@ -451,7 +453,7 @@ Build from the project root:
 Expected output:
 
 ```text
-release\GluSpot-6.51\GluSpot.exe
+release\GluSpot-6.52\GluSpot.exe
 ```
 
 The package is an unsigned internal test build. It does not include Steamworks ownership validation and should not be treated as a public release artifact.
@@ -462,13 +464,13 @@ After building the application, create the custom per-user installer with Inno S
 & packaging/windows/build-installer.ps1
 ```
 
-The build produces `release\GluSpot-6.51-Setup-x64.exe`. It offers a dedicated installation directory and a Windows uninstall entry. Higher-version upgrades preserve settings and accounts in the sibling `GluSpot\` data directory; same/lower versions require overwrite confirmation and are rejected in silent mode. Registered installations upgrade in their original directory. The installer stops only a running executable whose resolved path matches that exact target directory; other copies are preserved. Interrupted upgrades restore the previous binaries. Full uninstall clears owned configuration, accounts and caches while preserving unrelated files. See [the current installer storyboard and acceptance evidence](docs/installer-storyboard-and-song-collection-2026-10-16.md).
+The build produces `release\GluSpot-6.52-Setup-x64.exe`. It offers a dedicated installation directory and a Windows uninstall entry. Higher-version upgrades preserve settings and accounts in the sibling `GluSpot\` data directory; same/lower versions require overwrite confirmation and are rejected in silent mode. Registered installations upgrade in their original directory. The installer stops only a running executable whose resolved path matches that exact target directory; other copies are preserved. Interrupted upgrades restore the previous binaries. Full uninstall clears owned configuration, accounts and caches while preserving unrelated files. See [the current installer storyboard and acceptance evidence](docs/installer-storyboard-and-song-collection-2026-10-16.md).
 
 Fresh frozen copies keep their own data beside the executable and show first-use choices even if another copy has existing AppData settings. Source checkouts retain their established data locations. Both playback choices default on and at least one must remain selected. First use is a black expanded island, accepting the installer's final physical bounds through a checked monitor/DPI handoff. Program playback opens the existing source/login page; closing it returns to the waiting island. A verified active MyFinder bar selects Finder Bar; otherwise the initial waiting placement is Top. Existing configured installations keep their saved playback choices.
 
 The legacy Qt 5 variant always enables program playback and disables system capture, including stale saved selections. Switch local output in Windows; unsupported explicit endpoint actions are disabled in its device list. It is separate from the modern release and still requires real Win7 installation, login and playback acceptance.
 
-The `GluSpot-6.51` directory is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
+The `GluSpot-6.52` directory is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
 
 Known Windows test-build caveats:
 

@@ -96,6 +96,17 @@ class FavoriteServiceTests(unittest.TestCase):
         self.error_code(lambda: self.service.add_song_to_playlist("netease", "9", "12"), "timeout")
         self.assertEqual(self.backend.request.call_count, 2, "uncertain writes are never retried")
 
+    def test_sync_removal_dispatches_one_write_per_song_and_apple_is_refused(self):
+        self.backend.request.return_value = {"data": {"ok": True}}
+        self.assertEqual(self.service.remove_playlist_tracks("netease", "12", ("9", "10"), expected_user_id="42"), 2)
+        self.assertEqual(self.backend.request.call_args_list[0].args[:3], ("netease", "remove_song_from_playlist",
+                         {"song_id": "9", "playlist_id": "12", "user_id": "42"}))
+        self.backend.request.return_value = {"data": {"ok": False}}
+        self.error_code(lambda: self.service.remove_song_from_playlist("netease", "9", "12"), "response")
+        calls = self.backend.request.call_count
+        self.error_code(lambda: self.service.remove_playlist_tracks("apple_music", "p.1", ("1",)), "unsupported")
+        self.assertEqual(self.backend.request.call_count, calls)
+
     def test_logout_during_read_discards_late_response(self):
         entered, release = threading.Event(), threading.Event()
         def request(_source, operation, _params, _credential=None):

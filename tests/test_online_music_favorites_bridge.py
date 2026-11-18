@@ -68,6 +68,17 @@ class FavoriteBridgeTests(unittest.TestCase):
         self.assertEqual(page["playlist"][0]["creator"], {"userId": 42})
         self.assertTrue(page["more"])
 
+    def test_sync_removal_uses_the_same_owner_check_and_del(self):
+        self.files({"module/playlist_tracks.js": "module.exports=async p=>{if(p.op!=='del'||p.pid!=='12'||p.tracks!=='9')throw Error();return {body:{body:{code:200},status:200}}};"})
+        self.assertEqual(self.request("remove_song_from_playlist", song_id="9", playlist_id="12"), {"ok": True})
+
+    def test_sync_removal_from_a_foreign_playlist_never_reaches_write(self):
+        self.files({
+            "module/playlist_detail.js": "module.exports=async p=>({body:{code:200,playlist:{id:p.id,creator:{userId:99}}}});",
+            "module/playlist_tracks.js": "module.exports=async()=>{throw Error('write was reached')};",
+        })
+        self.error_code("remove_song_from_playlist", "not_writable", song_id="9", playlist_id="12")
+
     def test_account_mismatch_never_calls_like_write(self):
         self.files({"module/like.js": "module.exports=async()=>{throw Error('write was reached')};"})
         self.error_code("set_favorite", "account_changed", song_id="9", liked=True, user_id="99")

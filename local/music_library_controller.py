@@ -59,7 +59,8 @@ class MusicLibraryController(QObject):
         for name, slot in (("playlistPageRequested", self.open_playlist_page),
                            ("playlistSongRequested", self.play_from_page),
                            ("playlistAddRequested", self.add_to_playlist_from_page),
-                           ("songInsertRequested", self.insert_search_song)):
+                           ("songInsertRequested", self.insert_search_song),
+                           ("playlistSyncRequested", self.open_playlist_sync)):
             signal = getattr(self.window, name, None)
             if signal is not None:
                 signal.connect(slot)
@@ -1554,6 +1555,16 @@ class MusicLibraryController(QObject):
             return True
         if not self.tasks.submit(("page_add", epoch, playlist.key, playlist.title), add):
             self.window.set_error("暂时无法添加，请稍后再试")
+
+    def open_playlist_sync(self, collection=None):
+        """Playlist sync from the library: the list heading, or one personal playlist as the source."""
+        opener = getattr(self.entry, "open_playlist_sync", None)
+        if not callable(opener):
+            return
+        account = getattr(self.window, "_account", None)
+        source_id = getattr(account, "source_id", "")
+        playlist_id = getattr(collection, "playlist_id", "") if collection is not None else ""
+        opener(source_id if source_id in {"netease", "apple_music"} else "", playlist_id)
 
     def _player_status(self, status):
         if self._opening and status == "loading_stream":

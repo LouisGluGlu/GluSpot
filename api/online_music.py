@@ -63,6 +63,8 @@ class OnlineSong:
     introduced_song_id: str = ""
     # Apple library rows keep the catalog id for artwork and timed lyrics.
     catalog_id: str = ""
+    # Apple's public 30-second preview, used by playlist sync to listen and compare.
+    preview_url: str = field(default="", repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -867,7 +869,9 @@ class OnlineMusicService:
         if source_id == "qq" and not cover and isinstance(album.get("mid"), str) and re.fullmatch(r"[A-Za-z0-9]{1,64}", album["mid"]):
             cover = f"https://y.gtimg.cn/music/photo_new/T002R500x500M000{album['mid']}.jpg"
         catalog_id = str(item.get("catalog_id") or "")[:200] if isinstance(item.get("catalog_id"), str) else ""
-        return OnlineSong(source_id, str(song_id), str(item.get("name") or item.get("title") or item.get("songname") or item.get("SongName") or item.get("audio_name") or item.get("filename") or item.get("FileName") or ""), artist, str(album.get("name") or item.get("album_name") or item.get("AlbumName") or ""), duration, OnlineMusicService._artwork_url(cover), catalog_id=catalog_id)
+        preview = item.get("preview_url") if isinstance(item.get("preview_url"), str) else ""
+        preview = preview if preview.startswith("https://") and len(preview) <= 2000 else ""
+        return OnlineSong(source_id, str(song_id), str(item.get("name") or item.get("title") or item.get("songname") or item.get("SongName") or item.get("audio_name") or item.get("filename") or item.get("FileName") or ""), artist, str(album.get("name") or item.get("album_name") or item.get("AlbumName") or ""), duration, OnlineMusicService._artwork_url(cover), catalog_id=catalog_id, preview_url=preview)
 
     @staticmethod
     def _playlist(source_id: str, item: dict[str, Any]) -> OnlinePlaylist:
@@ -1011,6 +1015,16 @@ class OnlineMusicService:
                              expected_generation=generation)
         if data.get("ok") is not True:
             raise OnlineMusicError("response", source_id, "添加歌单操作未确认，请刷新后重试")
+
+    def remove_song_from_playlist(self, source_id: str, song_id: str, playlist_id: str, *, expected_user_id: str = "") -> None:
+        """Remove one song from an owned playlist. The bridge rechecks the creator first."""
+        song_id, playlist_id = self._favorite_id(source_id, song_id), self._favorite_id(source_id, playlist_id)
+        account, generation = self._favorite_account(source_id, expected_user_id)
+        data = self._catalog(source_id, "remove_song_from_playlist",
+                             {"song_id": song_id, "playlist_id": playlist_id, "user_id": account.user_id},
+                             expected_generation=generation)
+        if data.get("ok") is not True:
+            raise OnlineMusicError("response", source_id, "从歌单删除未确认，请刷新后重试")
 
     def create_playlist(self, source_id: str, title: str, *, expected_user_id: str = "") -> OnlinePlaylist:
         """Create one owned playlist. Ordering and deletion stay out of this call."""
@@ -1377,6 +1391,15 @@ class OnlineMusicService:
         if not isinstance(playlist_id, str) or not playlist_id.strip():
             raise OnlineMusicError("response", source_id, "歌单没有创建成功")
         return playlist_id.strip()
+
+    def remove_playlist_tracks(self, source_id: str, playlist_id: str, song_ids, *, expected_user_id: str = "") -> int:
+        """Remove songs for playlist sync. Apple Music's public interface has no removal."""
+        ids = tuple(song_ids)
+        if source_id != "netease":
+            raise OnlineMusicError("unsupported", source_id, "这个来源不允许从歌单里删歌")
+        for song_id in ids:
+            self.remove_song_from_playlist(source_id, song_id, playlist_id, expected_user_id=expected_user_id)
+        return len(ids)
 
     def append_playlist_tracks(self, source_id: str, playlist_id: str, song_ids, *, expected_user_id: str = "") -> int:
         """Add songs. This never removes an existing song."""

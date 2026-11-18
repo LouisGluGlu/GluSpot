@@ -51,6 +51,23 @@ class PlaylistPageWidgetTests(unittest.TestCase):
         else:
             QTest.mouseClick(self.page.canvas, Qt.MouseButton.LeftButton, pos=point)
 
+    def test_sync_button_only_on_own_playlists_and_emits_the_collection(self):
+        canvas = self.page.canvas
+        self.assertFalse(self.page.can_sync(), "no account platform yet")
+        self.page.sync_source = "netease"
+        self.assertTrue(self.page.can_sync())
+        self.assertGreater(canvas.sync_rect().left(), canvas.play_all_rect().right())
+        spy = QSignalSpy(self.page.syncRequested)
+        self.click(canvas.sync_rect())
+        self.assertEqual(spy.count(), 1)
+        self.assertEqual(spy.at(0)[0], self.collection)
+        recommended = LibraryCollection("playlist:netease:2", "playlist", "推荐", "", "2", group="recommended")
+        self.page.open(recommended)
+        self.assertFalse(self.page.can_sync())
+        self.page.sync_source = "qq"
+        self.page.open(self.collection)
+        self.assertFalse(self.page.can_sync())
+
     def test_header_and_every_song_row(self):
         canvas = self.page.canvas
         self.assertEqual(len(self.page.rows), 5)

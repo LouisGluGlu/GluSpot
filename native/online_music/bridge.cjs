@@ -117,7 +117,7 @@ async function ncmFavorites(state,op,p) {
   // wraps the util/request result once more. Keep writes explicit and perform
   // no automatic transport retry: a timeout may have reached the service.
   const id=op==="writable_playlists"?null:requireNcmId(p.song_id);
-  const playlist=op==="add_song_to_playlist"?requireNcmId(p.playlist_id):null;
+  const playlist=op==="add_song_to_playlist"||op==="remove_song_from_playlist"?requireNcmId(p.playlist_id):null;
   if(op==="set_favorite" && typeof p.liked!=="boolean") fail("invalid_response");
   const uid=await ncmFavoriteAccount(state,p);
   if(op==="favorite_status") {
@@ -138,11 +138,12 @@ async function ncmFavorites(state,op,p) {
     // consumes the original cursor, including subscribed rows.
     return {code:200,playlist:body.playlist.slice(0,page.limit),more:body.more===true};
   }
-  if(op==="add_song_to_playlist") {
+  if(op==="add_song_to_playlist" || op==="remove_song_from_playlist") {
     const detail=ncmSuccess(await ncmCall(state,"playlist_detail",{id:playlist,s:0}));
     const row=detail.playlist,creator=row && row.creator;
     if(!row || String(row.id)!==playlist || !creator || String(creator.userId)!==uid || row.subscribed===true) fail("not_writable");
-    const response=await ncmCall(state,"playlist_tracks",{op:"add",pid:playlist,tracks:id});
+    // Playlist sync only: one song per call, the same creator check as adding.
+    const response=await ncmCall(state,"playlist_tracks",{op:op==="add_song_to_playlist"?"add":"del",pid:playlist,tracks:id});
     const body=response.code!==undefined?response:response.body;
     ncmSuccess(body,"mutation_failed");
     return {ok:true};
@@ -429,7 +430,7 @@ async function dispatch(source,op,p,credential,context) {
     }
     if(op==="logout") { state.cookie={}; return {}; }
     if(!state.cookie.MUSIC_U) fail("auth_required");
-    if(["favorite_status","set_favorite","writable_playlists","add_song_to_playlist"].includes(op)) return await ncmFavorites(state,op,p);
+    if(["favorite_status","set_favorite","writable_playlists","add_song_to_playlist","remove_song_from_playlist"].includes(op)) return await ncmFavorites(state,op,p);
     if(op==="create_playlist") return await ncmCreatePlaylist(state,p);
     if(op==="search") {
       const params=searchInput(p),body=await ncmCall(state,"cloudsearch",{keywords:params.query,type:params.kind==="songs"?1:1000,limit:params.limit,offset:params.offset});

@@ -394,6 +394,25 @@ class LocalIslandApp:
         self.window._music_library_back_callback = self.music_library.return_from_music_surface
         self.playback_entry.login_callback = self.music_library.open_source
         self.settings_window.online_music_login_callback = self.playback_entry.show_login
+        self.settings_window.playlist_sync_callback = self.playback_entry.open_playlist_sync
+        self.playback_entry.pause_main_callback = self._pause_for_sync_audition
+        self.playback_entry.audition_output_callback = lambda: (self.owned_player.audio.device(),
+                                                                self.owned_player.audio.volume())
+        self.playback_entry.sync_notice_callback = self._playlist_sync_notice
+        self.playback_entry.compare_progress_callback = self.music_library.window.set_sync_progress
+        self.playback_entry.compare_done_callback = self._playlist_compare_done
+        from local.app_update_controller import UpdateController
+        from local.branding import APP_VERSION
+        self.updates = UpdateController(self.settings, APP_VERSION, self.app)
+        self.updates.quit_callback = self.app.quit
+        self.settings_window.update_controller = self.updates
+        self.updates.changed.connect(self.settings_window.refresh_update_state)
+        self.updates.notify.connect(self._update_notice)
+        self.app.aboutToQuit.connect(self.updates.on_quit)
+        self.settings_window.refresh_update_state()
+        self.updates.start()
+        # Pairs set to automatic sync run once, after start-up has settled.
+        QTimer.singleShot(20000, self.playback_entry.run_auto_playlist_sync)
         from local.personal_dj_voice_window import PersonalDjVoiceWindow
         self.personal_dj_voices = PersonalDjVoiceWindow(self.data_provider, self.settings_window)
         self.settings_window.personal_dj_voice_callback = self._show_personal_dj_voices
@@ -802,6 +821,39 @@ class LocalIslandApp:
             self.settings_window.sync_from_widget()
         self._sync_tray_status()
 
+    def _pause_for_sync_audition(self):
+        player = self.owned_player
+        if player.interruption_playing():
+            player.send_playback_command("toggle_play_pause")
+
+    def _playlist_compare_done(self, text: str):
+        """Audio check finished: a chime, a tray note, and the library key back to normal."""
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except (ImportError, RuntimeError):
+            QApplication.beep()
+        self._playlist_sync_notice(text)
+
+    def _update_notice(self, text: str):
+        tray = getattr(self, "tray", None)
+        if tray is None or not text:
+            return
+        self._tray_notice_kind = "update"
+        tray.showMessage("软件更新", text, QSystemTrayIcon.MessageIcon.Information, 8000)
+
+    def _tray_message_clicked(self):
+        if getattr(self, "_tray_notice_kind", "") == "update":
+            self.show_settings()
+            self.settings_window.show_update_section()
+        self._tray_notice_kind = ""
+
+    def _playlist_sync_notice(self, text: str):
+        tray = getattr(self, "tray", None)
+        if tray is not None and text:
+            self._tray_notice_kind = "sync"
+            tray.showMessage("歌单同步", text, QSystemTrayIcon.MessageIcon.Information, 6000)
+
     def _setup_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
@@ -811,6 +863,7 @@ class LocalIslandApp:
         if self.tray.icon().isNull():
             self.tray.setIcon(self.app.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
         self.tray.setToolTip(APP_NAME)
+        self.tray.messageClicked.connect(self._tray_message_clicked)
 
         menu = QMenu()
 
