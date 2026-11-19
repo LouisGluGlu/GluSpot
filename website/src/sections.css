@@ -14,9 +14,9 @@
 .highlight-card { overflow: hidden; border-radius: 32px; border: 1px solid var(--line); padding: clamp(28px, 5vw, 64px) clamp(16px, 4vw, 48px) 22px; text-align: center;
   background: radial-gradient(80% 120% at 50% 0%, #2a2118, #0d0e10 70%); }
 .highlight-media { position: relative; width: min(100%, 960px); aspect-ratio: 960 / 300; margin-inline: auto; }
-.highlight-media img, .highlight-media video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-.highlight-media video { opacity: 0; }
-.highlight-media.on video { opacity: 1; }
+.highlight-media img, .highlight-media .alpha, .highlight-media .alpha-source { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.highlight-media .alpha, .highlight-media .alpha-source { opacity: 0; }
+.highlight-media.on .alpha { opacity: 1; }
 .highlight-media.on img { opacity: 0; }
 .highlight-card figcaption { margin-top: 10px; color: var(--ink-3); font-size: 13px; }
 .lyric-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); gap: clamp(20px, 3vw, 44px); align-items: center; margin-top: clamp(20px, 3vw, 44px); }

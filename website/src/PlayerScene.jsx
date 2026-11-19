@@ -3,6 +3,7 @@ import { ArrowsInSimple, CornersOut, Disc, MusicNotes, Pause, Play, Queue, SkipB
 import { ASSET, SONGS, coverAlt } from "./data.js";
 import { DesktopBackdrop } from "./IslandScene.jsx";
 import { useAutoVideo, usePinnedScene } from "./lib/motion.js";
+import { AlphaVideo } from "./AlphaVideo.jsx";
 import { SCENE_HOLD, SCENE_TRANSITION, getTimedPhase, phaseCenter, smoothstep } from "./storyTimeline.js";
 
 const VIEWS = [
@@ -33,15 +34,14 @@ export function Ambience({ songIndex, motion = true }) {
   </div>;
 }
 
-/** Production lyric painter export (alpha video over a still). */
+/** Production lyric painter export (alpha video over a still; see AlphaVideo for Safari). */
 export function LyricMedia({ song, translated, playing = true, motion = true }) {
   const name = `${song.tone}-${translated ? "translated" : "original"}`;
   const video = useAutoVideo(playing && motion, name);
   if (!song.lyrics) return <div className="lyric-plain"><strong>{song.title}</strong><span>{song.artist}</span><small>此曲演示不展示歌词</small></div>;
   return <div className="lyric-media">
     <img src={`${ASSET}lyrics/${name}.png`} alt={`${song.title} 逐字歌词${translated ? "与译文" : ""}演示画面`} width="480" height="480" loading="lazy" decoding="async" />
-    <video key={name} ref={video.ref} className={video.ready && motion ? "on" : ""} src={`${ASSET}lyrics/${name}.webm`} muted loop playsInline preload="none" aria-hidden="true"
-      onLoadedData={() => video.setReady(true)} onError={() => video.setReady(false)} />
+    <AlphaVideo base={`${ASSET}lyrics/${name}`} video={video} on={video.ready && motion} />
   </div>;
 }
 

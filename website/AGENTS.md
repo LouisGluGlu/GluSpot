@@ -13,6 +13,7 @@ This section supersedes every earlier note below wherever they conflict (wheel i
 - The display font is a glyph subset. Use it only for the wordmark, the hero headline and the download headline; other headings use the system stack.
 - Truthfulness: island, lyric, highlight and DJ media are production exports. The sea-level panel and the glass panel are labelled web illustrations (cover-sampled colour pairs in `data.js`, a fixed demo beat); do not present them as app captures. External players are described as "外部播放器 / 系统媒体" with no platform names. Airport Bar shows no lyrics. Library search and progress sync are labelled demos over the three showcase songs.
 - Breakpoints checked: 390×844, 820×1180, 1180×820, 1440×900, 1920×1080. Below 1024 px the island scene stacks; below 640 px the taskbar icons sit right so the island keeps its gap.
+- Safari and every iOS browser drop WebM alpha (transparent areas turn black, blurred lines become solid blocks). Lyric and highlight loops go through `src/AlphaVideo.jsx`: Chromium keeps the alpha WebM; everything else plays `<name>-packed.mp4` (premultiplied colour on top, alpha below, made by `tools/pack_alpha_video.sh`) composited in WebGL, with the PNG still until the first frame. `?alpha=packed` / `?alpha=webm` forces a path. Re-run the pack script whenever a WebM is re-exported.
 - No new npm dependencies. The dev port 5173 can fall inside a Windows excluded port range; use another port (5273 was used) if `listen EACCES` appears.
 
 ## 2026-11-15 6.50 refresh (superseded by the rebuild above)

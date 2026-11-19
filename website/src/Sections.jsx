@@ -6,6 +6,7 @@ import {
 } from "@phosphor-icons/react";
 import { ASSET, SONGS } from "./data.js";
 import { Ambience, Cover, LyricMedia } from "./PlayerScene.jsx";
+import { AlphaVideo } from "./AlphaVideo.jsx";
 import { onFrame, useAutoVideo, useInView, useMagnetic } from "./lib/motion.js";
 
 function Head({ eyebrow, title, id, children, align = "center" }) {
@@ -86,8 +87,7 @@ export function Lyrics({ motion }) {
       <figure className="highlight-card spot" data-rv>
         <div className={`highlight-media${highlight.ready && motion ? " on" : ""}`}>
           <img src={`${ASSET}highlight/music-highlight.png`} alt="音乐高光，感知清晰！" width="960" height="300" loading="lazy" decoding="async" />
-          <video ref={highlight.ref} src={`${ASSET}highlight/music-highlight.webm`} muted loop playsInline preload="none" aria-hidden="true"
-            onLoadedData={() => highlight.setReady(true)} onError={() => highlight.setReady(false)} />
+          <AlphaVideo base={`${ASSET}highlight/music-highlight`} video={highlight} on={highlight.ready && motion} />
         </div>
         <figcaption>原生逐字高光 · 静音演示，文字时钟为单独编写</figcaption>
       </figure>
